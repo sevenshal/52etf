@@ -408,19 +408,15 @@ const AIStock = () => {
   const [paperConfigOpen, setPaperConfigOpen] = useState(false);
   const [savingPaperConfig, setSavingPaperConfig] = useState(false);
   const [paperEnabled, setPaperEnabled] = useState(true);
-  const [paperMaxPositions, setPaperMaxPositions] = useState(10);
-  const [paperSlotCount, setPaperSlotCount] = useState(5);
-  const [paperSingleStockCap, setPaperSingleStockCap] = useState(0.2);
-  const [paperMaxExecutionTarget, setPaperMaxExecutionTarget] = useState(0.9);
-  const [paperEntryPriceCapPct, setPaperEntryPriceCapPct] = useState(1.0);
-  const [paperStopLossHalfPct, setPaperStopLossHalfPct] = useState(-8.0);
+  const [paperTopPositions, setPaperTopPositions] = useState(3);
+  const [paperBottomPositions, setPaperBottomPositions] = useState(10);
+  const [paperBuyTopN, setPaperBuyTopN] = useState(3);
+  const [paperBuyMinConfidence, setPaperBuyMinConfidence] = useState(75);
+  const [paperPositionPct, setPaperPositionPct] = useState(0.1);
   const [paperStopLossFullPct, setPaperStopLossFullPct] = useState(-12.0);
   const [paperTradingStartMinute, setPaperTradingStartMinute] = useState(585);
   const [paperHoldEvalEnabled, setPaperHoldEvalEnabled] = useState(false);
-  const [paperHoldSellThreshold, setPaperHoldSellThreshold] = useState(30);
-  const [paperMaxBuysPerDay, setPaperMaxBuysPerDay] = useState(3);
-  const [paperRotationConfidenceGap, setPaperRotationConfidenceGap] = useState(20.0);
-  const [paperRotationStaleDays, setPaperRotationStaleDays] = useState(3);
+  const [positionControl, setPositionControl] = useState(null);
   const [todayPage, setTodayPage] = useState(1);
 
   // 实时行情：订阅 tick 推送 + 通过长连接注册当前展示代码（断线自动清理、重连自动重注册）
@@ -454,6 +450,7 @@ const AIStock = () => {
         ['paperConfig', request.get('/api/ai-stock/paper/config')],
       ] : []),
       ['holdEvals', request.get('/api/ai-stock/paper/hold-evaluations')],
+      ['positionControl', request.get('/api/ai-stock/paper/position-control')],
       ['paperStats', request.get('/api/ai-stock/paper/statistics')],
       ['hitRate', request.get('/api/ai-stock/recommendations/hit-rate')],
       ['fearGreedRef', request.get('/api/ai-stock/fear-greed-reference')],
@@ -475,6 +472,7 @@ const AIStock = () => {
     setSettings(data.settings);
     setPaperConfig(data.paperConfig);
     setHoldEvals(data.holdEvals || []);
+    setPositionControl(data.positionControl || null);
     setPaperStats(data.paperStats || null);
     setHitRate(data.hitRate || null);
     setFearGreedRef(data.fearGreedRef || []);
@@ -578,19 +576,14 @@ const AIStock = () => {
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
     setPaperEnabled(paperConfig?.enabled ?? true);
-    setPaperMaxPositions(p.max_positions ?? 10);
-    setPaperSlotCount(p.slot_count ?? 5);
-    setPaperSingleStockCap(p.single_stock_cap ?? 0.2);
-    setPaperMaxExecutionTarget(p.max_execution_target ?? 0.9);
-    setPaperEntryPriceCapPct(p.entry_price_cap_pct ?? 1.0);
-    setPaperStopLossHalfPct(p.stop_loss_half_pct ?? -8.0);
+    setPaperTopPositions(p.top_positions ?? 3);
+    setPaperBottomPositions(p.bottom_positions ?? 10);
+    setPaperBuyTopN(p.buy_top_n ?? 3);
+    setPaperBuyMinConfidence(p.buy_min_confidence ?? 75);
+    setPaperPositionPct(p.position_pct ?? 0.1);
     setPaperStopLossFullPct(p.stop_loss_full_pct ?? -12.0);
     setPaperTradingStartMinute(p.trading_start_minute ?? 585);
     setPaperHoldEvalEnabled(p.hold_evaluation_enabled ?? false);
-    setPaperHoldSellThreshold(p.hold_sell_threshold ?? 30);
-    setPaperMaxBuysPerDay(p.max_buys_per_day ?? 3);
-    setPaperRotationConfidenceGap(p.rotation_confidence_gap ?? 20.0);
-    setPaperRotationStaleDays(p.rotation_stale_days ?? 3);
     setPaperConfigOpen(true);
   }, [paperConfig]);
 
@@ -599,19 +592,14 @@ const AIStock = () => {
     try {
       const payload = {
         enabled: paperEnabled,
-        max_positions: paperMaxPositions,
-        slot_count: paperSlotCount,
-        single_stock_cap: paperSingleStockCap,
-        max_execution_target: paperMaxExecutionTarget,
-        entry_price_cap_pct: paperEntryPriceCapPct,
-        stop_loss_half_pct: paperStopLossHalfPct,
+        top_positions: paperTopPositions,
+        bottom_positions: paperBottomPositions,
+        buy_top_n: paperBuyTopN,
+        buy_min_confidence: paperBuyMinConfidence,
+        position_pct: paperPositionPct,
         stop_loss_full_pct: paperStopLossFullPct,
         trading_start_minute: paperTradingStartMinute,
         hold_evaluation_enabled: paperHoldEvalEnabled,
-        hold_sell_threshold: paperHoldSellThreshold,
-        max_buys_per_day: paperMaxBuysPerDay,
-        rotation_confidence_gap: paperRotationConfidenceGap,
-        rotation_stale_days: paperRotationStaleDays,
       };
       const response = await request.put('/api/ai-stock/paper/config', payload);
       setPaperConfig(response.data);
@@ -622,7 +610,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperMaxPositions, paperSlotCount, paperSingleStockCap, paperMaxExecutionTarget, paperEntryPriceCapPct, paperStopLossHalfPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperHoldSellThreshold, paperMaxBuysPerDay, paperRotationConfidenceGap, paperRotationStaleDays]);
+  }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -669,13 +657,13 @@ const AIStock = () => {
     { title: '目标价', dataIndex: 'target_price', width: 90, align: 'right', render: money },
     { title: '持有天数', dataIndex: 'held_days', width: 95, align: 'right' },
     {
-      title: 'AI 评分', key: 'hold_score', width: 95, align: 'right',
+      title: 'AI 建议', key: 'hold_advice', width: 95, align: 'center',
       render: (_, row) => {
         const ev = latestHoldEval[row.ts_code];
         if (!ev) return <Text type="secondary">-</Text>;
         return (
           <Tooltip title={`${dateTime(ev.evaluated_at)} ${ev.reason || ''}`}>
-            <Text>{Number(ev.hold_score).toFixed(0)}</Text>
+            <Tag color={ev.action === '卖出' ? 'red' : 'green'}>{ev.action}</Tag>
           </Tooltip>
         );
       },
@@ -798,11 +786,36 @@ const AIStock = () => {
     </Space>
   );
 
+  const holdAdviceColumns = [
+    { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><XueqiuStockLink symbol={row.ts_code}>{row.ts_code}</XueqiuStockLink></Space> },
+    { title: '建议', dataIndex: 'action', width: 84, align: 'center', render: value => <Tag color={value === '卖出' ? 'red' : 'green'}>{value}</Tag> },
+    { title: '现价', dataIndex: 'price', width: 90, align: 'right', render: value => (value === null || value === undefined ? '-' : money(value)) },
+    { title: '盈亏', dataIndex: 'pnl_pct', width: 90, align: 'right', render: value => (value === null || value === undefined ? '-' : <Text className={valueClass(value)}>{percent(value)}</Text>) },
+    { title: '理由', dataIndex: 'reason', ellipsis: true },
+    { title: '评估时间', dataIndex: 'evaluated_at', width: 150, render: dateTime },
+  ];
+
+  const holdAdviceContent = (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Alert
+        type="info"
+        showIcon
+        message={positionControl
+          ? `中证全指贪恐信号：${positionControl.signal || '无（默认按顶处理）'}${positionControl.date ? `（${positionControl.date}）` : ''} · 当前最大持仓数 ${positionControl.max_positions}（顶 ${positionControl.top_positions} / 底 ${positionControl.bottom_positions}）`
+          : '仓位控制信号加载中…'}
+      />
+      <Alert type="warning" showIcon message="AI 根据最新新闻与雪球活跃组合方向直接给出卖/持建议；建议「卖出」的持仓待缠论 1 分钟一卖信号确认后离场。" />
+      <Card className="ai-stock-card" title="AI 持仓建议（最近一轮）">
+        <Table className="ai-stock-table" columns={holdAdviceColumns} dataSource={holdEvals} rowKey="id" size="small" pagination={{ pageSize: 20 }} scroll={{ x: 820 }} />
+      </Card>
+    </Space>
+  );
+
   return (
     <div className="ai-stock-page">
       <div className="ai-stock-heading"><div><Title level={3}>AI荐股</Title><Text type="secondary">AI 选股、历史复盘与自动模拟盘</Text></div></div>
       <Spin spinning={loading}>
-        <Tabs items={[{ key: 'recommendations', label: 'AI 推荐', children: recommendationContent }, { key: 'today', label: '今日推荐', children: todayContent }, { key: 'history', label: '历史推荐', children: historyContent }, { key: 'paper', label: '模拟盘交易', children: paperContent }]} />
+        <Tabs items={[{ key: 'recommendations', label: 'AI 推荐', children: recommendationContent }, { key: 'today', label: '今日推荐', children: todayContent }, { key: 'history', label: '历史推荐', children: historyContent }, { key: 'paper', label: '模拟盘交易', children: paperContent }, { key: 'hold-advice', label: '持仓建议', children: holdAdviceContent }]} />
       </Spin>
       <Modal
         title="AI 荐股配置"
@@ -887,31 +900,23 @@ const AIStock = () => {
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Text type="secondary">控制自动模拟盘的买入/卖出行为，改动立即对下一个交易分钟生效。</Text>
           <Switch checked={paperEnabled} onChange={setPaperEnabled} checkedChildren="启用" unCheckedChildren="停用" />
-          <Divider style={{ margin: '4px 0' }}>买入</Divider>
+          <Divider style={{ margin: '4px 0' }}>买入（缠论 1 分钟一买触发，每笔固定仓位）</Divider>
           <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最大持仓数</Text><Input type="number" value={paperMaxPositions} onChange={e => setPaperMaxPositions(Number(e.target.value) || 1)} min={1} step={1} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>仓位槽位数</Text><Input type="number" value={paperSlotCount} onChange={e => setPaperSlotCount(Number(e.target.value) || 1)} min={1} step={1} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>单股上限(比例)</Text><Input type="number" value={paperSingleStockCap} onChange={e => setPaperSingleStockCap(Number(e.target.value) || 0)} min={0} max={1} step={0.05} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>监控买入数量</Text><Input type="number" value={paperBuyTopN} onChange={e => setPaperBuyTopN(Number(e.target.value) || 1)} min={1} max={50} step={1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最低信心分</Text><Input type="number" value={paperBuyMinConfidence} onChange={e => setPaperBuyMinConfidence(Number(e.target.value) || 0)} min={0} max={100} step={1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>单笔仓位比例</Text><Input type="number" value={paperPositionPct} onChange={e => setPaperPositionPct(Number(e.target.value) || 0)} min={0.01} max={1} step={0.01} /></Col>
           </Row>
           <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最大总仓位(比例)</Text><Input type="number" value={paperMaxExecutionTarget} onChange={e => setPaperMaxExecutionTarget(Number(e.target.value) || 0)} min={0} max={1} step={0.05} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>追高上限(%)</Text><Input type="number" value={paperEntryPriceCapPct} onChange={e => setPaperEntryPriceCapPct(Number(e.target.value) || 0)} min={0} step={0.1} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>单日买入上限(次)</Text><Input type="number" value={paperMaxBuysPerDay} onChange={e => setPaperMaxBuysPerDay(Number(e.target.value) || 1)} min={1} step={1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>顶持仓数（中证全指顶信号）</Text><Input type="number" value={paperTopPositions} onChange={e => setPaperTopPositions(Number(e.target.value) || 1)} min={1} max={100} step={1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>底持仓数（中证全指底信号）</Text><Input type="number" value={paperBottomPositions} onChange={e => setPaperBottomPositions(Number(e.target.value) || 1)} min={1} max={100} step={1} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
           </Row>
           <Divider style={{ margin: '4px 0' }}>卖出</Divider>
           <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>半仓止损线(%)</Text><Input type="number" value={paperStopLossHalfPct} onChange={e => setPaperStopLossHalfPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>全仓止损线(%)</Text><Input type="number" value={paperStopLossFullPct} onChange={e => setPaperStopLossFullPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 持仓建议</Text><Switch checked={paperHoldEvalEnabled} onChange={setPaperHoldEvalEnabled} /></Col>
           </Row>
-          <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>换仓信心差(0-100)</Text><Input type="number" value={paperRotationConfidenceGap} onChange={e => setPaperRotationConfidenceGap(Number(e.target.value) || 0)} min={0} max={100} disabled={!paperHoldEvalEnabled} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>换仓未推荐天数</Text><Input type="number" value={paperRotationStaleDays} onChange={e => setPaperRotationStaleDays(Number(e.target.value) || 1)} min={1} step={1} /></Col>
-          </Row>
-          <Row gutter={12}>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 持仓评估</Text><Switch checked={paperHoldEvalEnabled} onChange={setPaperHoldEvalEnabled} /></Col>
-            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 卖出阈值(0-100)</Text><Input type="number" value={paperHoldSellThreshold} onChange={e => setPaperHoldSellThreshold(Number(e.target.value) || 30)} min={0} max={100} disabled={!paperHoldEvalEnabled} /></Col>
-          </Row>
+          <Text type="secondary" style={{ fontSize: 12 }}>被 AI 建议「卖出」的持仓，待缠论 1 分钟一卖信号确认后离场。</Text>
         </Space>
       </Modal>
     </div>

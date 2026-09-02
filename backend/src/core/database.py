@@ -715,11 +715,13 @@ class AIStockPaperEquity(Base):
 
 
 class AIStockHoldEvaluation(Base):
-    """AI hold_score for a current paper position (low score = sell bias).
+    """AI sell/hold advice for a current paper position.
 
     Written once per recommendation batch when the paper portfolio has open
-    lots; process_minute reads the latest evaluation and may use it as one
-    sell trigger (AI_SIGNAL) alongside the hard price rules.
+    lots.  ``advice`` ("卖出"/"持有") is the authoritative field; ``hold_score``
+    is kept as a derived legacy value (卖出 -> 0.0, 持有 -> 100.0).  A position
+    advised "卖出" is exited by process_minute once a Chan 1-minute 一卖 signal
+    confirms, alongside the hard price rules.
     """
     __tablename__ = "ai_stock_hold_evaluations"
 
@@ -729,6 +731,7 @@ class AIStockHoldEvaluation(Base):
     ts_code = Column(String(16), nullable=False, index=True)
     name = Column(String(64), nullable=False)
     hold_score = Column(Float, nullable=False)
+    advice = Column(String(8))
     reason = Column(Text)
     evaluated_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
@@ -1735,6 +1738,9 @@ def ensure_table_columns():
         "ai_stock_paper_lots": {
             "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",
             "peak_price": "ALTER TABLE ai_stock_paper_lots ADD COLUMN peak_price FLOAT",
+        },
+        "ai_stock_hold_evaluations": {
+            "advice": "ALTER TABLE ai_stock_hold_evaluations ADD COLUMN advice VARCHAR(8)",
         },
         "xueqiu_strategy_configs": {
             "fear_target_count": "ALTER TABLE xueqiu_strategy_configs ADD COLUMN fear_target_count INTEGER NOT NULL DEFAULT 10",

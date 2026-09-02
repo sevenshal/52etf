@@ -902,30 +902,50 @@ class _StaticQuoteProvider:
     def quotes(self, symbols):
         return {symbol: {"price": self.price} for symbol in symbols}
 
-    def minute_entry_confirmed(self, _symbol):
-        return True, {"confirmed": True}
-
 
 class _CapturingPaperService(AIStockPaperTradingService):
-    def __init__(self, state, price):
+    def __init__(self, state, price, candidates=None):
         super().__init__(provider=_StaticQuoteProvider(price))
         self.state = state
+        self._candidates = list(candidates or [])
         self.captured_plans = None
 
     def _snapshot(self, _snapshot_date):
         return self.state
 
-    def _commit_minute(self, _timestamp, _minute_key, _fear_greed, _execution_target, _quotes, plans):
+    def _today_recommendations(self):
+        return list(self._candidates)
+
+    def _commit_minute(self, _timestamp, _minute_key, _fear_greed, _quotes, plans):
         self.captured_plans = plans
         return {"processed": True, "trades": []}
 
 
-def _paper_state(lot):
+def _paper_state(lot=None, hold_advice=None, **params):
+    sp = {
+        "top_positions": 3, "bottom_positions": 10, "buy_top_n": 3,
+        "buy_min_confidence": 75.0, "position_pct": 0.10,
+        "stop_loss_full_pct": -12.0, "trading_start_minute": 585,
+        "hold_evaluation_enabled": True,
+    }
+    sp.update(params)
     return {
-        "portfolio": {"id": 1, "enabled": True, "cash": 100_000, "last_processed_minute": None, "last_execution_target": None},
-        "lots": [lot],
-        "recommendations": [],
+        "portfolio": {
+            "id": 1, "enabled": True, "cash": 100_000, "last_processed_minute": None,
+            "strategy_enabled": True, "strategy_params": sp,
+        },
+        "lots": [lot] if lot else [],
         "today_buys": set(),
+        "hold_advice": hold_advice or {},
+    }
+
+
+def _lot(ts_code="600000.SH", *, bought_at=datetime(2026, 8, 10, 10, 0), buy_price=100.0,
+         remaining_quantity=1000, target_price=120.0, peak_price=None):
+    return {
+        "id": 1, "recommendation_id": 1, "ts_code": ts_code, "name": "测试股",
+        "bought_at": bought_at, "buy_price": buy_price, "remaining_quantity": remaining_quantity,
+        "target_price": target_price, "peak_price": peak_price if peak_price is not None else buy_price,
     }
 
 
@@ -947,187 +967,199 @@ def _recommendation(ts_code, rank=1, confidence=80.0, rec_price=10.0):
     }
 
 
-def test_paper_max_buys_per_day_caps_entries():
-    state = {
-        "portfolio": {"id": 1, "enabled": True, "cash": 100_000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_buys_per_day": 1, "slot_count": 5, "max_positions": 5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "single_stock_cap": 0.2}},
-        "lots": [],
-        "recommendations": [_recommendation("600000.SH", 1), _recommendation("000001.SZ", 2)],
-        "today_buys": set(),
-        "today_buy_count": 0,
-        "hold_scores": {},
-    }
-    service = _CapturingPaperService(state, price=10.0)
-    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-    buys = [plan for plan in service.captured_plans if plan.side == "BUY"]
-    assert len(buys) == 1
-    assert buys[0].ts_code == "600000.SH"
-
-
-def test_paper_trailing_take_profit_sells_on_ma10_break(monkeypatch):
-    # 移动止盈（参考系统那种）：目标价已触及 + 现价跌破 MA10 + 当日未获再推荐
+@pytest.fixture
+def _paper_patches(monkeypatch):
+    """Neutralise external deps of process_minute: 顶/底 = 无信号, MA10 none, no chan signals."""
     from src.core.services import ai_stock as ai_stock_module
 
-    lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "测试股",
-        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 100.0,
-        "remaining_quantity": 1000, "target_price": 120.0, "stop_half_triggered": False,
-        "peak_price": 121.0,  # 曾触及目标价
-    }
-    state = _paper_state(lot)
-    state["last_recommended_dates"] = {"600000.SH": datetime(2026, 8, 10).date()}  # 昨日推荐，今日未再推荐
-    monkeypatch.setattr(ai_stock_module, "_ma10_by_symbol", lambda codes, as_of: {"600000.SH": 118.0})
-    service = _CapturingPaperService(state, price=113.0)  # 现价 113 < MA10 118
+    monkeypatch.setattr(ai_stock_module, "csi_all_share_top_bottom", lambda *a, **k: {"signal": None, "regime": None, "date": None})
+    monkeypatch.setattr(ai_stock_module, "_ma10_by_symbol", lambda codes, as_of: {})
+    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (False, {"reason": "test"}))
+    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "first_sell_confirmed", lambda *a, **k: (False, {"reason": "test"}))
+    return ai_stock_module
+
+
+def test_resolve_max_positions_maps_top_bottom_to_configured_counts():
+    from src.core.services.ai_stock import _resolve_max_positions
+
+    params = {"top_positions": 3, "bottom_positions": 10}
+    assert _resolve_max_positions({"signal": "顶"}, params) == 3
+    assert _resolve_max_positions({"signal": "底"}, params) == 10
+    assert _resolve_max_positions({"signal": None}, params) == 3  # 无信号 → 顶（保守）
+    assert _resolve_max_positions(None, params) == 3
+
+
+def test_paper_buys_top_confidence_candidate_only_on_first_buy_signal(_paper_patches, monkeypatch):
+    monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (True, {"signal": "一买"}))
+    candidates = [
+        _recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0),
+        _recommendation("600000.SH", 2, confidence=60.0, rec_price=10.0),  # < 75 → filtered
+    ]
+    service = _CapturingPaperService(_paper_state(), price=10.0, candidates=candidates)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    buys = [p for p in service.captured_plans if p.side == "BUY"]
+    assert [(b.ts_code, b.reason_code) for b in buys] == [("000001.SZ", "AI_FIRST_BUY_ENTRY")]
+    # 固定 10% 仓位：总权益 100000 × 0.10 / 10 元 = 1000 股
+    assert buys[0].quantity == 1000
+
+
+def test_paper_skips_buy_without_first_buy_signal(_paper_patches):
+    candidates = [_recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0)]
+    service = _CapturingPaperService(_paper_state(), price=10.0, candidates=candidates)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [p for p in service.captured_plans if p.side == "BUY"] == []
+
+
+def test_paper_max_positions_from_top_signal_caps_entries(_paper_patches, monkeypatch):
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (True, {}))
+    held = _lot("600000.SH", buy_price=10.0, target_price=99.0)  # far from target, no exit
+    # 顶 → top_positions=1；已有 1 只持仓即到上限，新候选不买
+    monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "顶"})
+    state = _paper_state(held, top_positions=1)
+    candidates = [_recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0)]
+    service = _CapturingPaperService(state, price=10.0, candidates=candidates)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [p for p in service.captured_plans if p.side == "BUY"] == []
+
+    # 底 → bottom_positions=2：留有 1 个空位，可买 1 只
+    monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
+    state2 = _paper_state(held, bottom_positions=2)
+    service2 = _CapturingPaperService(state2, price=10.0, candidates=candidates)
+    service2.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [b.ts_code for b in service2.captured_plans if b.side == "BUY"] == ["000001.SZ"]
+
+
+def test_paper_ai_advice_first_sell_requires_chan_confirmation(_paper_patches, monkeypatch):
+    held = _lot("600000.SH", buy_price=100.0, target_price=120.0)
+    advice = {"600000.SH": {"action": "卖出", "reason": "板块转弱"}}
+
+    # 无一卖信号：不卖
+    service = _CapturingPaperService(_paper_state(held, hold_advice=advice), price=105.0)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert service.captured_plans == []
+
+    # 一卖确认：卖出
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_sell_confirmed", lambda *a, **k: (True, {"signal": "一卖"}))
+    service2 = _CapturingPaperService(_paper_state(held, hold_advice=advice), price=105.0)
+    service2.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.quantity, p.reason_code) for p in service2.captured_plans] == [("SELL", 1000, "AI_ADVICE_FIRST_SELL")]
+    assert "板块转弱" in service2.captured_plans[0].reason
+
+
+def test_paper_hard_sell_rules_are_immediate(_paper_patches):
+    # 全仓止损：现价 87 → -13% <= -12%
+    stop = _CapturingPaperService(_paper_state(_lot(buy_price=100.0, target_price=120.0)), price=87.0)
+    stop.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.reason_code) for p in stop.captured_plans] == [("SELL", "STOP_LOSS_FULL")]
+
+    # 触目标价立即止盈
+    tp = _CapturingPaperService(_paper_state(_lot(buy_price=100.0, target_price=120.0)), price=121.0)
+    tp.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.reason_code) for p in tp.captured_plans] == [("SELL", "TARGET_PROFIT")]
+
+    # 持有满 30 天
+    old = _CapturingPaperService(_paper_state(_lot(bought_at=datetime(2026, 7, 1, 10, 0), buy_price=100.0, target_price=120.0)), price=105.0)
+    old.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.reason_code) for p in old.captured_plans] == [("SELL", "MAX_HOLD_DAYS")]
+
+
+def test_paper_trailing_take_profit_sells_on_ma10_break(_paper_patches, monkeypatch):
+    # 移动止盈：目标价已触及（peak≥target）+ 现价跌破 MA10
+    monkeypatch.setattr(_paper_patches, "_ma10_by_symbol", lambda codes, as_of: {"600000.SH": 118.0})
+    lot = _lot("600000.SH", buy_price=100.0, target_price=120.0, peak_price=121.0)
+    service = _CapturingPaperService(_paper_state(lot), price=113.0)  # 113 < MA10 118
     service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
     assert [(p.side, p.quantity, p.reason_code) for p in service.captured_plans] == [("SELL", 1000, "TRAILING_STOP")]
 
 
-def test_paper_rotation_sells_low_score_and_buys_high_confidence():
-    held_lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
-        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 10.0,
-        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
-        "peak_price": 10.0,
-    }
-    state = {
-        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "hold_evaluation_enabled": True, "rotation_confidence_gap": 20.0}},
-        "lots": [held_lot],
-        "recommendations": [_recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0)],
-        "today_buys": set(),
-        "today_buy_count": 0,
-        "hold_scores": {"600000.SH": {"hold_score": 40.0, "reason": "走弱"}},
-        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 11, 9, 0).date()},
-    }
-    service = _CapturingPaperService(state, price=10.0)
+def test_paper_t_plus_one_blocks_same_day_sell(_paper_patches):
+    same_day = _lot(bought_at=datetime(2026, 8, 11, 9, 40), buy_price=100.0, target_price=108.0)
+    service = _CapturingPaperService(_paper_state(same_day), price=80.0)
     service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-    sells = [p for p in service.captured_plans if p.side == "SELL"]
-    buys = [p for p in service.captured_plans if p.side == "BUY"]
-    assert [(s.reason_code, s.quantity) for s in sells] == [("ROTATION_OUT", 1000)]
-    assert [b.ts_code for b in buys] == ["000001.SZ"]
-
-
-def test_paper_rotation_sells_stale_position_without_hold_score(monkeypatch):
-    # 信号1：持仓多日未获再推荐（无需 hold_score/持仓评估）→ 轮换让位
-    held_lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
-        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 10.0,
-        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
-        "peak_price": 10.0,
-    }
-    state = {
-        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "rotation_stale_days": 3}},
-        "lots": [held_lot],
-        "recommendations": [_recommendation("000001.SZ", 1, confidence=70.0, rec_price=10.0)],
-        "today_buys": set(),
-        "today_buy_count": 0,
-        "hold_scores": {},
-        "last_recommended_dates": {"600000.SH": datetime(2026, 7, 20).date()},
-    }
-    from src.core.services import ai_stock as ai_stock_module
-    monkeypatch.setattr(ai_stock_module, "_a_stock_trading_days_elapsed", lambda _start, _end: 10)
-    service = _CapturingPaperService(state, price=10.0)
-    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-    sells = [p for p in service.captured_plans if p.side == "SELL"]
-    buys = [p for p in service.captured_plans if p.side == "BUY"]
-    assert [(s.reason_code, s.quantity) for s in sells] == [("ROTATION_OUT", 1000)]
-    assert "未获再推荐" in sells[0].reason
-    assert [b.ts_code for b in buys] == ["000001.SZ"]
-
-
-def test_paper_rotation_stale_days_exclude_weekend(monkeypatch):
-    held_lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
-        "bought_at": datetime(2026, 8, 20, 10, 0), "buy_price": 10.0,
-        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
-        "peak_price": 10.0,
-    }
-    state = {
-        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "rotation_stale_days": 3}},
-        "lots": [held_lot],
-        "recommendations": [_recommendation("000001.SZ", 1, confidence=70.0, rec_price=10.0)],
-        "today_buys": set(),
-        "today_buy_count": 0,
-        "hold_scores": {},
-        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 21).date()},
-    }
-    from src.core.services import ai_stock as ai_stock_module
-    calls = []
-    monkeypatch.setattr(
-        ai_stock_module,
-        "_a_stock_trading_days_elapsed",
-        lambda start, end: calls.append((start, end)) or 1,
-    )
-    service = _CapturingPaperService(state, price=10.0)
-    service.process_minute(now=datetime(2026, 8, 24, 10, 0), fear_greed=50)
-    assert calls == [(datetime(2026, 8, 21).date(), datetime(2026, 8, 24).date())]
     assert service.captured_plans == []
 
 
-def test_a_stock_trading_days_elapsed_uses_exchange_calendar(monkeypatch):
+def test_csi_all_share_top_bottom_caches_for_12h(monkeypatch):
     from src.core.services import ai_stock as ai_stock_module
 
-    tushare = mock.Mock()
-    tushare.get_trade_calendar_frame.return_value = pd.DataFrame(
-        [
-            {"cal_date": datetime(2026, 8, 22).date(), "is_open": 0},
-            {"cal_date": datetime(2026, 8, 23).date(), "is_open": 0},
-            {"cal_date": datetime(2026, 8, 24).date(), "is_open": 1},
-        ]
+    ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
+    calls = []
+    monkeypatch.setattr(
+        ai_stock_module,
+        "_compute_csi_all_share_top_bottom",
+        lambda now, params: calls.append(now) or {"signal": "底", "regime": "ma5_bottom", "date": "2026-08-10", "max_positions": 10, "as_of": now.date().isoformat()},
     )
-    monkeypatch.setattr(ai_stock_module.TushareService, "get_instance", lambda: tushare)
+    first = ai_stock_module.csi_all_share_top_bottom(datetime(2026, 8, 11, 10, 0))
+    second = ai_stock_module.csi_all_share_top_bottom(datetime(2026, 8, 11, 14, 0))
+    assert first["signal"] == "底"
+    assert second == first
+    assert len(calls) == 1  # 同一交易日 12h 内只算一次
+    ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
 
-    assert ai_stock_module._a_stock_trading_days_elapsed(
-        datetime(2026, 8, 21).date(), datetime(2026, 8, 24).date()
-    ) == 1
-    tushare.get_trade_calendar_frame.assert_called_once_with(
-        datetime(2026, 8, 22).date(), datetime(2026, 8, 24).date()
+
+def test_ai_stock_chan_first_buy_and_sell_read_czsc_signals(monkeypatch):
+    from src.core.services import ai_stock_chan
+    from src.core.services import chan_analysis
+
+    rows = [{"open": 1, "high": 1, "low": 1, "close": 1} for _ in range(60)]
+    monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: rows)
+
+    monkeypatch.setattr(chan_analysis, "analyze_bars_czsc_legacy", lambda *a, **k: {"signals": [{"type": "一买", "bar_time": "t", "detail": "d"}]})
+    ok, detail = ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
+    assert ok and detail["signal"] == "一买"
+    assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
+
+    monkeypatch.setattr(chan_analysis, "analyze_bars_czsc_legacy", lambda *a, **k: {"signals": [{"type": "一卖", "bar_time": "t"}]})
+    assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is True
+    assert ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
+
+
+def test_ai_stock_chan_returns_not_confirmed_on_short_history(monkeypatch):
+    from src.core.services import ai_stock_chan
+
+    monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 10)
+    ok, detail = ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
+    assert ok is False and "不足" in detail["reason"]
+
+
+def test_compute_csi_all_share_top_bottom_reuses_xueqiu_calculation(monkeypatch):
+    from src.core.services import ai_stock as ai_stock_module
+    from src.robot import xueqiu_top_holdings_report as xq
+
+    ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
+    captured = {}
+
+    def _fake_resolve(snapshot, **kwargs):
+        captured["snapshot"] = snapshot
+        captured["kwargs"] = kwargs
+        return kwargs["fear_target_count"], "ma5_bottom"
+
+    monkeypatch.setattr(xq, "load_latest_csi_all_share_fear_greed", lambda: {"date": "2026-08-10", "score": 22.0})
+    monkeypatch.setattr(xq, "resolve_xueqiu_strategy_position_target", _fake_resolve)
+
+    result = ai_stock_module._compute_csi_all_share_top_bottom(
+        datetime(2026, 8, 11, 10, 0), {"top_positions": 3, "bottom_positions": 10}
     )
+    assert result["signal"] == "底"
+    assert result["regime"] == "ma5_bottom"
+    assert result["max_positions"] == 10  # 底 → bottom_positions
+    # 顶/底持仓数按本模拟盘配置传入星澜同款计算
+    assert captured["kwargs"]["fear_target_count"] == 10
+    assert captured["kwargs"]["greed_target_count"] == 3
+    assert captured["kwargs"]["default_top_n"] == 3
+    ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
 
 
-def test_paper_rotation_does_not_rebuy_sold_symbol_in_same_minute():
-    held_lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "旧持仓",
-        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 10.0,
-        "remaining_quantity": 1000, "target_price": 11.0, "stop_half_triggered": False,
-        "peak_price": 10.0,
-    }
-    state = {
-        "portfolio": {"id": 1, "enabled": True, "cash": 1000, "last_processed_minute": None, "last_execution_target": None, "strategy_params": {"max_positions": 1, "slot_count": 5, "single_stock_cap": 0.5, "max_execution_target": 0.9, "entry_price_cap_pct": 5.0, "hold_evaluation_enabled": True, "rotation_confidence_gap": 20.0, "max_buys_per_day": 5}},
-        "lots": [held_lot],
-        "recommendations": [
-            _recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0),
-            _recommendation("600000.SH", 2, confidence=85.0, rec_price=10.0),
-        ],
-        "today_buys": set(),
-        "today_buy_count": 0,
-        "hold_scores": {"600000.SH": {"hold_score": 40.0, "reason": "走弱"}},
-        "last_recommended_dates": {"600000.SH": datetime(2026, 8, 11).date()},
-    }
-    service = _CapturingPaperService(state, price=10.0)
-    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-    assert [(p.side, p.ts_code) for p in service.captured_plans] == [
-        ("SELL", "600000.SH"),
-        ("BUY", "000001.SZ"),
-    ]
+def test_hold_evaluations_advice_column_registered_and_idempotent():
+    from sqlalchemy import text
+    from src.core.database import ensure_table_columns, engine
 
-
-def test_paper_stop_loss_halves_once_and_t_plus_one_blocks_same_day_sell():
-    prior_day_lot = {
-        "id": 1, "recommendation_id": 1, "ts_code": "600000.SH", "name": "测试股",
-        "bought_at": datetime(2026, 8, 10, 10, 0), "buy_price": 100.0,
-        "remaining_quantity": 1000, "target_price": 108.0, "stop_half_triggered": False,
-    }
-    service = _CapturingPaperService(_paper_state(prior_day_lot), price=91.0)
-    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-
-    assert [(plan.side, plan.quantity, plan.reason_code) for plan in service.captured_plans] == [
-        ("SELL", 500, "STOP_LOSS_HALF")
-    ]
-
-    same_day_lot = dict(prior_day_lot, bought_at=datetime(2026, 8, 11, 9, 40))
-    same_day_service = _CapturingPaperService(_paper_state(same_day_lot), price=110.0)
-    same_day_service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
-
-    assert same_day_service.captured_plans == []
+    ensure_table_columns()
+    ensure_table_columns()  # 幂等：重复执行不报错
+    with engine.connect() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(ai_stock_hold_evaluations)")).fetchall()}
+    assert "advice" in cols
 
 
 def test_hold_evaluation_receives_captured_run_id_after_session_close(monkeypatch):
@@ -1158,20 +1190,27 @@ def test_hold_evaluation_receives_captured_run_id_after_session_close(monkeypatc
     assert [item["run_id"] for item in calls] == [run["id"]]
 
 
-def test_paper_strategy_config_update_model_keeps_hold_evaluation_fields():
-    # 回归：路由模型曾经缺 trading_start_minute / hold_evaluation_enabled /
-    # hold_sell_threshold，Pydantic 默认忽略未知字段导致前端保存被静默丢弃。
+def test_paper_strategy_config_update_model_carries_new_fields():
+    # 回归：Pydantic 默认忽略未知字段，模型漏字段会让前端保存被静默丢弃。
     from src.app.api.ai_stock import PaperStrategyConfigUpdate
 
     dumped = PaperStrategyConfigUpdate(
+        top_positions=3,
+        bottom_positions=10,
+        buy_top_n=3,
+        buy_min_confidence=75,
+        position_pct=0.1,
         trading_start_minute=585,
         hold_evaluation_enabled=True,
-        hold_sell_threshold=30,
     ).model_dump(exclude_none=True)
 
+    assert dumped["top_positions"] == 3
+    assert dumped["bottom_positions"] == 10
+    assert dumped["buy_top_n"] == 3
+    assert dumped["buy_min_confidence"] == 75
+    assert dumped["position_pct"] == 0.1
     assert dumped["trading_start_minute"] == 585
     assert dumped["hold_evaluation_enabled"] is True
-    assert dumped["hold_sell_threshold"] == 30
 
 
 def test_fear_greed_reference_returns_list_without_crash():
@@ -1260,10 +1299,10 @@ def test_paper_hold_evaluations_returns_newest_first():
     created_ids = []
     with get_db_ctx() as db:
         portfolio = AIStockPaperTradingService._ensure_portfolio(db)
-        for ts_code, score in (("600000.SH", 20.0), ("000001.SZ", 80.0)):
+        for ts_code, action, score in (("600000.SH", "卖出", 0.0), ("000001.SZ", "持有", 100.0)):
             row = AIStockHoldEvaluation(
                 portfolio_id=portfolio.id, ts_code=ts_code, name="测试股",
-                hold_score=score, reason="测试理由",
+                hold_score=score, advice=action, reason="测试理由",
             )
             db.add(row)
             db.flush()
@@ -1272,7 +1311,8 @@ def test_paper_hold_evaluations_returns_newest_first():
         mine = [item for item in service.hold_evaluations(limit=10) if item["id"] in created_ids]
         # 新的排前面：后插入的 000001.SZ 在第一个
         assert [item["ts_code"] for item in mine] == ["000001.SZ", "600000.SH"]
-        assert mine[0]["hold_score"] == 80.0
+        assert mine[0]["action"] == "持有"
+        assert mine[1]["action"] == "卖出"
         assert mine[0]["reason"] == "测试理由"
     finally:
         with get_db_ctx() as db:
