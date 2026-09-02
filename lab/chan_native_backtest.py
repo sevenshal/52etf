@@ -77,7 +77,7 @@ def main():
             b=_load_bars(con,sym,'1m',cfg)
             if len(b)<100: continue
             raw=[Kline(i=i,high=float(r.high),low=float(r.low),close=float(r.close),dt=pd.Timestamp(r.timestamp)) for i,r in enumerate(b.itertuples())]
-            norm,fx,st,zs=calculate(raw,min_gap=4); seg=build_segments(st); events=(detect_buy_sell_classic(st,seg,zs,raw) if a.classic_macd else detect_buy_sell(st,seg,zs))
+            norm,fx,st,zs=calculate(raw,min_gap=4); seg=build_segments(st); events=(detect_buy_sell_classic(st,seg,zs,raw) if a.classic_macd else detect_buy_sell(st,seg,zs,bars=raw))
             events=[e for e in events if e.kind in ('一买','二买','三买') and e.confirm_i+1<len(b)]
             if not events: continue
             # Higher-level recursion needs warm-up history.  The evaluation

@@ -248,3 +248,40 @@ def test_recursive_levels_tag_center_level():
     levels = recursive_levels(bars, levels=2, min_gap=1)
     for depth, level in enumerate(levels):
         assert all(z.level == depth for z in level["centers"])
+
+
+def test_macd_histogram_is_indexed_by_original_bar_id():
+    """Inclusion-merged bars have gaps in ``Kline.i``; the histogram must stay
+    addressable by that id, forward-filling the gaps, so ``hist[stroke.i]``
+    lines up with the MACD-area window."""
+    from chan_native import macd_histogram
+
+    dense = [Kline(i, 10 + i * 0.1, 9 + i * 0.1, close=10 + i * 0.1) for i in range(40)]
+    gappy = [b for b in dense if b.i not in {5, 6, 17, 18, 19, 30}]  # merged-away ids
+    h_dense = macd_histogram(dense)
+    h_gappy = macd_histogram(gappy)
+    assert len(h_dense) == 40
+    assert len(h_gappy) == 40  # length follows max id + 1, not len(bars)
+    # forward-filled gaps keep the series close to the dense one
+    assert max(abs(a - b) for a, b in zip(h_dense, h_gappy)) < 0.05
+
+
+def test_buy_sell_events_are_stable_under_inclusion_gaps():
+    """detect_buy_sell must give the same MACD-area events whether the caller
+    passes the dense bars or only the subset that survived inclusion (whose
+    ``Kline.i`` values are gappy but still index the histogram correctly)."""
+    import math
+
+    dense = [
+        Kline(i, high=101 + 4 * math.sin(i / 23), low=99 + 4 * math.sin(i / 23),
+              close=100 + 4 * math.sin(i / 23) + (i / 400 if i < 700 else 1.75 - i / 900))
+        for i in range(1100)
+    ]
+    _n, _fx_, strokes, centers = calculate(dense, min_gap=4)
+    segs = build_segments(strokes)
+    gappy = [b for b in dense if b.i % 7 != 0]  # ~14% of ids removed
+
+    def kinds(bars):
+        return sorted((e.kind, e.detail) for e in detect_buy_sell(strokes, segs, centers, bars=bars))
+
+    assert kinds(dense) == kinds(gappy)

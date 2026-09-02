@@ -438,10 +438,13 @@ def recursive_levels(bars: Iterable[Kline], levels: int = 2, min_gap: int = 4) -
             centers = classify_center_relations(build_centers(strokes, segments))
         for z in centers:
             z.level = level
+        # Only level 0 has real closes; a promoted synthetic bar has no
+        # meaningful MACD area, so higher levels use the displacement fallback.
+        event_bars = normalized if level == 0 else None
         output.append({
             "bars": normalized, "fractals": fractals, "strokes": strokes,
             "segments": segments, "centers": centers,
-            "events": detect_buy_sell(strokes, segments, centers, bars=normalized),
+            "events": detect_buy_sell(strokes, segments, centers, bars=event_bars),
         })
         if not segments:
             break
@@ -465,24 +468,40 @@ def _center_before(centers: list[Center], stroke_index: int) -> Center | None:
 
 
 def macd_histogram(bars: list[Kline], fast: int = 12, slow: int = 26, signal: int = 9) -> list[float]:
-    """Return causal MACD histogram values from close prices."""
-    closes = [float(b.close if b.close is not None else (b.high + b.low) / 2) for b in bars]
+    """Return a causal MACD histogram indexed by original bar id ``Kline.i``.
+
+    ``strokes``/``segments`` carry the pre-inclusion bar id (``fractal.i``),
+    so the histogram must be addressable by that same id.  Inclusion-merged
+    bars have gaps in ``i``; those positions are forward-filled with the last
+    known close so ``hist[stroke.start.i]`` always lines up.
+    """
+    if not bars:
+        return []
+    ordered = sorted(bars, key=lambda b: b.i)
+    n = ordered[-1].i + 1
+    closes = [0.0] * n
+    prev = float(ordered[0].close if ordered[0].close is not None else (ordered[0].high + ordered[0].low) / 2)
+    k = 0
+    for i in range(n):
+        while k < len(ordered) and ordered[k].i == i:
+            cur = ordered[k]
+            prev = float(cur.close if cur.close is not None else (cur.high + cur.low) / 2)
+            k += 1
+        closes[i] = prev
 
     def ema(values, period):
-        alpha = 2 / (period + 1); out = []; prev = values[0] if values else 0.0
+        alpha = 2 / (period + 1); out = []; prev_e = values[0] if values else 0.0
         for value in values:
-            prev = alpha * value + (1 - alpha) * prev; out.append(prev)
+            prev_e = alpha * value + (1 - alpha) * prev_e; out.append(prev_e)
         return out
 
-    if not closes:
-        return []
     dif = [a - b for a, b in zip(ema(closes, fast), ema(closes, slow))]
     dea = ema(dif, signal)
     return [a - b for a, b in zip(dif, dea)]
 
 
 def _segment_macd_area(seg: Segment, strokes: list[Stroke], hist: list[float]) -> float:
-    """Sum |MACD histogram| over the normalized-bar span a segment covers."""
+    """Sum |MACD histogram| over the original-bar span a segment covers."""
     if not hist or seg.start_stroke >= len(strokes):
         return 0.0
     lo = max(0, strokes[seg.start_stroke].start.i)
