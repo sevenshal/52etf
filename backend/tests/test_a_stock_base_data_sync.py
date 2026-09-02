@@ -601,6 +601,7 @@ class AStockBaseDataSyncTest(TestCase):
                                 "float_share": 1.0,
                                 "total_share": 1.0,
                                 "turnover_rate": 0.0,
+                                "pb": 1.0,
                                 "created_at": now,
                                 "updated_at": now,
                             }

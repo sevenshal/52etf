@@ -170,7 +170,8 @@ def get_a_stock_summary(
         latest = analytics_db.execute(
             text(
                 """
-                SELECT total_share, float_share
+                SELECT trade_date, close, total_share, float_share,
+                       pe, pe_ttm, pb, dv_ratio, dv_ttm
                 FROM a_stock_market_daily
                 WHERE ts_code = :symbol
                 ORDER BY trade_date DESC
@@ -198,6 +199,13 @@ def get_a_stock_summary(
         "bps": _safe_quote_number(static_info.get("bps")),
         "total_shares": shares("total_shares", "total_share"),
         "circulating_shares": shares("circulating_shares", "float_share"),
+        "valuation_date": latest.get("trade_date") if latest else None,
+        "valuation_close": _safe_quote_number(latest.get("close")) if latest else None,
+        "pe": _safe_quote_number(latest.get("pe")) if latest else None,
+        "pe_ttm": _safe_quote_number(latest.get("pe_ttm")) if latest else None,
+        "pb": _safe_quote_number(latest.get("pb")) if latest else None,
+        "dv_ratio": _safe_quote_number(latest.get("dv_ratio")) if latest else None,
+        "dv_ttm": _safe_quote_number(latest.get("dv_ttm")) if latest else None,
     }
 
 

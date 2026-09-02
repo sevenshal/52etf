@@ -194,6 +194,12 @@ class AStockMarketDaily(AnalyticsBase):
     float_share = Column(Float)
     total_share = Column(Float)
     turnover_rate = Column(Float)
+    volume_ratio = Column(Float)
+    pe = Column(Float)
+    pe_ttm = Column(Float)
+    pb = Column(Float)
+    dv_ratio = Column(Float)
+    dv_ttm = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -541,8 +547,39 @@ class HKIndexWeightSnapshot(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+def ensure_analytics_table_columns():
+    """为存量 DuckDB 表补充新增字段（幂等，沿用主库 ensure_table_columns 模式）。"""
+    table_columns = {
+        "a_stock_market_daily": {
+            "volume_ratio": "FLOAT",
+            "pe": "FLOAT",
+            "pe_ttm": "FLOAT",
+            "pb": "FLOAT",
+            "dv_ratio": "FLOAT",
+            "dv_ttm": "FLOAT",
+        },
+    }
+    with analytics_engine.begin() as conn:
+        for table_name, columns in table_columns.items():
+            existing = {
+                row[1]
+                for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+            }
+            missing = [name for name in columns if name not in existing]
+            if not missing:
+                continue
+            # DuckDB 不允许直接修改仍被视图依赖的表；视图会在本函数之后统一重建。
+            if table_name == "a_stock_market_daily":
+                conn.execute(text("DROP VIEW IF EXISTS a_stock_market_daily_qfq"))
+            for column_name in missing:
+                conn.execute(text(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {columns[column_name]}"
+                ))
+
+
 def ensure_analytics_schema():
     AnalyticsBase.metadata.create_all(analytics_engine)
+    ensure_analytics_table_columns()
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
@@ -653,6 +690,12 @@ def ensure_analytics_schema():
             m.float_share,
             m.total_share,
             m.turnover_rate,
+            m.volume_ratio,
+            m.pe,
+            m.pe_ttm,
+            m.pb,
+            m.dv_ratio,
+            m.dv_ttm,
             f.adj_factor,
             a.anchor_adj_factor,
             'qfq' AS adjust_type,

@@ -1025,7 +1025,10 @@ class TushareService(QuoteProvider):
         try:
             frame = self.pro.daily_basic(
                 trade_date=trade_value.strftime("%Y%m%d"),
-                fields="ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate",
+                fields=(
+                    "ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate,"
+                    "volume_ratio,pe,pe_ttm,pb,dv_ratio,dv_ttm"
+                ),
             )
         except Exception as exc:
             self.logger.warning("Tushare daily_basic fetch failed for %s: %s", trade_value, exc)
@@ -1049,7 +1052,10 @@ class TushareService(QuoteProvider):
                 frame = self.pro.daily_basic(
                     start_date=start_value.strftime("%Y%m%d"),
                     end_date=end_value.strftime("%Y%m%d"),
-                    fields="ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate",
+                    fields=(
+                        "ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate,"
+                        "volume_ratio,pe,pe_ttm,pb,dv_ratio,dv_ttm"
+                    ),
                     limit=limit,
                     offset=offset,
                 )

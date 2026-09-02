@@ -271,7 +271,11 @@ def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
         return True
     ohl_zero_rows = int(day_stats.get("ohl_zero_rows") or 0)
     ohl_zero_pct = ohl_zero_rows / row_count * 100 if row_count else 100.0
-    return ohl_zero_pct > MAX_MARKET_DAILY_OHL_ZERO_PCT
+    if ohl_zero_pct > MAX_MARKET_DAILY_OHL_ZERO_PCT:
+        return True
+    valuation_rows = int(day_stats.get("valuation_rows") or 0)
+    # PE 可因亏损为空，但 PB 对绝大多数正常上市股票应存在。
+    return valuation_rows / row_count < 0.7
 
 
 def _option_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
@@ -808,7 +812,11 @@ class AStockBaseDataSyncService:
                           OR COALESCE(high, 0) = 0
                           OR COALESCE(low, 0) = 0
                         THEN 1 ELSE 0
-                    END) AS ohl_zero_rows
+                    END) AS ohl_zero_rows,
+                    SUM(CASE
+                        WHEN pe IS NOT NULL OR pe_ttm IS NOT NULL OR pb IS NOT NULL
+                        THEN 1 ELSE 0
+                    END) AS valuation_rows
                 FROM a_stock_market_daily
                 WHERE trade_date >= :start_date AND trade_date <= :end_date
                 GROUP BY trade_date
@@ -819,6 +827,7 @@ class AStockBaseDataSyncService:
             _parse_date(row[0]): {
                 "row_count": int(row[1] or 0),
                 "ohl_zero_rows": int(row[2] or 0),
+                "valuation_rows": int(row[3] or 0),
             }
             for row in rows
             if _parse_date(row[0])
@@ -972,6 +981,12 @@ class AStockBaseDataSyncService:
             "float_share",
             "total_share",
             "turnover_rate",
+            "volume_ratio",
+            "pe",
+            "pe_ttm",
+            "pb",
+            "dv_ratio",
+            "dv_ttm",
             "created_at",
             "updated_at",
         ]
@@ -996,6 +1011,12 @@ class AStockBaseDataSyncService:
         normalized["float_share"] = _numeric_series(frame, "float_share", 4)
         normalized["total_share"] = _numeric_series(frame, "total_share", 4)
         normalized["turnover_rate"] = _numeric_series(frame, "turnover_rate", 6)
+        normalized["volume_ratio"] = _numeric_series(frame, "volume_ratio", 6)
+        normalized["pe"] = _numeric_series(frame, "pe", 6)
+        normalized["pe_ttm"] = _numeric_series(frame, "pe_ttm", 6)
+        normalized["pb"] = _numeric_series(frame, "pb", 6)
+        normalized["dv_ratio"] = _numeric_series(frame, "dv_ratio", 6)
+        normalized["dv_ttm"] = _numeric_series(frame, "dv_ttm", 6)
         normalized["created_at"] = now
         normalized["updated_at"] = now
         normalized = normalized.dropna(subset=["trade_date", "ts_code"])
@@ -1031,6 +1052,12 @@ class AStockBaseDataSyncService:
             "float_share",
             "total_share",
             "turnover_rate",
+            "volume_ratio",
+            "pe",
+            "pe_ttm",
+            "pb",
+            "dv_ratio",
+            "dv_ttm",
             "created_at",
             "updated_at",
         ]

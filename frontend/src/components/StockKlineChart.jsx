@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Form, InputNumber, Popover, Segmented, Spin, Switch } from 'antd';
 import { InfoCircleOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -127,10 +127,12 @@ const StockKlineChart = ({
   const [showSupportResistance, setShowSupportResistance] = useState(true);
   const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
   const [chartOption, setChartOption] = useState({});
+  const zoomRef = useRef(null);
 
   const fetchKlines = useCallback(async () => {
     setLoading(true);
     setRawKlines([]);
+    zoomRef.current = null;
     try {
       const { data } = await request.get(klineUrl || `/api/stock/klines/${symbol}`, {
         params: {
@@ -219,6 +221,9 @@ const StockKlineChart = ({
       : 0;
     const defaultZoomStartValue = dates[defaultZoomStartIndex] || dates[0];
     const defaultZoomEndValue = dates[dates.length - 1];
+    const zoomRange = zoomRef.current
+      ? { start: zoomRef.current.start, end: zoomRef.current.end }
+      : { startValue: defaultZoomStartValue, endValue: defaultZoomEndValue };
 
     const {
       fairValueHi,
@@ -681,16 +686,14 @@ const StockKlineChart = ({
         {
           type: 'inside',
           xAxisIndex: [0, 1],
-          startValue: defaultZoomStartValue,
-          endValue: defaultZoomEndValue,
+          ...zoomRange,
         },
         {
           show: true,
           xAxisIndex: [0, 1],
           type: 'slider',
           top: '90%',
-          startValue: defaultZoomStartValue,
-          endValue: defaultZoomEndValue,
+          ...zoomRange,
         }
       ],
       series
@@ -719,6 +722,12 @@ const StockKlineChart = ({
     chart.on('click', params => {
       if (params?.seriesName !== 'K线') {
         chart.dispatchAction({ type: 'hideTip' });
+      }
+    });
+    chart.on('datazoom', () => {
+      const zoom = chart.getOption()?.dataZoom?.[0];
+      if (zoom && Number.isFinite(zoom.start) && Number.isFinite(zoom.end)) {
+        zoomRef.current = { start: zoom.start, end: zoom.end };
       }
     });
   }, []);
@@ -799,7 +808,7 @@ const StockKlineChart = ({
         <ReactECharts
           key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}`}
           option={chartOption}
-          notMerge={true}
+          notMerge={false}
           onChartReady={handleChartReady}
           style={{ height }}
         />

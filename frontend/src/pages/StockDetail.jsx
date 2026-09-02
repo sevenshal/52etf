@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
-import { Card, Button, Select, Spin } from 'antd';
-import { LeftOutlined } from '@ant-design/icons';
+import { Card, Select, Spin } from 'antd';
 import { useParams, useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import StockKlineChart from '../components/StockKlineChart';
@@ -116,20 +115,12 @@ const StockDetail = () => {
     <div style={{ padding: '24px' }}>
       <Card
         title={
-          <div style={{ display: 'flex', alignItems: 'center' }}>
-            <Button
-              type="text"
-              icon={<LeftOutlined />}
-              onClick={() => navigate(-1)}
-              style={{ marginRight: '12px' }}
-            />
-            <span>
-              {stockName ? `${stockName}（` : ''}
-              <XueqiuStockLink symbol={normalizedSymbol}>{normalizedSymbol}</XueqiuStockLink>
-              {stockName ? '）' : ''}
-              {' 股票详情'}
-            </span>
-          </div>
+          <span>
+            {stockName ? `${stockName}（` : ''}
+            <XueqiuStockLink symbol={normalizedSymbol}>{normalizedSymbol}</XueqiuStockLink>
+            {stockName ? '）' : ''}
+            {' 股票详情'}
+          </span>
         }
         extra={isAStock ? (
           <Select
@@ -149,8 +140,6 @@ const StockDetail = () => {
       >
         {isAStock ? (
           <AStockQuoteSummary
-            symbol={normalizedSymbol}
-            name={stockName}
             quote={quotes[normalizedSymbol]}
             summary={stockSummary}
             week52={week52}

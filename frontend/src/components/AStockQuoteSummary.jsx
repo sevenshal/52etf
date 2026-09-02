@@ -43,7 +43,7 @@ const Metric = ({ label, value }) => (
   </div>
 );
 
-const AStockQuoteSummary = ({ symbol, name, quote = {}, summary = {}, week52 = {} }) => {
+const AStockQuoteSummary = ({ quote = {}, summary = {}, week52 = {} }) => {
   const values = useMemo(() => {
     const last = toNumber(quote.last_px);
     const preclose = toNumber(quote.preclose_px);
@@ -56,9 +56,22 @@ const AStockQuoteSummary = ({ symbol, name, quote = {}, summary = {}, week52 = {
       : null;
     const totalShares = toNumber(summary.total_shares);
     const circulatingShares = toNumber(summary.circulating_shares);
+    const valuationClose = toNumber(summary.valuation_close);
+    const priceRatio = last !== null && valuationClose > 0 ? last / valuationClose : null;
+    const dynamicPe = toNumber(quote.pe_rate);
+    const livePb = toNumber(quote.pb_rate)
+      ?? (priceRatio !== null && toNumber(summary.pb) !== null ? Number(summary.pb) * priceRatio : null);
+    const dividendTtm = valuationClose !== null && toNumber(summary.dv_ttm) !== null
+      ? valuationClose * Number(summary.dv_ttm) / 100
+      : null;
     return {
       last, preclose, high, low, change, changePct, amplitude,
-      totalShares, circulatingShares,
+      totalShares, circulatingShares, dynamicPe, livePb, dividendTtm,
+      dynamicEps: last !== null && dynamicPe > 0 ? last / dynamicPe : null,
+      bps: last !== null && livePb > 0 ? last / livePb : null,
+      pe: priceRatio !== null && toNumber(summary.pe) !== null ? Number(summary.pe) * priceRatio : null,
+      peTtm: priceRatio !== null && toNumber(summary.pe_ttm) !== null ? Number(summary.pe_ttm) * priceRatio : null,
+      dividendYieldTtm: dividendTtm !== null && last > 0 ? dividendTtm / last * 100 : null,
       totalMarketCap: last !== null && totalShares !== null ? last * totalShares : null,
       circulatingMarketCap: last !== null && circulatingShares !== null ? last * circulatingShares : null,
     };
@@ -78,12 +91,16 @@ const AStockQuoteSummary = ({ symbol, name, quote = {}, summary = {}, week52 = {
     ['成交额', formatChinese(toNumber(quote.amount) === null ? null : Number(quote.amount) * 1000)],
     ['量比', formatFixed(quote.vol_ratio)],
     ['换手', toNumber(quote.turnover_ratio) === null ? '--' : `${formatFixed(quote.turnover_ratio)}%`],
-    ['市盈率(动)', formatFixed(quote.pe_rate)],
-    ['市净率', formatFixed(quote.pb_rate)],
+    ['市盈率(动)', formatFixed(values.dynamicPe)],
+    ['市盈率(TTM)', formatFixed(values.peTtm)],
+    ['市盈率(静)', formatFixed(values.pe)],
+    ['市净率', formatFixed(values.livePb)],
     ['委比', toNumber(quote.entrust_rate) === null ? '--' : `${formatFixed(quote.entrust_rate)}%`],
     ['振幅', values.amplitude === null ? '--' : `${formatFixed(values.amplitude)}%`],
-    ['每股收益', formatFixed(summary.eps)],
-    ['每股净资产', formatFixed(summary.bps)],
+    ['每股收益(动)', formatFixed(values.dynamicEps)],
+    ['股息(TTM)', formatFixed(values.dividendTtm)],
+    ['股息率(TTM)', values.dividendYieldTtm === null ? '--' : `${formatFixed(values.dividendYieldTtm)}%`],
+    ['每股净资产', formatFixed(values.bps)],
     ['总股本', formatChinese(values.totalShares)],
     ['总市值', formatChinese(values.totalMarketCap)],
     ['流通股', formatChinese(values.circulatingShares)],
@@ -95,9 +112,6 @@ const AStockQuoteSummary = ({ symbol, name, quote = {}, summary = {}, week52 = {
 
   return (
     <div style={{ marginBottom: 20 }}>
-      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>
-        {name || summary.name || symbol} ({symbol})
-      </div>
       <div style={{ display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: '4px 12px', marginBottom: 12 }}>
         <span style={{ color: directionColor, fontSize: 26, fontWeight: 700 }}>
           {values.last === null ? '--' : `${currencySymbol}${values.last.toFixed(2)}`}
