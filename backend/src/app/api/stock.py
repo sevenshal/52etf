@@ -83,8 +83,9 @@ def _load_current_a_stock_kline(symbol: str, expected_date):
                 "high": high_price,
                 "low": low_price,
                 "close": close_price,
-                "volume": _safe_quote_number(row.get("vol")) or 0.0,
-                "turnover": _safe_quote_number(row.get("amount")) or 0.0,
+                # rt_k: vol=股、amount=元；历史 daily: volume=手、turnover=千元。
+                "volume": (_safe_quote_number(row.get("vol")) or 0.0) / 100.0,
+                "turnover": (_safe_quote_number(row.get("amount")) or 0.0) / 1000.0,
                 "turnover_rate": None,
             }
     return None
