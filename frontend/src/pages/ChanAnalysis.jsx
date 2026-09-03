@@ -427,7 +427,7 @@ const ChanAnalysis = () => {
           ]} /></Form.Item>
           <Form.Item name="boardCodes" label="板块"><Select mode="multiple" showSearch optionFilterProp="label" allowClear
             maxTagCount="responsive" style={{ minWidth: 210 }} options={boardOptions} placeholder="行业/概念/主题" /></Form.Item>
-          <Form.Item name="limit" label="上限"><InputNumber min={1} max={2000} style={{ width: 90 }} /></Form.Item>
+          <Form.Item name="limit" label="上限"><InputNumber min={1} max={5000} style={{ width: 90 }} /></Form.Item>
           <Form.Item name="realtime" valuePropName="checked"><Checkbox>盘中刷新实时1m</Checkbox></Form.Item>
           <Form.Item><Space><Button onClick={previewPool} loading={scanLoading}>预览股票池</Button>
             <Button type="primary" onClick={startScan} loading={scanLoading}>扫描买点</Button></Space></Form.Item>

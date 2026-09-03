@@ -40,7 +40,7 @@ class StockPoolFilters(BaseModel):
     index_codes: list[str] = Field(default_factory=list)
     board_codes: list[str] = Field(default_factory=list)
     exclude_st: bool = True
-    limit: int = Field(default=500, ge=1, le=2000)
+    limit: int = Field(default=500, ge=1, le=5000)
 
 
 class ScanRequest(BaseModel):

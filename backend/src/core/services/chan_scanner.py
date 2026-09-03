@@ -87,7 +87,7 @@ def filter_stock_pool(filters: dict[str, Any], connection: Any = None) -> list[d
         params.extend(board_codes)
 
     lookback = max(1, min(60, int(filters.get("liquidity_days") or 20)))
-    limit = max(1, min(2000, int(filters.get("limit") or 500)))
+    limit = max(1, min(5000, int(filters.get("limit") or 500)))
     sql = f"""
         WITH latest AS (SELECT MAX(trade_date) AS trade_date FROM a_stock_market_daily),
         recent_dates AS (
