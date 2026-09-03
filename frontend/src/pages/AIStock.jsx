@@ -11,6 +11,7 @@ import {
   Input,
   Modal,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -416,6 +417,10 @@ const AIStock = () => {
   const [paperStopLossFullPct, setPaperStopLossFullPct] = useState(-12.0);
   const [paperTradingStartMinute, setPaperTradingStartMinute] = useState(585);
   const [paperHoldEvalEnabled, setPaperHoldEvalEnabled] = useState(false);
+  const [paperChanBuyTypes, setPaperChanBuyTypes] = useState(['一买', '二买', '三买']);
+  const [paperChanSellTypes, setPaperChanSellTypes] = useState(['一卖', '二卖', '三卖']);
+  const [paperAiSellGraceDays, setPaperAiSellGraceDays] = useState(3);
+  const [paperTargetProfitPct, setPaperTargetProfitPct] = useState(0);
   const [positionControl, setPositionControl] = useState(null);
   const [todayPage, setTodayPage] = useState(1);
 
@@ -584,6 +589,10 @@ const AIStock = () => {
     setPaperStopLossFullPct(p.stop_loss_full_pct ?? -12.0);
     setPaperTradingStartMinute(p.trading_start_minute ?? 585);
     setPaperHoldEvalEnabled(p.hold_evaluation_enabled ?? false);
+    setPaperChanBuyTypes(p.chan_buy_types ?? ['一买', '二买', '三买']);
+    setPaperChanSellTypes(p.chan_sell_types ?? ['一卖', '二卖', '三卖']);
+    setPaperAiSellGraceDays(p.ai_sell_grace_days ?? 3);
+    setPaperTargetProfitPct(p.target_profit_pct ?? 0);
     setPaperConfigOpen(true);
   }, [paperConfig]);
 
@@ -600,6 +609,10 @@ const AIStock = () => {
         stop_loss_full_pct: paperStopLossFullPct,
         trading_start_minute: paperTradingStartMinute,
         hold_evaluation_enabled: paperHoldEvalEnabled,
+        chan_buy_types: paperChanBuyTypes,
+        chan_sell_types: paperChanSellTypes,
+        ai_sell_grace_days: paperAiSellGraceDays,
+        target_profit_pct: paperTargetProfitPct,
       };
       const response = await request.put('/api/ai-stock/paper/config', payload);
       setPaperConfig(response.data);
@@ -610,7 +623,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled]);
+  }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperChanBuyTypes, paperChanSellTypes, paperAiSellGraceDays, paperTargetProfitPct]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -804,7 +817,7 @@ const AIStock = () => {
           ? `中证全指贪恐最近一次顶/底信号：${positionControl.signal || '历史无信号（默认按顶处理）'}${positionControl.date ? `（${positionControl.date}）` : ''} · 当前最大持仓数 ${positionControl.max_positions}（顶 ${positionControl.top_positions} / 底 ${positionControl.bottom_positions}）`
           : '仓位控制信号加载中…'}
       />
-      <Alert type="warning" showIcon message="AI 根据最新新闻与雪球活跃组合方向直接给出卖/持建议；建议「卖出」的持仓待缠论 1 分钟一卖信号确认后离场。" />
+      <Alert type="warning" showIcon message="AI 根据最新新闻与雪球活跃组合方向直接给出卖/持建议；建议「卖出」的持仓待缠论 1m/5m 卖点确认后离场，超过宽限交易日仍无信号则市价离场。" />
       <Card className="ai-stock-card" title="AI 持仓建议（最近一轮）">
         <Table className="ai-stock-table" columns={holdAdviceColumns} dataSource={holdEvals} rowKey="id" size="small" pagination={{ pageSize: 20 }} scroll={{ x: 820 }} />
       </Card>
@@ -900,7 +913,7 @@ const AIStock = () => {
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Text type="secondary">控制自动模拟盘的买入/卖出行为，改动立即对下一个交易分钟生效。</Text>
           <Switch checked={paperEnabled} onChange={setPaperEnabled} checkedChildren="启用" unCheckedChildren="停用" />
-          <Divider style={{ margin: '4px 0' }}>买入（缠论 1 分钟一买触发，每笔固定仓位）</Divider>
+          <Divider style={{ margin: '4px 0' }}>买入（缠论 1m/5m 买点触发，每笔固定仓位）</Divider>
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>监控买入数量</Text><Input type="number" value={paperBuyTopN} onChange={e => setPaperBuyTopN(Number(e.target.value) || 1)} min={1} max={50} step={1} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最低信心分</Text><Input type="number" value={paperBuyMinConfidence} onChange={e => setPaperBuyMinConfidence(Number(e.target.value) || 0)} min={0} max={100} step={1} /></Col>
@@ -911,12 +924,24 @@ const AIStock = () => {
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>底持仓数（中证全指底信号）</Text><Input type="number" value={paperBottomPositions} onChange={e => setPaperBottomPositions(Number(e.target.value) || 1)} min={1} max={100} step={1} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>交易开始时间(分钟, 585=9:45)</Text><Input type="number" value={paperTradingStartMinute} onChange={e => setPaperTradingStartMinute(Number(e.target.value) || 585)} min={570} max={690} /></Col>
           </Row>
+          <Row gutter={12}>
+            <Col span={24}><Text type="secondary" style={{ fontSize: 12 }}>认可的缠论买点（1m 每根 / 5m 收线分钟；任一命中即进场）</Text>
+              <Select mode="multiple" allowClear style={{ width: '100%' }} value={paperChanBuyTypes} onChange={setPaperChanBuyTypes}
+                options={['一买', '二买', '三买'].map(v => ({ label: v, value: v }))} /></Col>
+          </Row>
           <Divider style={{ margin: '4px 0' }}>卖出</Divider>
           <Row gutter={12}>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>全仓止损线(%)</Text><Input type="number" value={paperStopLossFullPct} onChange={e => setPaperStopLossFullPct(Number(e.target.value) || 0)} max={0} step={0.5} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>硬止盈(买入价+%, 0=只用AI目标价)</Text><Input type="number" value={paperTargetProfitPct} onChange={e => setPaperTargetProfitPct(Number(e.target.value) || 0)} min={0} max={100} step={0.5} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>AI 持仓建议</Text><Switch checked={paperHoldEvalEnabled} onChange={setPaperHoldEvalEnabled} /></Col>
           </Row>
-          <Text type="secondary" style={{ fontSize: 12 }}>被 AI 建议「卖出」的持仓，待缠论 1 分钟一卖信号确认后离场。</Text>
+          <Row gutter={12}>
+            <Col span={16}><Text type="secondary" style={{ fontSize: 12 }}>AI 建议卖出时认可的缠论卖点</Text>
+              <Select mode="multiple" allowClear style={{ width: '100%' }} value={paperChanSellTypes} onChange={setPaperChanSellTypes}
+                options={['一卖', '二卖', '三卖'].map(v => ({ label: v, value: v }))} /></Col>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>等不到卖点的宽限(交易日, 0=一直等)</Text><Input type="number" value={paperAiSellGraceDays} onChange={e => setPaperAiSellGraceDays(Math.max(0, Number(e.target.value) || 0))} min={0} max={60} step={1} /></Col>
+          </Row>
+          <Text type="secondary" style={{ fontSize: 12 }}>目标价（AI 目标价或硬止盈线）触及即无条件止盈；AI 建议「卖出」的持仓等缠论卖点确认离场，超过宽限交易日仍无信号则市价离场。</Text>
         </Space>
       </Modal>
     </div>

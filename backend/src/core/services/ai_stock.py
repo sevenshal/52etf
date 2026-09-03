@@ -79,6 +79,21 @@ MIN_AVG_TURNOVER = 20_000  # 千元 = 2000 万
 THS_INDEX_TYPES = ("N", "TH", "I")
 NEWS_ANCHOR_TIME = "14:00"
 
+# Paper-trading Chan buy/sell point selection (configurable via strategy_params).
+CHAN_BUY_TYPES = ("一买", "二买", "三买")
+CHAN_SELL_TYPES = ("一卖", "二卖", "三卖")
+AI_SELL_GRACE_DAYS = 3  # AI 建议卖出后，等不到缠论卖点时最多再等这么多交易日就市价离场
+
+
+def _valid_chan_types(raw: Any, allowed: tuple[str, ...]) -> list[str]:
+    """Keep only recognised Chan point names; empty / invalid -> all of ``allowed``."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple, set)):
+        return list(allowed)
+    chosen = [name for name in allowed if name in set(raw)]
+    return chosen or list(allowed)
+
 
 def _load_strategy_params() -> Dict[str, int]:
     """Return configurable limits from DB, falling back to module constants."""
@@ -2161,6 +2176,10 @@ class AIStockPaperTradingService:
                     "stop_loss_full_pct": -12.0,
                     "trading_start_minute": 585,
                     "hold_evaluation_enabled": False,
+                    "chan_buy_types": list(CHAN_BUY_TYPES),
+                    "chan_sell_types": list(CHAN_SELL_TYPES),
+                    "ai_sell_grace_days": AI_SELL_GRACE_DAYS,
+                    "target_profit_pct": 0.0,
                 },
             )
             db.add(config)
@@ -2183,13 +2202,21 @@ class AIStockPaperTradingService:
                 .order_by(desc(AIStockHoldEvaluation.evaluated_at))
                 .all()
             )
-            # 每只持仓最近一条 AI 持仓建议（卖出/持有 + 理由）
+            # 每只持仓最近一条 AI 持仓建议（卖出/持有 + 理由）。eval_rows 按
+            # evaluated_at 倒序：对最新建议为「卖出」的持仓，回溯不间断的卖出
+            # 连续段起点 sell_since，供「等不到缠论卖点」的兜底超时使用。
             hold_advice: Dict[str, Dict[str, Any]] = {}
+            _sell_streak_broken: set[str] = set()
             for ev in eval_rows:
-                if ev.ts_code in hold_advice:
-                    continue
                 action = ev.advice or ("卖出" if (ev.hold_score is not None and ev.hold_score <= 0.0) else "持有")
-                hold_advice[ev.ts_code] = {"action": action, "reason": ev.reason}
+                if ev.ts_code not in hold_advice:
+                    hold_advice[ev.ts_code] = {"action": action, "reason": ev.reason, "sell_since": None}
+                entry = hold_advice[ev.ts_code]
+                if entry["action"] == "卖出" and ev.ts_code not in _sell_streak_broken:
+                    if action == "卖出":
+                        entry["sell_since"] = ev.evaluated_at
+                    else:
+                        _sell_streak_broken.add(ev.ts_code)
             return {
                 "portfolio": {
                     "id": portfolio.id,
@@ -2259,6 +2286,12 @@ class AIStockPaperTradingService:
 
         stop_loss_full = _safe_float(sp.get("stop_loss_full_pct"), -12.0)
         position_pct = float(_safe_float(sp.get("position_pct"), 0.10))
+        chan_buy_types = _valid_chan_types(sp.get("chan_buy_types"), CHAN_BUY_TYPES)
+        chan_sell_types = _valid_chan_types(sp.get("chan_sell_types"), CHAN_SELL_TYPES)
+        # 硬止盈：无论 AI 目标价多高，涨到买入价 * (1 + target_profit_pct%) 就止盈；0 = 关闭
+        target_profit_pct = _safe_float(sp.get("target_profit_pct"), 0.0) or 0.0
+        # AI 建议卖出后等不到缠论卖点，最多再等这么多交易日就市价离场；<=0 = 一直等
+        ai_sell_grace_days = int(_safe_float(sp.get("ai_sell_grace_days"), float(AI_SELL_GRACE_DAYS)))
         # 顶/底最大持仓数（复用星澜同款计算，12h 缓存）
         top_bottom = csi_all_share_top_bottom(timestamp, sp)
         max_positions = _resolve_max_positions(top_bottom, sp)
@@ -2281,7 +2314,8 @@ class AIStockPaperTradingService:
             ma10 = ma10_by_symbol.get(lot["ts_code"])
             advice = hold_advice.get(lot["ts_code"]) or {}
             chan_detail: Dict[str, Any] = {}
-            if price >= lot["target_price"]:
+            hard_target = lot["buy_price"] * (1 + target_profit_pct / 100) if target_profit_pct > 0 and lot["buy_price"] else None
+            if price >= lot["target_price"] or (hard_target is not None and price >= hard_target):
                 reason_code = "TARGET_PROFIT"
             elif peak >= lot["target_price"] and ma10 is not None and price < ma10:
                 # 移动止盈：目标价已触及后，现价跌破 MA10 → 离场
@@ -2291,10 +2325,15 @@ class AIStockPaperTradingService:
             elif held_days >= 30:
                 reason_code = "MAX_HOLD_DAYS"
             elif advice.get("action") == "卖出":
-                # AI 建议卖出：等缠论 1m/5m 任一 一/二/三卖确认后再离场
-                confirmed, chan_detail = ai_stock_chan.sell_confirmed(lot["ts_code"], timestamp)
+                # AI 建议卖出：优先等缠论 1m/5m 配置的卖点确认；等不到就在
+                # ai_sell_grace_days 个交易日后市价离场，避免仓位被永久套住。
+                confirmed, chan_detail = ai_stock_chan.sell_confirmed(lot["ts_code"], timestamp, types=chan_sell_types)
                 if confirmed:
                     reason_code = "AI_ADVICE_FIRST_SELL"
+                elif ai_sell_grace_days > 0 and advice.get("sell_since") is not None:
+                    waited = _holding_days(advice["sell_since"], timestamp.date())
+                    if waited >= ai_sell_grace_days:
+                        reason_code = "AI_ADVICE_SELL_TIMEOUT"
             if reason_code and quantity > 0:
                 if reason_code == "TRAILING_STOP":
                     reason_text = f"TRAILING_STOP: 目标价 {lot['target_price']:.3f} 已触及，现价 {price:.3f} 跌破 MA10({ma10:.3f})，移动止盈离场"
@@ -2302,6 +2341,10 @@ class AIStockPaperTradingService:
                     _chan_hit = (chan_detail or {}).get("signal") or "一/二/三卖"
                     _chan_freq = (chan_detail or {}).get("freq") or "1m"
                     reason_text = f"AI_ADVICE_FIRST_SELL: AI 建议卖出且缠论{_chan_freq}{_chan_hit}确认，现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
+                    if advice.get("reason"):
+                        reason_text += f"；AI建议: {advice['reason']}"
+                elif reason_code == "AI_ADVICE_SELL_TIMEOUT":
+                    reason_text = f"AI_ADVICE_SELL_TIMEOUT: AI 建议卖出已 {ai_sell_grace_days}+ 交易日未等到缠论卖点，市价离场，现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
                     if advice.get("reason"):
                         reason_text += f"；AI建议: {advice['reason']}"
                 else:
@@ -2355,7 +2398,7 @@ class AIStockPaperTradingService:
             if price <= 0:
                 continue
             try:
-                confirmed, chan_detail = ai_stock_chan.buy_confirmed(ts_code, timestamp)
+                confirmed, chan_detail = ai_stock_chan.buy_confirmed(ts_code, timestamp, types=chan_buy_types)
             except Exception as exc:
                 logger.warning("AI stock chan buy-confirm failed for %s: %s", ts_code, exc)
                 continue
@@ -2501,12 +2544,31 @@ class AIStockPaperTradingService:
         allowed = {
             "top_positions", "bottom_positions", "buy_top_n", "buy_min_confidence",
             "position_pct", "stop_loss_full_pct", "trading_start_minute",
-            "hold_evaluation_enabled",
+            "hold_evaluation_enabled", "chan_buy_types", "chan_sell_types",
+            "ai_sell_grace_days", "target_profit_pct",
         }
         unknown = set(parameters) - allowed
         if unknown:
             raise ValueError(f"未知参数: {', '.join(sorted(unknown))}")
+        list_params = {
+            "chan_buy_types": CHAN_BUY_TYPES,
+            "chan_sell_types": CHAN_SELL_TYPES,
+        }
+        for name, choices in list_params.items():
+            if name not in parameters:
+                continue
+            raw = parameters[name]
+            if isinstance(raw, str):
+                raw = [raw]
+            if not isinstance(raw, (list, tuple)):
+                raise ValueError(f"{name} 必须是买卖点名称的列表")
+            picked = [item for item in choices if item in set(raw)]
+            if not picked:
+                raise ValueError(f"{name} 至少选一个，且只能是 {', '.join(choices)}")
+            parameters[name] = picked
         for name, value in parameters.items():
+            if name in list_params:
+                continue
             try:
                 value = float(value)
             except (TypeError, ValueError):
@@ -2529,6 +2591,12 @@ class AIStockPaperTradingService:
             elif name == "trading_start_minute":
                 if value < 9 * 60 + 30 or value > 11 * 60 + 30 or value != int(value):
                     raise ValueError(f"{name} 必须是 570(9:30)~690(11:30) 的整数分钟")
+            elif name == "ai_sell_grace_days":
+                if value < 0 or value > 60 or value != int(value):
+                    raise ValueError(f"{name} 必须是 0-60 的整数交易日（0=一直等缠论卖点）")
+            elif name == "target_profit_pct":
+                if value < 0 or value > 100:
+                    raise ValueError(f"{name} 必须是 0-100 的百分比（0=只用 AI 目标价）")
             elif name == "hold_evaluation_enabled":
                 value = bool(value)
             parameters[name] = value

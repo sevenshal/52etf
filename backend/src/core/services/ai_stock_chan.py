@@ -123,11 +123,20 @@ def _detect(ts_code: str, now: datetime, wanted: Sequence[str]) -> Tuple[bool, D
     return False, {"reason": f"未出现{label}", "checked": [f for f, _ in checks]}
 
 
-def buy_confirmed(ts_code: str, now: datetime) -> Tuple[bool, Dict[str, Any]]:
-    """Whether any 一/二/三买 is active on the latest 1m (or 5m-close) bar."""
-    return _detect(ts_code, now, BUY_SIGNALS)
+def _pick_types(types: Sequence[str] | None, allowed: Sequence[str]) -> Tuple[str, ...]:
+    """Keep only recognised signal types; fall back to ``allowed`` when empty."""
+    if types:
+        chosen = tuple(t for t in allowed if t in set(types))
+        if chosen:
+            return chosen
+    return tuple(allowed)
 
 
-def sell_confirmed(ts_code: str, now: datetime) -> Tuple[bool, Dict[str, Any]]:
-    """Whether any 一/二/三卖 is active on the latest 1m (or 5m-close) bar."""
-    return _detect(ts_code, now, SELL_SIGNALS)
+def buy_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None) -> Tuple[bool, Dict[str, Any]]:
+    """Whether a configured 买点 (default 一/二/三买) is active on the latest 1m (or 5m-close) bar."""
+    return _detect(ts_code, now, _pick_types(types, BUY_SIGNALS))
+
+
+def sell_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None) -> Tuple[bool, Dict[str, Any]]:
+    """Whether a configured 卖点 (default 一/二/三卖) is active on the latest 1m (or 5m-close) bar."""
+    return _detect(ts_code, now, _pick_types(types, SELL_SIGNALS))
