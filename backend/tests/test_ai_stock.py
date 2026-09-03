@@ -974,8 +974,8 @@ def _paper_patches(monkeypatch):
 
     monkeypatch.setattr(ai_stock_module, "csi_all_share_top_bottom", lambda *a, **k: {"signal": None, "regime": None, "date": None})
     monkeypatch.setattr(ai_stock_module, "_ma10_by_symbol", lambda codes, as_of: {})
-    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (False, {"reason": "test"}))
-    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "first_sell_confirmed", lambda *a, **k: (False, {"reason": "test"}))
+    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "buy_confirmed", lambda *a, **k: (False, {"reason": "test"}))
+    monkeypatch.setattr(ai_stock_module.ai_stock_chan, "sell_confirmed", lambda *a, **k: (False, {"reason": "test"}))
     return ai_stock_module
 
 
@@ -991,7 +991,7 @@ def test_resolve_max_positions_maps_top_bottom_to_configured_counts():
 
 def test_paper_buys_top_confidence_candidate_only_on_first_buy_signal(_paper_patches, monkeypatch):
     monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
-    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (True, {"signal": "一买"}))
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "buy_confirmed", lambda *a, **k: (True, {"signal": "一买"}))
     candidates = [
         _recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0),
         _recommendation("600000.SH", 2, confidence=60.0, rec_price=10.0),  # < 75 → filtered
@@ -1012,7 +1012,7 @@ def test_paper_skips_buy_without_first_buy_signal(_paper_patches):
 
 
 def test_paper_max_positions_from_top_signal_caps_entries(_paper_patches, monkeypatch):
-    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_buy_confirmed", lambda *a, **k: (True, {}))
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "buy_confirmed", lambda *a, **k: (True, {}))
     held = _lot("600000.SH", buy_price=10.0, target_price=99.0)  # far from target, no exit
     # 顶 → top_positions=1；已有 1 只持仓即到上限，新候选不买
     monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "顶"})
@@ -1040,7 +1040,7 @@ def test_paper_ai_advice_first_sell_requires_chan_confirmation(_paper_patches, m
     assert service.captured_plans == []
 
     # 一卖确认：卖出
-    monkeypatch.setattr(_paper_patches.ai_stock_chan, "first_sell_confirmed", lambda *a, **k: (True, {"signal": "一卖"}))
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "sell_confirmed", lambda *a, **k: (True, {"signal": "一卖"}))
     service2 = _CapturingPaperService(_paper_state(held, hold_advice=advice), price=105.0)
     service2.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
     assert [(p.side, p.quantity, p.reason_code) for p in service2.captured_plans] == [("SELL", 1000, "AI_ADVICE_FIRST_SELL")]
@@ -1106,21 +1106,66 @@ def test_ai_stock_chan_first_buy_and_sell_read_native_signals(monkeypatch):
     monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: rows)
 
     monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, **k: {"signals": [{"type": "一买", "bar_time": "t", "detail": "d"}]})
-    ok, detail = ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
+    ok, detail = ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
     assert ok and detail["signal"] == "一买"
-    assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
+    assert ai_stock_chan.sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
 
     monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, **k: {"signals": [{"type": "一卖", "bar_time": "t"}]})
-    assert ai_stock_chan.first_sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is True
-    assert ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
+    assert ai_stock_chan.sell_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is True
+    assert ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))[0] is False
 
 
 def test_ai_stock_chan_returns_not_confirmed_on_short_history(monkeypatch):
     from src.core.services import ai_stock_chan
 
     monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 10)
-    ok, detail = ai_stock_chan.first_buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
+    ok, detail = ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 10, 0))
     assert ok is False and "不足" in detail["reason"]
+
+
+def test_ai_stock_chan_accepts_any_of_the_three_buy_types(monkeypatch):
+    from src.core.services import ai_stock_chan
+    from src.core.services import chan_analysis
+
+    rows = [{"open": 1, "high": 1, "low": 1, "close": 1} for _ in range(60)]
+    monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: rows)
+    for buy_type in ("一买", "二买", "三买"):
+        monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, _t=buy_type, **k: {"signals": [{"type": _t}]})
+        ok, detail = ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 9, 42))
+        assert ok and detail["signal"] == buy_type
+    for sell_type in ("一卖", "二卖", "三卖"):
+        monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, _t=sell_type, **k: {"signals": [{"type": _t}]})
+        assert ai_stock_chan.sell_confirmed("600000.SH", datetime(2026, 8, 11, 9, 42))[0] is True
+    monkeypatch.setattr(chan_analysis, "analyze_bars", lambda *a, **k: {"signals": [{"type": "其他"}]})
+    assert ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 9, 42))[0] is False
+
+
+def test_ai_stock_chan_5m_only_checked_at_a_5m_close_minute(monkeypatch):
+    from src.core.services import ai_stock_chan
+
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 9, 35)) is True
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 10, 45)) is True
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 13, 5)) is True
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 9, 33)) is False   # not a 5m boundary
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 9, 30)) is False   # session open, no bar yet
+    assert ai_stock_chan._on_5m_close(datetime(2026, 8, 11, 12, 0)) is False   # lunch break
+
+    from src.core.services import chan_minute_data
+
+    seen_freqs = []
+    monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 60)
+    monkeypatch.setattr(chan_minute_data, "aggregate_minute_rows", lambda *a, **k: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 60)
+
+    def fake_signals(ts_code, rows, freq, wanted):
+        seen_freqs.append(freq)
+        return None
+
+    monkeypatch.setattr(ai_stock_chan, "_signals_on", fake_signals)
+    ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 9, 33))  # off-boundary
+    assert seen_freqs == ["1m"]
+    seen_freqs.clear()
+    ai_stock_chan.buy_confirmed("600000.SH", datetime(2026, 8, 11, 9, 35))  # on 5m boundary
+    assert seen_freqs == ["1m", "5m"]
 
 
 def test_compute_csi_all_share_top_bottom_uses_last_turn_signal_from_chart_history(monkeypatch):

@@ -61,6 +61,8 @@ def test_center_extends_then_records_break():
 
 
 def test_third_buy_needs_departure_pullback_and_reconfirmation():
+    # Center anchored at break_stroke=3; departure segs[3] leaves it upward,
+    # the pullback holds above ZG (10) -> 三买.
     centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
     segs = [
         Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
@@ -69,6 +71,31 @@ def test_third_buy_needs_departure_pullback_and_reconfirmation():
     ]
     events = detect_buy_sell([], segs, centers)
     assert [(e.kind, e.confirm_i) for e in events if e.kind == "三买"] == [("三买", 9)]
+
+
+def test_second_buy_is_a_pullback_into_the_center_that_holds_the_floor():
+    """Same setup, but the pullback dips back inside the zone [zd, zg] without
+    breaking the lower boundary -> 二买 rather than 三买."""
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
+    segs = [
+        Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
+        Segment(2, 2, "down", 10, 8, 3), Segment(3, 3, "up", 13, 10.5, 5),
+        Segment(4, 4, "down", 11, 9.0, 7),   # low 9.0 is inside [8, 10], holds zd
+        Segment(5, 5, "up", 13, 10.0, 9),
+    ]
+    kinds = [(e.kind, e.confirm_i) for e in detect_buy_sell([], segs, centers)]
+    assert ("二买", 9) in kinds and not any(k == "三买" for k, _ in kinds)
+
+
+def test_second_buy_rejected_when_pullback_breaks_center_floor():
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
+    segs = [
+        Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
+        Segment(2, 2, "down", 10, 8, 3), Segment(3, 3, "up", 13, 10.5, 5),
+        Segment(4, 4, "down", 11, 7.0, 7),   # low 7.0 < zd 8 -> broke the floor
+        Segment(5, 5, "up", 13, 10.0, 9),
+    ]
+    assert not [e for e in detect_buy_sell([], segs, centers) if e.kind in ("二买", "三买")]
 
 
 def test_first_buy_rejects_single_metric_slowdown():
@@ -248,3 +275,40 @@ def test_recursive_levels_tag_center_level():
     levels = recursive_levels(bars, levels=2, min_gap=1)
     for depth, level in enumerate(levels):
         assert all(z.level == depth for z in level["centers"])
+
+
+def test_macd_histogram_is_indexed_by_original_bar_id():
+    """Inclusion-merged bars have gaps in ``Kline.i``; the histogram must stay
+    addressable by that id, forward-filling the gaps, so ``hist[stroke.i]``
+    lines up with the MACD-area window."""
+    from chan_native import macd_histogram
+
+    dense = [Kline(i, 10 + i * 0.1, 9 + i * 0.1, close=10 + i * 0.1) for i in range(40)]
+    gappy = [b for b in dense if b.i not in {5, 6, 17, 18, 19, 30}]  # merged-away ids
+    h_dense = macd_histogram(dense)
+    h_gappy = macd_histogram(gappy)
+    assert len(h_dense) == 40
+    assert len(h_gappy) == 40  # length follows max id + 1, not len(bars)
+    # forward-filled gaps keep the series close to the dense one
+    assert max(abs(a - b) for a, b in zip(h_dense, h_gappy)) < 0.05
+
+
+def test_buy_sell_events_are_stable_under_inclusion_gaps():
+    """detect_buy_sell must give the same MACD-area events whether the caller
+    passes the dense bars or only the subset that survived inclusion (whose
+    ``Kline.i`` values are gappy but still index the histogram correctly)."""
+    import math
+
+    dense = [
+        Kline(i, high=101 + 4 * math.sin(i / 23), low=99 + 4 * math.sin(i / 23),
+              close=100 + 4 * math.sin(i / 23) + (i / 400 if i < 700 else 1.75 - i / 900))
+        for i in range(1100)
+    ]
+    _n, _fx_, strokes, centers = calculate(dense, min_gap=4)
+    segs = build_segments(strokes)
+    gappy = [b for b in dense if b.i % 7 != 0]  # ~14% of ids removed
+
+    def kinds(bars):
+        return sorted((e.kind, e.detail) for e in detect_buy_sell(strokes, segs, centers, bars=bars))
+
+    assert kinds(dense) == kinds(gappy)

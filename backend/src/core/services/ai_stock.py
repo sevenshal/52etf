@@ -2291,15 +2291,17 @@ class AIStockPaperTradingService:
             elif held_days >= 30:
                 reason_code = "MAX_HOLD_DAYS"
             elif advice.get("action") == "卖出":
-                # AI 建议卖出：等缠论 1 分钟一卖确认后再离场
-                confirmed, chan_detail = ai_stock_chan.first_sell_confirmed(lot["ts_code"], timestamp)
+                # AI 建议卖出：等缠论 1m/5m 任一 一/二/三卖确认后再离场
+                confirmed, chan_detail = ai_stock_chan.sell_confirmed(lot["ts_code"], timestamp)
                 if confirmed:
                     reason_code = "AI_ADVICE_FIRST_SELL"
             if reason_code and quantity > 0:
                 if reason_code == "TRAILING_STOP":
                     reason_text = f"TRAILING_STOP: 目标价 {lot['target_price']:.3f} 已触及，现价 {price:.3f} 跌破 MA10({ma10:.3f})，移动止盈离场"
                 elif reason_code == "AI_ADVICE_FIRST_SELL":
-                    reason_text = f"AI_ADVICE_FIRST_SELL: AI 建议卖出且 1 分钟一卖确认，现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
+                    _chan_hit = (chan_detail or {}).get("signal") or "一/二/三卖"
+                    _chan_freq = (chan_detail or {}).get("freq") or "1m"
+                    reason_text = f"AI_ADVICE_FIRST_SELL: AI 建议卖出且缠论{_chan_freq}{_chan_hit}确认，现价 {price:.3f}，持仓收益 {pnl_pct:.2f}%"
                     if advice.get("reason"):
                         reason_text += f"；AI建议: {advice['reason']}"
                 else:
@@ -2353,9 +2355,9 @@ class AIStockPaperTradingService:
             if price <= 0:
                 continue
             try:
-                confirmed, chan_detail = ai_stock_chan.first_buy_confirmed(ts_code, timestamp)
+                confirmed, chan_detail = ai_stock_chan.buy_confirmed(ts_code, timestamp)
             except Exception as exc:
-                logger.warning("AI stock chan first-buy failed for %s: %s", ts_code, exc)
+                logger.warning("AI stock chan buy-confirm failed for %s: %s", ts_code, exc)
                 continue
             if not confirmed:
                 continue
@@ -2379,7 +2381,10 @@ class AIStockPaperTradingService:
                     quantity=quantity,
                     recommendation_id=recommendation["id"],
                     reason_code="AI_FIRST_BUY_ENTRY",
-                    reason=f"缠论一买：AI 推荐 #{recommendation['rank']}，信心 {recommendation['ai_confidence']:.1f}，1 分钟一买信号确认",
+                    reason=(
+                        f"缠论买点：AI 推荐 #{recommendation['rank']}，信心 {recommendation['ai_confidence']:.1f}，"
+                        f"{(chan_detail or {}).get('freq', '1m')}{(chan_detail or {}).get('signal', '一/二/三买')}信号确认"
+                    ),
                     state_snapshot={"fear_greed": fg, "top_bottom": top_bottom, "max_positions": max_positions, "chan": chan_detail},
                 )
             )

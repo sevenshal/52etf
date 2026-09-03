@@ -159,7 +159,9 @@ def _native_analysis(symbol: str, rows: list[dict[str, Any]], freq: str, *, conf
             "level": item.level, "trend": item.trend,
             "confirm_dt": dt_for(item.confirm_i), "break_dt": dt_for(item.broken_at) if item.broken_at is not None else None,
         })
-    events = native_detect_buy_sell(strokes, segments, centers, bars=normalized)
+    # Pass the dense pre-inclusion bars so the MACD-area 背驰 lines up with the
+    # original bar ids the strokes carry.
+    events = native_detect_buy_sell(strokes, segments, centers, bars=native_bars)
 
     def serialize_event(event: Any) -> dict[str, Any]:
         return {"name": "native_chan", "key": f"native_{freq}_{event.kind}", "value": event.kind,
