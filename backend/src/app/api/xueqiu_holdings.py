@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -981,6 +982,110 @@ def load_xueqiu_board_holding_symbols(
         connection.close()
 
 
+# 星澜壹/贰/叁号：写死为报告 robot 里的目标组合，允许环境变量覆盖（与 robot 同一套）。
+XUEQIU_XINGLAN_CUBE_STRATEGIES: Tuple[Dict[str, str], ...] = (
+    {
+        "strategy_key": "buffer",
+        "label": "星澜壹号 · 综合权重",
+        "env_key": "XUEQIU_TOP_HOLDINGS_TARGET_CUBE_SYMBOL",
+    },
+    {
+        "strategy_key": "rank_acceleration",
+        "label": "星澜贰号 · 5日排名加速",
+        "env_key": "XUEQIU_RANK_ACCELERATION_TARGET_CUBE_SYMBOL",
+    },
+    {
+        "strategy_key": "weight_price_ratio",
+        "label": "星澜叁号 · 5日权价比",
+        "env_key": "XUEQIU_WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL",
+    },
+)
+
+
+def _resolve_xinglan_cube_symbol(strategy_key: str) -> Tuple[str, str]:
+    """把星澜策略 key 映射到目标雪球组合 cube_symbol（环境变量优先，回落到 robot 常量）。"""
+    from ...robot.xueqiu_top_holdings_report import (
+        DEFAULT_TARGET_CUBE_SYMBOL,
+        RANK_ACCELERATION_TARGET_CUBE_SYMBOL,
+        WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
+    )
+
+    fallbacks = {
+        "buffer": DEFAULT_TARGET_CUBE_SYMBOL,
+        "rank_acceleration": RANK_ACCELERATION_TARGET_CUBE_SYMBOL,
+        "weight_price_ratio": WEIGHT_PRICE_RATIO_TARGET_CUBE_SYMBOL,
+    }
+    strategy = next(
+        (item for item in XUEQIU_XINGLAN_CUBE_STRATEGIES if item["strategy_key"] == strategy_key),
+        None,
+    )
+    if strategy is None:
+        raise HTTPException(status_code=400, detail="无效的星澜策略，仅支持 壹/贰/叁号")
+    cube_symbol = (os.getenv(strategy["env_key"]) or fallbacks[strategy_key]).strip().upper()
+    if not cube_symbol:
+        raise HTTPException(status_code=503, detail=f"{strategy['label']} 未配置目标组合")
+    return cube_symbol, strategy["label"]
+
+
+async def load_xueqiu_xinglan_cube_holdings(strategy_key: str) -> Dict[str, Any]:
+    """实时抓取星澜壹/贰/叁号的当前持仓，用于「最新综合持仓」表联动筛选。"""
+    from ...robot.xueqiu_top_holdings_report import (
+        fetch_target_cube_holdings,
+        get_holding_name,
+        get_holding_weight,
+        get_latest_cookie,
+        normalize_xueqiu_symbol,
+    )
+
+    cube_symbol, label = _resolve_xinglan_cube_symbol(strategy_key)
+    try:
+        cookie = get_latest_cookie()
+    except Exception as exc:  # noqa: BLE001 - surface as 503
+        raise HTTPException(status_code=503, detail=f"雪球 Cookie 不可用：{exc}") from exc
+    try:
+        raw_holdings = await fetch_target_cube_holdings(
+            cookie=cookie,
+            target_cube_symbol=cube_symbol,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - upstream/network failure
+        logger.warning("抓取 %s（%s）当前持仓失败: %s", label, cube_symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"抓取 {label} 当前持仓失败：{exc}",
+        ) from exc
+
+    holdings: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for holding in raw_holdings:
+        symbol = normalize_xueqiu_symbol(
+            holding.get("stock_symbol")
+            or holding.get("symbol")
+            or holding.get("stockSymbol")
+        )
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        weight = get_holding_weight(holding)
+        holdings.append(
+            {
+                "stock_symbol": symbol,
+                "stock_name": get_holding_name(holding),
+                "weight_pct": round(float(weight), 4) if weight is not None else None,
+            }
+        )
+    holdings.sort(key=lambda item: -(item["weight_pct"] or 0.0))
+    return {
+        "strategy_key": strategy_key,
+        "label": label,
+        "cube_symbol": cube_symbol,
+        "fetched_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "stock_symbols": [item["stock_symbol"] for item in holdings],
+        "holdings": holdings,
+    }
+
+
 def load_xueqiu_board_history(
     ths_code: str,
     active_only: bool = True,
@@ -1736,6 +1841,17 @@ def get_xueqiu_board_holding_symbols(
         active_only=active_only,
         snapshot_date=snapshot_date,
     )
+
+
+@router.get("/xueqiu-top-holdings/xinglan-holdings")
+async def get_xueqiu_xinglan_cube_holdings(
+    strategy: str = Query(
+        ...,
+        description="星澜策略：buffer（壹号）/rank_acceleration（贰号）/weight_price_ratio（叁号）",
+    ),
+    _: str = Depends(valid_admin_account),
+):
+    return await load_xueqiu_xinglan_cube_holdings(strategy)
 
 
 @router.get("/xueqiu-top-holdings/board-history")
