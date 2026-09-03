@@ -36,8 +36,31 @@ const ChanAnalysis = () => {
   const [poolPreview, setPoolPreview] = useState(null);
   const [scan, setScan] = useState(null);
   const [scanLoading, setScanLoading] = useState(false);
+  const [scanHistory, setScanHistory] = useState([]);
   const [boardOptions, setBoardOptions] = useState([]);
   const [showHistorySignals, setShowHistorySignals] = useState(false);
+
+  const loadScanHistory = useCallback(async () => {
+    try {
+      const response = await request.get('/api/chan-analysis/scans', { params: { limit: 30 } });
+      const rows = response.data || [];
+      setScanHistory(rows);
+      return rows;
+    } catch (err) {
+      console.error('扫描历史加载失败', err);
+      return [];
+    }
+  }, []);
+
+  const loadScanDetail = useCallback(async runId => {
+    if (!runId) return;
+    try {
+      const response = await request.get(`/api/chan-analysis/scans/${runId}`);
+      setScan({ ...response.data, run_id: response.data.id || runId });
+    } catch (err) {
+      console.error('扫描详情加载失败', err);
+    }
+  }, []);
 
   const searchSymbols = useCallback(query => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -88,8 +111,27 @@ const ChanAnalysis = () => {
     try {
       const response = await request.post('/api/chan-analysis/scans', scanPayload(values));
       setScan({ ...response.data, signals: [] });
+      loadScanHistory();
+    } catch (err) {
+      // 扫描是单例的：已有任务在跑时，把正在跑的那条挂上来继续看进度。
+      const rows = await loadScanHistory();
+      const running = rows.find(row => ['PENDING', 'RUNNING'].includes(row.status));
+      if (running) {
+        loadScanDetail(running.id);
+      } else {
+        setError(err?.response?.data?.detail || '启动扫描失败');
+      }
     } finally { setScanLoading(false); }
   };
+
+  // 首次进入 / 刷新页面：拉历史，并自动挂上正在运行（或最近一条）的扫描。
+  useEffect(() => {
+    loadScanHistory().then(rows => {
+      if (!rows.length) return;
+      const active = rows.find(row => ['PENDING', 'RUNNING'].includes(row.status));
+      loadScanDetail((active || rows[0]).id);
+    });
+  }, [loadScanHistory, loadScanDetail]);
 
   useEffect(() => {
     if (!scan?.run_id || !['PENDING', 'RUNNING'].includes(scan.status)) return undefined;
@@ -97,10 +139,11 @@ const ChanAnalysis = () => {
       try {
         const response = await request.get(`/api/chan-analysis/scans/${scan.run_id}`);
         setScan({ ...response.data, run_id: response.data.id || scan.run_id });
+        if (!['PENDING', 'RUNNING'].includes(response.data.status)) loadScanHistory();
       } catch (err) { console.error('扫描状态加载失败', err); }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [scan?.run_id, scan?.status]);
+  }, [scan?.run_id, scan?.status, loadScanHistory]);
 
   const loadChart = useCallback(async () => {
     setLoading(true);
@@ -432,10 +475,29 @@ const ChanAnalysis = () => {
           <Form.Item><Space><Button onClick={previewPool} loading={scanLoading}>预览股票池</Button>
             <Button type="primary" onClick={startScan} loading={scanLoading}>扫描买点</Button></Space></Form.Item>
         </Form>
+        <Space wrap style={{ marginTop: 8 }}>
+          <Text type="secondary">历史扫描</Text>
+          <Select
+            style={{ minWidth: 340 }} placeholder="选择一次扫描查看进度/结果"
+            value={scan?.run_id || undefined}
+            onChange={value => loadScanDetail(value)}
+            options={scanHistory.map(row => ({
+              value: row.id,
+              label: `${dayjs(row.started_at).format('MM-DD HH:mm')} · ${row.freq} · ${row.status} · 候选${row.candidate_count ?? 0} · 买点${row.signal_count ?? 0}`,
+            }))}
+          />
+          <Button icon={<ReloadOutlined />} size="small" onClick={loadScanHistory}>刷新列表</Button>
+          {scan && ['PENDING', 'RUNNING'].includes(scan.status) && (
+            <Button size="small" danger onClick={async () => {
+              try { await request.post(`/api/chan-analysis/scans/${scan.run_id}/cancel`); } catch (err) { console.error('取消扫描失败', err); }
+            }}>取消扫描</Button>
+          )}
+        </Space>
         {poolPreview && <Alert className="chan-pool-alert" type="info" showIcon
           message={`过滤后 ${poolPreview.count} 只股票（受扫描上限约束）`} />}
         {scan && <div className="chan-scan-result">
-          <Space wrap><Tag color={scan.status === 'SUCCESS' ? 'green' : 'blue'}>{scan.status}</Tag>
+          <Space wrap><Tag color={scan.status === 'SUCCESS' ? 'green' : ['PENDING', 'RUNNING'].includes(scan.status) ? 'blue' : scan.status === 'FAILED' ? 'red' : 'default'}>{scan.status}</Tag>
+            <Text type="secondary">{dayjs(scan.started_at).format('MM-DD HH:mm')}{scan.finished_at ? ` → ${dayjs(scan.finished_at).format('HH:mm')}` : ''}</Text>
             <Text>候选 {scan.candidate_count ?? 0}</Text><Text>已扫描 {scan.processed_count ?? 0}</Text>
             <Text>买点 {scan.signal_count ?? 0}</Text><Text type={scan.error_count ? 'danger' : 'secondary'}>失败 {scan.error_count ?? 0}</Text></Space>
           {['PENDING', 'RUNNING'].includes(scan.status) && <Progress percent={scan.candidate_count ? Math.round((scan.processed_count || 0) / scan.candidate_count * 100) : 0} />}
