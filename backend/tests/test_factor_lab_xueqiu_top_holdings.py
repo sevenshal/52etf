@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -6,6 +7,9 @@ from unittest.mock import patch
 import polars as pl
 
 import duckdb
+
+import src.robot.xueqiu_top_holdings_report as xueqiu_robot
+from fastapi import HTTPException
 
 from src.app.api import xueqiu_holdings as factor_lab
 
@@ -971,3 +975,41 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         self.assertEqual(97.0, board_history_rows[0]["low_price"])
         self.assertEqual(89.0, board_history_rows[-1]["low_price"])
         self.assertTrue(all(row["composite_weight_pct"] is not None for row in board_history_rows))
+
+    def test_xinglan_cube_holdings_normalizes_and_maps_strategy_to_cube(self):
+        captured = {}
+
+        async def fake_fetch(*, cookie, target_cube_symbol, **_kwargs):
+            captured["cookie"] = cookie
+            captured["cube"] = target_cube_symbol
+            return [
+                {"stock_symbol": "SH600519", "stock_name": "贵州茅台", "weight": 12.0},
+                {"symbol": "sz000001", "name": "平安银行", "weight": 8.0},
+                {"stock_symbol": "SH.600519", "weight": 3.0},  # duplicate after normalize
+                {"stock_symbol": "CASH", "weight": 5.0},  # dropped
+            ]
+
+        with patch.object(xueqiu_robot, "get_latest_cookie", return_value="xq_a_token=abc;"), \
+                patch.object(xueqiu_robot, "fetch_target_cube_holdings", side_effect=fake_fetch), \
+                patch.dict(
+                    "os.environ",
+                    {"XUEQIU_RANK_ACCELERATION_TARGET_CUBE_SYMBOL": "ZH9999999"},
+                    clear=False,
+                ):
+            result = asyncio.run(
+                factor_lab.load_xueqiu_xinglan_cube_holdings("rank_acceleration")
+            )
+
+        self.assertEqual("ZH9999999", captured["cube"])  # env override wins
+        self.assertEqual("xq_a_token=abc;", captured["cookie"])
+        self.assertEqual("星澜贰号 · 5日排名加速", result["label"])
+        self.assertEqual("rank_acceleration", result["strategy_key"])
+        # CASH dropped, duplicate collapsed, symbols normalized, sorted by weight desc.
+        self.assertEqual(["SH.600519", "SZ.000001"], result["stock_symbols"])
+        self.assertEqual(12.0, result["holdings"][0]["weight_pct"])
+        self.assertEqual("贵州茅台", result["holdings"][0]["stock_name"])
+
+    def test_xinglan_cube_holdings_rejects_unknown_strategy(self):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(factor_lab.load_xueqiu_xinglan_cube_holdings("no_such"))
+        self.assertEqual(400, ctx.exception.status_code)

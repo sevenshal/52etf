@@ -10,6 +10,7 @@ import {
   InputNumber,
   Modal,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -524,6 +525,13 @@ const strategyFieldsFor = (strategyKey, allFields) => (
   ))
 );
 
+// 星澜壹/贰/叁号：写死策略 key，选中后实时抓该组合当前持仓做联动筛选
+const XINGLAN_STRATEGY_OPTIONS = [
+  { value: 'buffer', label: '星澜壹号 · 综合权重' },
+  { value: 'rank_acceleration', label: '星澜贰号 · 5日排名加速' },
+  { value: 'weight_price_ratio', label: '星澜叁号 · 5日权价比' },
+];
+
 const XueqiuTopHoldingsResearch = () => {
   const [activeOnly, setActiveOnly] = useState(true);
   const [snapshotDate, setSnapshotDate] = useState('');
@@ -537,6 +545,9 @@ const XueqiuTopHoldingsResearch = () => {
   const [boardHistoryData, setBoardHistoryData] = useState(null);
   const [boardHoldingsLoading, setBoardHoldingsLoading] = useState(false);
   const [boardHistoryLoading, setBoardHistoryLoading] = useState(false);
+  const [xinglanStrategy, setXinglanStrategy] = useState(null);
+  const [xinglanHoldings, setXinglanHoldings] = useState(null);
+  const [xinglanLoading, setXinglanLoading] = useState(false);
   const [latestLoading, setLatestLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -545,6 +556,7 @@ const XueqiuTopHoldingsResearch = () => {
   const detailRequestRef = useRef(0);
   const boardHoldingsRequestRef = useRef(0);
   const boardHistoryRequestRef = useRef(0);
+  const xinglanRequestRef = useRef(0);
   const [configOpen, setConfigOpen] = useState(false);
   const [configs, setConfigs] = useState([]);
   const [configLoading, setConfigLoading] = useState(false);
@@ -847,12 +859,16 @@ const XueqiuTopHoldingsResearch = () => {
     const boardSymbols = selectedBoard
       ? new Set(selectedBoard.stockSymbols || [])
       : null;
-    const boardFilteredItems = boardSymbols
+    let linkedItems = boardSymbols
       ? latestItems.filter(item => boardSymbols.has(item.stock_symbol))
       : latestItems;
+    if (xinglanHoldings) {
+      const xinglanSymbols = new Set(xinglanHoldings.stockSymbols || []);
+      linkedItems = linkedItems.filter(item => xinglanSymbols.has(item.stock_symbol));
+    }
     const keyword = normalizeSearchText(searchText);
-    if (!keyword) return boardFilteredItems;
-    return boardFilteredItems.filter(item => (
+    if (!keyword) return linkedItems;
+    return linkedItems.filter(item => (
       normalizeSearchText(item.stock_symbol).includes(keyword)
       || normalizeSearchText(item.raw_stock_symbol).includes(keyword)
       || normalizeSearchText(item.stock_name).includes(keyword)
@@ -862,7 +878,50 @@ const XueqiuTopHoldingsResearch = () => {
         || normalizeSearchText(index.label).includes(keyword)
       ))
     ));
-  }, [latestItems, searchText, selectedBoard]);
+  }, [latestItems, searchText, selectedBoard, xinglanHoldings]);
+
+  const clearXinglanSelection = useCallback(() => {
+    xinglanRequestRef.current += 1;
+    setXinglanStrategy(null);
+    setXinglanHoldings(null);
+    setXinglanLoading(false);
+  }, []);
+
+  const selectXinglan = useCallback(async strategy => {
+    if (!strategy) {
+      clearXinglanSelection();
+      return;
+    }
+    const requestId = xinglanRequestRef.current + 1;
+    xinglanRequestRef.current = requestId;
+    setXinglanStrategy(strategy);
+    setXinglanLoading(true);
+    try {
+      const response = await request.get('/api/factor-lab/xueqiu-top-holdings/xinglan-holdings', {
+        params: { strategy },
+      });
+      if (xinglanRequestRef.current !== requestId) return;
+      const payload = response.data || {};
+      setXinglanHoldings({
+        strategyKey: payload.strategy_key || strategy,
+        label: payload.label || '',
+        cubeSymbol: payload.cube_symbol || '',
+        fetchedAt: payload.fetched_at || '',
+        stockSymbols: payload.stock_symbols || [],
+        holdings: payload.holdings || [],
+      });
+      const firstVisible = latestItems.find(item => (payload.stock_symbols || []).includes(item.stock_symbol));
+      if (firstVisible) setSelectedSymbol(firstVisible.stock_symbol);
+    } catch (error) {
+      if (xinglanRequestRef.current === requestId) {
+        setXinglanStrategy(null);
+        setXinglanHoldings(null);
+        message.error(error?.response?.data?.detail || error.message || '抓取星澜组合持仓失败');
+      }
+    } finally {
+      if (xinglanRequestRef.current === requestId) setXinglanLoading(false);
+    }
+  }, [clearXinglanSelection, latestItems]);
 
   const clearBoardSelection = useCallback(() => {
     boardHoldingsRequestRef.current += 1;
@@ -1540,10 +1599,24 @@ const XueqiuTopHoldingsResearch = () => {
               <Space wrap>
                 <StockOutlined />{snapshotDate ? '历史综合持仓' : '最新综合持仓'}
                 {selectedBoard ? <Tag color="blue">{selectedBoard.name}</Tag> : null}
+                {xinglanHoldings ? (
+                  <Tag color="purple" closable onClose={clearXinglanSelection}>
+                    {xinglanHoldings.label}（{xinglanHoldings.stockSymbols.length}只）
+                  </Tag>
+                ) : null}
               </Space>
             )}
             extra={(
               <Space wrap className="xueqiu-holdings-toolbar">
+                <Select
+                  allowClear
+                  placeholder="星澜组合联动"
+                  style={{ minWidth: 190 }}
+                  value={xinglanStrategy}
+                  loading={xinglanLoading}
+                  options={XINGLAN_STRATEGY_OPTIONS}
+                  onChange={selectXinglan}
+                />
                 <Switch
                   checked={activeOnly}
                   checkedChildren="活跃"
@@ -1595,7 +1668,18 @@ const XueqiuTopHoldingsResearch = () => {
               onRow={record => ({
                 onClick: () => setSelectedSymbol(record.stock_symbol),
               })}
-              locale={{ emptyText: latestData?.available === false ? '暂无雪球持仓快照' : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+              locale={{
+                emptyText: latestData?.available === false
+                  ? '暂无雪球持仓快照'
+                  : (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description={xinglanHoldings
+                        ? `${xinglanHoldings.label} 的当前持仓与综合持仓榜无交集`
+                        : undefined}
+                    />
+                  ),
+              }}
             />
           </Card>
         </Col>
