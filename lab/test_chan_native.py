@@ -61,6 +61,8 @@ def test_center_extends_then_records_break():
 
 
 def test_third_buy_needs_departure_pullback_and_reconfirmation():
+    # Center anchored at break_stroke=3; departure segs[3] leaves it upward,
+    # the pullback holds above ZG (10) -> 三买.
     centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
     segs = [
         Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
@@ -69,6 +71,31 @@ def test_third_buy_needs_departure_pullback_and_reconfirmation():
     ]
     events = detect_buy_sell([], segs, centers)
     assert [(e.kind, e.confirm_i) for e in events if e.kind == "三买"] == [("三买", 9)]
+
+
+def test_second_buy_is_a_pullback_into_the_center_that_holds_the_floor():
+    """Same setup, but the pullback dips back inside the zone [zd, zg] without
+    breaking the lower boundary -> 二买 rather than 三买."""
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
+    segs = [
+        Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
+        Segment(2, 2, "down", 10, 8, 3), Segment(3, 3, "up", 13, 10.5, 5),
+        Segment(4, 4, "down", 11, 9.0, 7),   # low 9.0 is inside [8, 10], holds zd
+        Segment(5, 5, "up", 13, 10.0, 9),
+    ]
+    kinds = [(e.kind, e.confirm_i) for e in detect_buy_sell([], segs, centers)]
+    assert ("二买", 9) in kinds and not any(k == "三买" for k, _ in kinds)
+
+
+def test_second_buy_rejected_when_pullback_breaks_center_floor():
+    centers = [Center(0, 2, 10, 8, 3, "bottom_candidate", "broken", 4, "formation", 3, "up")]
+    segs = [
+        Segment(0, 0, "down", 10, 8, 1), Segment(1, 1, "up", 10, 8, 2),
+        Segment(2, 2, "down", 10, 8, 3), Segment(3, 3, "up", 13, 10.5, 5),
+        Segment(4, 4, "down", 11, 7.0, 7),   # low 7.0 < zd 8 -> broke the floor
+        Segment(5, 5, "up", 13, 10.0, 9),
+    ]
+    assert not [e for e in detect_buy_sell([], segs, centers) if e.kind in ("二买", "三买")]
 
 
 def test_first_buy_rejects_single_metric_slowdown():

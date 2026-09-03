@@ -597,24 +597,38 @@ def detect_buy_sell(
                                     z.start_stroke, z.end_stroke, z.break_stroke, a.start_stroke, b.end_stroke),
                         ("一卖", z.start_stroke, z.end_stroke),
                     )
-    # Second/third-class points require a complete departure-pullback-confirm
-    # sequence.  A single breakout segment is never sufficient.
-    for j in range(2, len(segments)):
-        depart, pull, confirm = segments[j - 2], segments[j - 1], segments[j]
-        if depart.direction == "up" and pull.direction == "down" and confirm.direction == "up":
-            z = _center_before(centers, depart.start_stroke)
-            if z and z.kind == "bottom_candidate" and z.status == "broken" and z.break_stroke == depart.start_stroke and z.break_direction == "up" and depart.high > z.zg:
-                if depart.low > z.zg and pull.low > z.zg:
-                    append_once(SignalEvent("三买", confirm.end_stroke, confirm.confirm_i, "离开底部中枢后回试不回中枢", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("三买", z.start_stroke, z.end_stroke))
-                elif depart.low <= z.zg and pull.low >= depart.low:
-                    append_once(SignalEvent("二买", confirm.end_stroke, confirm.confirm_i, "上行后首次回调不破前低", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("二买", z.start_stroke, z.end_stroke))
-        if depart.direction == "down" and pull.direction == "up" and confirm.direction == "down":
-            z = _center_before(centers, depart.start_stroke)
-            if z and z.kind == "top_candidate" and z.status == "broken" and z.break_stroke == depart.start_stroke and z.break_direction == "down" and depart.low < z.zd:
-                if depart.high < z.zd and pull.high < z.zd:
-                    append_once(SignalEvent("三卖", confirm.end_stroke, confirm.confirm_i, "离开顶部中枢后回抽不回中枢", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("三卖", z.start_stroke, z.end_stroke))
-                elif depart.high >= z.zd and pull.high <= depart.high:
-                    append_once(SignalEvent("二卖", confirm.end_stroke, confirm.confirm_i, "下行后首次反抽不破前高", z.start_stroke, z.end_stroke, z.break_stroke, depart.start_stroke, confirm.end_stroke), ("二卖", z.start_stroke, z.end_stroke))
+    # Second/third-class points: scan forward from each center for the first
+    # departure-pullback-confirm triplet that leaves it.  Anchoring on the
+    # center (rather than every 3-segment window) is what makes 二/三类 fire at
+    # a realistic rate — a sliding window almost never lands with its first
+    # leg exactly on the departing segment.
+    for z in centers:
+        depart_stroke = z.break_stroke if z.break_stroke is not None else z.end_stroke + 1
+        if depart_stroke + 2 >= len(segments) or depart_stroke <= 0:
+            continue
+        depart, pull, confirm = segments[depart_stroke], segments[depart_stroke + 1], segments[depart_stroke + 2]
+        if (
+            z.kind != "top_candidate"
+            and depart.direction == "up" and pull.direction == "down" and confirm.direction == "up"
+            and z.break_direction in (None, "up")
+            and depart.high > z.zg
+            and (depart.end_price is None or depart.end_price > z.zg)
+        ):
+            if pull.low > z.zg:
+                append_once(SignalEvent("三买", confirm.end_stroke, confirm.confirm_i, "离开底部中枢后回试不回中枢", z.start_stroke, z.end_stroke, z.break_stroke, depart_stroke, confirm.end_stroke), ("三买", z.start_stroke, z.end_stroke))
+            elif pull.low >= z.zd:
+                append_once(SignalEvent("二买", confirm.end_stroke, confirm.confirm_i, "回抽中枢内不破中枢下沿", z.start_stroke, z.end_stroke, z.break_stroke, depart_stroke, confirm.end_stroke), ("二买", z.start_stroke, z.end_stroke))
+        if (
+            z.kind != "bottom_candidate"
+            and depart.direction == "down" and pull.direction == "up" and confirm.direction == "down"
+            and z.break_direction in (None, "down")
+            and depart.low < z.zd
+            and (depart.end_price is None or depart.end_price < z.zd)
+        ):
+            if pull.high < z.zd:
+                append_once(SignalEvent("三卖", confirm.end_stroke, confirm.confirm_i, "离开顶部中枢后回抽不回中枢", z.start_stroke, z.end_stroke, z.break_stroke, depart_stroke, confirm.end_stroke), ("三卖", z.start_stroke, z.end_stroke))
+            elif pull.high <= z.zg:
+                append_once(SignalEvent("二卖", confirm.end_stroke, confirm.confirm_i, "反抽中枢内不破中枢上沿", z.start_stroke, z.end_stroke, z.break_stroke, depart_stroke, confirm.end_stroke), ("二卖", z.start_stroke, z.end_stroke))
     return events
 
 
