@@ -1,89 +1,180 @@
+import threading
 from datetime import datetime
 
+import pandas as pd
+
 from src.core.services import chan_scanner as scanner_module
-from src.core.services.chan_scanner import ChanScanManager, _load_scan_rows
+from src.core.services.chan_scanner import ChanScanManager, _rows_by_symbol
 
 
-def test_load_scan_rows_aggregates_history_then_merges_target_frequency_realtime_bar(monkeypatch):
-    historical = [
-        {
-            "timestamp": datetime(2026, 8, 25, 14, 55),
-            "open": 10,
-            "high": 10.2,
-            "low": 9.9,
-            "close": 10.1,
-            "volume": 100,
-            "turnover": 1000,
-        },
-        {
-            "timestamp": datetime(2026, 8, 25, 15, 0),
-            "open": 10.1,
-            "high": 10.2,
-            "low": 10,
-            "close": 10.05,
-            "volume": 90,
-            "turnover": 900,
-        },
-    ]
-    realtime = [
-        {
-            "timestamp": datetime(2026, 8, 25, 15, 0),
-            "open": 10.1,
-            "high": 10.3,
-            "low": 10,
-            "close": 10.25,
-            "volume": 120,
-            "turnover": 1200,
-        }
-    ]
-    captured = {}
-    monkeypatch.setattr(scanner_module, "load_minute_rows", lambda *_args, **_kwargs: historical)
+class _FakeConn:
+    """Stand-in for a DuckDB connection when the batch loaders are mocked out."""
 
-    def fake_aggregate(_symbol, rows, _freq):
-        captured["history"] = rows
-        return rows
+    def execute(self, *_args, **_kwargs):
+        return self
 
-    monkeypatch.setattr(scanner_module, "aggregate_minute_rows", fake_aggregate)
+    def fetchdf(self):
+        return pd.DataFrame()
 
-    result = _load_scan_rows("000001.SZ", "5m", realtime)
+    def fetchall(self):
+        return []
 
-    assert len(result) == 2
-    assert captured["history"][-1]["close"] == 10.05
-    assert result[-1]["close"] == 10.25
+    def register(self, *_args, **_kwargs):
+        pass
+
+    def close(self):
+        pass
 
 
-def test_realtime_scan_fetches_batch_data_and_passes_it_without_persisting(monkeypatch):
-    live_row = {"timestamp": datetime(2026, 8, 25, 14, 59), "close": 10.25}
-    load_calls = []
-    realtime_calls = []
-    write_calls = []
-    monkeypatch.setattr(
-        scanner_module,
-        "filter_stock_pool",
-        lambda _filters: [{"ts_code": "000001.SZ"}],
+def test_rows_by_symbol_groups_frame_and_fills_missing_symbols():
+    frame = pd.DataFrame(
+        [
+            {"ts_code": "A", "close": 1},
+            {"ts_code": "A", "close": 2},
+            {"ts_code": "C", "close": 3},
+        ]
     )
+    out = _rows_by_symbol(frame, ["A", "B", "C"])
+    assert [row["close"] for row in out["A"]] == [1, 2]
+    assert out["B"] == []
+    assert [row["close"] for row in out["C"]] == [3]
+    assert "ts_code" not in out["A"][0]
+
+
+def _one_buy_signal(*_args, **_kwargs):
+    return {
+        "signals": [
+            {
+                "type": "一买", "detail": "d", "key": "k", "value": "v",
+                "confirmed": True, "bar_time": "2026-08-25T09:30:00", "name": "native_chan",
+            }
+        ]
+    }
+
+
+def test_run_loads_in_chunks_and_finishes_success(monkeypatch):
+    monkeypatch.setattr(scanner_module, "SCAN_CHUNK", 2)
+    monkeypatch.setattr(scanner_module, "connect_duckdb", lambda *_a, **_k: _FakeConn())
+    candidates = [{"ts_code": f"{i:06d}.SZ", "name": f"n{i}"} for i in range(5)]
+    monkeypatch.setattr(scanner_module, "filter_stock_pool", lambda _filters, connection=None: candidates)
+
+    loaded_chunks: list[list[str]] = []
+
+    def fake_batch(_conn, symbols):
+        loaded_chunks.append(list(symbols))
+        bar = {"timestamp": datetime(2026, 8, 25, 9, 30), "open": 1, "high": 1, "low": 1, "close": 1}
+        return {symbol: [bar] * 30 for symbol in symbols}
+
+    monkeypatch.setattr(scanner_module, "_batch_load_minute", fake_batch)
+    monkeypatch.setattr(scanner_module, "analyze_bars", _one_buy_signal)
+
+    writes: list[dict] = []
+    monkeypatch.setattr(scanner_module, "_write_run", lambda _run_id, **updates: writes.append(updates))
+    monkeypatch.setattr(ChanScanManager, "_active", {"job"})
+    monkeypatch.setattr(ChanScanManager, "_cancelled", set())
+    monkeypatch.setattr(ChanScanManager, "_progress", {})
+
+    ChanScanManager._run("job", "1m", {}, "buy", False)
+
+    assert loaded_chunks == [
+        ["000000.SZ", "000001.SZ"], ["000002.SZ", "000003.SZ"], ["000004.SZ"],
+    ]
+    assert writes[-1]["status"] == "SUCCESS"
+    assert writes[-1]["processed_count"] == 5
+    assert writes[-1]["signal_count"] == 5
+
+
+def test_run_skips_symbols_without_enough_bars(monkeypatch):
+    monkeypatch.setattr(scanner_module, "connect_duckdb", lambda *_a, **_k: _FakeConn())
     monkeypatch.setattr(
-        scanner_module,
-        "fetch_realtime_minute_rows",
+        scanner_module, "filter_stock_pool",
+        lambda _filters, connection=None: [{"ts_code": "000001.SZ", "name": "n"}],
+    )
+    monkeypatch.setattr(scanner_module, "_batch_load_minute", lambda _c, symbols: {symbols[0]: [{"close": 1}] * 3})
+    called = {"n": 0}
+    monkeypatch.setattr(scanner_module, "analyze_bars", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or {"signals": []})
+    writes: list[dict] = []
+    monkeypatch.setattr(scanner_module, "_write_run", lambda _run_id, **updates: writes.append(updates))
+    monkeypatch.setattr(ChanScanManager, "_active", {"job"})
+    monkeypatch.setattr(ChanScanManager, "_cancelled", set())
+    monkeypatch.setattr(ChanScanManager, "_progress", {})
+
+    ChanScanManager._run("job", "1m", {}, "buy", False)
+
+    assert called["n"] == 0  # never analyzed: only 3 bars < MIN_BARS_FOR_ANALYSIS
+    assert writes[-1]["status"] == "SUCCESS"
+    assert writes[-1]["processed_count"] == 1
+    assert writes[-1]["error_count"] == 0
+
+
+def test_watchdog_marks_run_failed_when_progress_stalls(monkeypatch):
+    monkeypatch.setattr(scanner_module, "STALL_SECONDS", 1)
+    writes: list[dict] = []
+    monkeypatch.setattr(scanner_module, "_write_run", lambda _run_id, **updates: writes.append(updates))
+    monkeypatch.setattr(ChanScanManager, "_cancelled", set())
+    monkeypatch.setattr(
+        ChanScanManager, "_progress", {"job": (7, scanner_module._time.monotonic() - 999)}
+    )
+    stop = threading.Event()
+    worker = threading.Thread(target=ChanScanManager._watchdog, args=("job", stop, 0.01))
+    worker.start()
+    worker.join(timeout=2)
+    stop.set()
+
+    assert not worker.is_alive()
+    assert writes and writes[-1]["status"] == "FAILED"
+    assert writes[-1]["processed_count"] == 7
+    assert "job" in ChanScanManager._cancelled
+
+
+def test_reap_active_drops_terminal_ids(monkeypatch):
+    class _Conn(_FakeConn):
+        def fetchall(self):
+            return [("done", "SUCCESS"), ("stuck", "RUNNING")]
+
+    monkeypatch.setattr(scanner_module, "connect_duckdb", lambda *_a, **_k: _Conn())
+    monkeypatch.setattr(ChanScanManager, "_active", {"done", "stuck"})
+    monkeypatch.setattr(ChanScanManager, "_progress", {"done": (1, 0.0), "stuck": (1, 0.0)})
+
+    ChanScanManager._reap_active()
+
+    assert ChanScanManager._active == {"stuck"}
+    assert "done" not in ChanScanManager._progress
+
+
+def test_realtime_scan_passes_live_rows_without_persisting(monkeypatch):
+    live_row = {"timestamp": datetime(2026, 8, 25, 14, 59), "open": 1, "high": 1, "low": 1, "close": 10.25}
+    monkeypatch.setattr(scanner_module, "connect_duckdb", lambda *_a, **_k: _FakeConn())
+    monkeypatch.setattr(
+        scanner_module, "filter_stock_pool",
+        lambda _filters, connection=None: [{"ts_code": "000001.SZ", "name": "n"}],
+    )
+    realtime_calls: list = []
+    monkeypatch.setattr(
+        scanner_module, "fetch_realtime_minute_rows",
         lambda symbols, freq: realtime_calls.append((symbols, freq)) or {"000001.SZ": [live_row]},
     )
-
-    def fake_load(symbol, freq, realtime_rows=None):
-        load_calls.append((symbol, freq, realtime_rows))
-        return [{"timestamp": live_row["timestamp"]}]
-
-    monkeypatch.setattr(scanner_module, "_load_scan_rows", fake_load)
+    hist_bar = {"timestamp": datetime(2026, 8, 25, 14, 55), "open": 1, "high": 1, "low": 1, "close": 1}
+    monkeypatch.setattr(scanner_module, "_batch_load_minute", lambda _c, symbols: {symbols[0]: [hist_bar] * 30})
+    merged = {}
     monkeypatch.setattr(
-        scanner_module,
-        "analyze_bars",
-        lambda *_args, **_kwargs: {"signals": []},
+        scanner_module, "merge_minute_rows",
+        lambda hist, rt: merged.setdefault("args", (hist, rt)) or ([*hist, *rt]),
     )
-    monkeypatch.setattr(scanner_module, "_write_run", lambda run_id, **updates: write_calls.append((run_id, updates)))
-    monkeypatch.setattr(ChanScanManager, "_active", {"scan-job"})
+    monkeypatch.setattr(scanner_module, "aggregate_minute_rows", lambda _s, rows, _f: rows)
+    seen_rows = {}
+    monkeypatch.setattr(
+        scanner_module, "analyze_bars",
+        lambda _symbol, rows, *_a, **_k: seen_rows.setdefault("rows", rows) or {"signals": []},
+    )
+    writes: list[dict] = []
+    monkeypatch.setattr(scanner_module, "_write_run", lambda _run_id, **updates: writes.append(updates))
+    monkeypatch.setattr(ChanScanManager, "_active", {"job"})
     monkeypatch.setattr(ChanScanManager, "_cancelled", set())
+    monkeypatch.setattr(ChanScanManager, "_progress", {})
 
-    ChanScanManager._run("scan-job", "5m", {}, "buy", True)
+    ChanScanManager._run("job", "5m", {}, "buy", True)
 
     assert realtime_calls == [(["000001.SZ"], "5MIN")]
-    assert load_calls == [("000001.SZ", "5m", [live_row])]
-    assert any(updates.get("status") == "SUCCESS" for _, updates in write_calls)
+    assert merged["args"][1] == [live_row]
+    assert any(updates.get("status") == "SUCCESS" for updates in writes)
