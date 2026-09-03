@@ -1373,3 +1373,90 @@ def test_paper_hold_evaluations_returns_newest_first():
                 row = db.get(AIStockHoldEvaluation, row_id)
                 if row:
                     db.delete(row)
+
+
+# --- configurable Chan buy/sell point selection & AI-advice sell timeout ---
+
+def test_valid_chan_types_filters_and_falls_back():
+    from src.core.services.ai_stock import _valid_chan_types, CHAN_BUY_TYPES
+
+    assert _valid_chan_types(["一买", "三买"], CHAN_BUY_TYPES) == ["一买", "三买"]
+    assert _valid_chan_types("二买", CHAN_BUY_TYPES) == ["二买"]
+    assert _valid_chan_types([], CHAN_BUY_TYPES) == list(CHAN_BUY_TYPES)
+    assert _valid_chan_types(["垃圾"], CHAN_BUY_TYPES) == list(CHAN_BUY_TYPES)
+    assert _valid_chan_types(None, CHAN_BUY_TYPES) == list(CHAN_BUY_TYPES)
+
+
+def test_chan_pick_types_orders_by_allowed_and_defaults(monkeypatch):
+    from src.core.services import ai_stock_chan
+
+    seen = {}
+    monkeypatch.setattr(ai_stock_chan, "_detect", lambda ts, now, wanted: seen.setdefault("w", tuple(wanted)) or (False, {}))
+    ai_stock_chan.buy_confirmed("600000.SH", None, types=["三买", "一买"])
+    assert seen["w"] == ("一买", "三买")  # keeps 一/二/三买 order, drops 二买
+    seen.clear()
+    ai_stock_chan.sell_confirmed("600000.SH", None, types=None)
+    assert seen["w"] == ("一卖", "二卖", "三卖")
+
+
+def test_paper_buy_passes_configured_chan_buy_types(_paper_patches, monkeypatch):
+    monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
+    got = {}
+
+    def fake_buy(ts_code, now, types=None):
+        got["types"] = types
+        return False, {"reason": "test"}
+
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "buy_confirmed", fake_buy)
+    candidates = [_recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0)]
+    service = _CapturingPaperService(_paper_state(chan_buy_types=["一买"]), price=10.0, candidates=candidates)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert got["types"] == ["一买"]
+
+
+def test_paper_ai_advice_sell_times_out_without_chan_signal(_paper_patches):
+    held = _lot("600000.SH", buy_price=100.0, target_price=120.0)
+    advice = {"600000.SH": {"action": "卖出", "reason": "板块转弱", "sell_since": datetime(2026, 8, 4, 10, 0)}}
+    state = _paper_state(held, hold_advice=advice, ai_sell_grace_days=3)
+    service = _CapturingPaperService(state, price=105.0)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.reason_code) for p in service.captured_plans] == [("SELL", "AI_ADVICE_SELL_TIMEOUT")]
+    assert "板块转弱" in service.captured_plans[0].reason
+
+
+def test_paper_ai_advice_sell_waits_forever_when_grace_is_zero(_paper_patches):
+    held = _lot("600000.SH", buy_price=100.0, target_price=120.0)
+    advice = {"600000.SH": {"action": "卖出", "reason": "x", "sell_since": datetime(2026, 7, 1, 10, 0)}}
+    state = _paper_state(held, hold_advice=advice, ai_sell_grace_days=0)
+    service = _CapturingPaperService(state, price=105.0)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert service.captured_plans == []
+
+
+def test_paper_hard_target_profit_pct_exits_below_recommendation_target(_paper_patches):
+    held = _lot("600000.SH", buy_price=100.0, target_price=120.0)
+    state = _paper_state(held, target_profit_pct=5.0)
+    service = _CapturingPaperService(state, price=106.0)  # +6% >= +5% hard TP, still < 120
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert [(p.side, p.reason_code) for p in service.captured_plans] == [("SELL", "TARGET_PROFIT")]
+
+
+def test_update_strategy_config_validates_chan_type_lists():
+    import pytest
+
+    service = AIStockPaperTradingService(provider=object())
+    out = service.update_strategy_config(updated_by="t", chan_buy_types=["三买", "一买"], ai_sell_grace_days=5)
+    assert out["parameters"]["chan_buy_types"] == ["一买", "三买"]  # normalised to 一/二/三 order
+    assert out["parameters"]["ai_sell_grace_days"] == 5
+    with pytest.raises(ValueError):
+        service.update_strategy_config(updated_by="t", chan_sell_types=[])
+    with pytest.raises(ValueError):
+        service.update_strategy_config(updated_by="t", chan_buy_types=["不存在"])
+    # restore defaults so later tests see a clean config
+    service.update_strategy_config(
+        updated_by="t",
+        chan_buy_types=list(__import__("src.core.services.ai_stock", fromlist=["CHAN_BUY_TYPES"]).CHAN_BUY_TYPES),
+        chan_sell_types=list(__import__("src.core.services.ai_stock", fromlist=["CHAN_SELL_TYPES"]).CHAN_SELL_TYPES),
+        ai_sell_grace_days=3,
+        target_profit_pct=0,
+    )
