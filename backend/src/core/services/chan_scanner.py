@@ -229,7 +229,7 @@ class ChanScanManager:
                     cls._progress.pop(run_id, None)
 
     @classmethod
-    def start(cls, freq: str, filters: dict[str, Any], signal_side: str = "buy", realtime: bool = False) -> str:
+    def start(cls, freq: str, filters: dict[str, Any], signal_side: str = "buy", realtime: bool = False, engine: str = "native") -> str:
         cls._reap_active()
         with cls._lock:
             if cls._active:
@@ -240,7 +240,7 @@ class ChanScanManager:
         try:
             connection.execute(
                 "INSERT INTO chan_scan_run VALUES (?, 'PENDING', ?, ?, 0, 0, 0, 0, ?, NULL)",
-                [run_id, freq, json.dumps({**filters, "signal_side": signal_side, "realtime": realtime}, ensure_ascii=False), datetime.now()],
+                [run_id, freq, json.dumps({**filters, "signal_side": signal_side, "realtime": realtime, "engine": engine}, ensure_ascii=False), datetime.now()],
             )
         finally:
             connection.close()
@@ -249,7 +249,7 @@ class ChanScanManager:
             cls._progress[run_id] = (0, _time.monotonic())
         threading.Thread(
             target=cls._run,
-            args=(run_id, freq, filters, signal_side, realtime),
+            args=(run_id, freq, filters, signal_side, realtime, engine),
             daemon=True,
             name=f"chan-scan-{run_id[:8]}",
         ).start()
@@ -286,7 +286,7 @@ class ChanScanManager:
                 return
 
     @classmethod
-    def _run(cls, run_id: str, freq: str, filters: dict[str, Any], signal_side: str, realtime: bool) -> None:
+    def _run(cls, run_id: str, freq: str, filters: dict[str, Any], signal_side: str, realtime: bool, engine: str = "native") -> None:
         processed = errors = 0
         signal_rows: list[dict[str, Any]] = []
         connection = None
@@ -343,7 +343,7 @@ class ChanScanManager:
                             rows = merge_minute_rows(rows, realtime_rows)
                         if len(rows) >= MIN_BARS_FOR_ANALYSIS:
                             analysis = analyze_bars(
-                                symbol, rows, freq, confirmed=not realtime, include_history=False
+                                symbol, rows, freq, confirmed=not realtime, include_history=False, engine=engine
                             )
                             for signal in analysis["signals"]:
                                 if signal["type"] in expected:

@@ -1156,7 +1156,7 @@ def test_ai_stock_chan_5m_only_checked_at_a_5m_close_minute(monkeypatch):
     monkeypatch.setattr(ai_stock_chan, "_load_1m_rows", lambda ts_code, now: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 60)
     monkeypatch.setattr(chan_minute_data, "aggregate_minute_rows", lambda *a, **k: [{"open": 1, "high": 1, "low": 1, "close": 1}] * 60)
 
-    def fake_signals(ts_code, rows, freq, wanted):
+    def fake_signals(ts_code, rows, freq, wanted, engine="native"):
         seen_freqs.append(freq)
         return None
 
@@ -1391,20 +1391,29 @@ def test_chan_pick_types_orders_by_allowed_and_defaults(monkeypatch):
     from src.core.services import ai_stock_chan
 
     seen = {}
-    monkeypatch.setattr(ai_stock_chan, "_detect", lambda ts, now, wanted: seen.setdefault("w", tuple(wanted)) or (False, {}))
+
+    def fake_detect(ts, now, wanted, engine="native"):
+        seen["w"] = tuple(wanted)
+        seen["e"] = engine
+        return False, {}
+
+    monkeypatch.setattr(ai_stock_chan, "_detect", fake_detect)
     ai_stock_chan.buy_confirmed("600000.SH", None, types=["三买", "一买"])
     assert seen["w"] == ("一买", "三买")  # keeps 一/二/三买 order, drops 二买
+    assert seen["e"] == "native"
     seen.clear()
-    ai_stock_chan.sell_confirmed("600000.SH", None, types=None)
+    ai_stock_chan.sell_confirmed("600000.SH", None, types=None, engine="czsc")
     assert seen["w"] == ("一卖", "二卖", "三卖")
+    assert seen["e"] == "czsc"
 
 
 def test_paper_buy_passes_configured_chan_buy_types(_paper_patches, monkeypatch):
     monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
     got = {}
 
-    def fake_buy(ts_code, now, types=None):
+    def fake_buy(ts_code, now, types=None, engine="native"):
         got["types"] = types
+        got["engine"] = engine
         return False, {"reason": "test"}
 
     monkeypatch.setattr(_paper_patches.ai_stock_chan, "buy_confirmed", fake_buy)
@@ -1460,3 +1469,29 @@ def test_update_strategy_config_validates_chan_type_lists():
         ai_sell_grace_days=3,
         target_profit_pct=0,
     )
+
+
+def test_update_strategy_config_accepts_chan_engine():
+    import pytest
+
+    service = AIStockPaperTradingService(provider=object())
+    out = service.update_strategy_config(updated_by="t", chan_engine="czsc")
+    assert out["parameters"]["chan_engine"] == "czsc"
+    with pytest.raises(ValueError):
+        service.update_strategy_config(updated_by="t", chan_engine="talib")
+    service.update_strategy_config(updated_by="t", chan_engine="native")  # restore
+
+
+def test_paper_buy_passes_configured_chan_engine(_paper_patches, monkeypatch):
+    monkeypatch.setattr(_paper_patches, "csi_all_share_top_bottom", lambda *a, **k: {"signal": "底"})
+    got = {}
+
+    def fake_buy(ts_code, now, types=None, engine="native"):
+        got["engine"] = engine
+        return False, {"reason": "test"}
+
+    monkeypatch.setattr(_paper_patches.ai_stock_chan, "buy_confirmed", fake_buy)
+    candidates = [_recommendation("000001.SZ", 1, confidence=90.0, rec_price=10.0)]
+    service = _CapturingPaperService(_paper_state(chan_engine="czsc"), price=10.0, candidates=candidates)
+    service.process_minute(now=datetime(2026, 8, 11, 10, 0), fear_greed=50)
+    assert got["engine"] == "czsc"

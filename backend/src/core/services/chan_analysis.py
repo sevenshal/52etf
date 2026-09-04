@@ -181,6 +181,9 @@ def _native_analysis(symbol: str, rows: list[dict[str, Any]], freq: str, *, conf
             "signal_history_count": len(history), "signal_replay_mode": "native_confirmed_structure"}
 
 
+CHAN_ENGINES = ("native", "czsc")
+
+
 def analyze_bars(
     symbol: str,
     rows: Iterable[dict[str, Any]],
@@ -188,9 +191,19 @@ def analyze_bars(
     *,
     confirmed: bool = True,
     include_history: bool = True,
+    engine: str = "native",
 ) -> dict[str, Any]:
-    """Return chart-ready structures from the strict native Chan engine."""
+    """Return chart-ready structures from the chosen Chan engine.
+
+    ``engine="native"`` (default) uses the strict left-to-right structural
+    engine; ``engine="czsc"`` uses the CZSC 1.0.1 adapter, which emits the
+    same dict shape so callers do not branch on the engine.
+    """
     normalized_rows = [dict(row) for row in rows]
     if len(normalized_rows) < 20:
         raise ValueError("At least 20 bars are required for Chan analysis")
+    if engine == "czsc":
+        from .chan_czsc import analyze_bars_czsc
+
+        return analyze_bars_czsc(symbol, normalized_rows, freq, confirmed=confirmed, include_history=include_history)
     return _native_analysis(symbol, normalized_rows, freq, confirmed=confirmed, include_history=include_history)

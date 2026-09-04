@@ -178,3 +178,27 @@ def test_realtime_scan_passes_live_rows_without_persisting(monkeypatch):
     assert realtime_calls == [(["000001.SZ"], "5MIN")]
     assert merged["args"][1] == [live_row]
     assert any(updates.get("status") == "SUCCESS" for updates in writes)
+
+
+def test_run_forwards_engine_choice_to_analyze_bars(monkeypatch):
+    monkeypatch.setattr(scanner_module, "connect_duckdb", lambda *_a, **_k: _FakeConn())
+    monkeypatch.setattr(
+        scanner_module, "filter_stock_pool",
+        lambda _filters, connection=None: [{"ts_code": "000001.SZ", "name": "n"}],
+    )
+    bar = {"timestamp": datetime(2026, 8, 25, 9, 30), "open": 1, "high": 1, "low": 1, "close": 1}
+    monkeypatch.setattr(scanner_module, "_batch_load_minute", lambda _c, symbols: {symbols[0]: [bar] * 30})
+    seen = {}
+
+    def fake_analyze(symbol, rows, freq, **kwargs):
+        seen["engine"] = kwargs.get("engine")
+        return {"signals": []}
+
+    monkeypatch.setattr(scanner_module, "analyze_bars", fake_analyze)
+    monkeypatch.setattr(scanner_module, "_write_run", lambda *_a, **_k: None)
+    monkeypatch.setattr(ChanScanManager, "_active", {"job"})
+    monkeypatch.setattr(ChanScanManager, "_cancelled", set())
+    monkeypatch.setattr(ChanScanManager, "_progress", {})
+
+    ChanScanManager._run("job", "1m", {}, "buy", False, "czsc")
+    assert seen["engine"] == "czsc"

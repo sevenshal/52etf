@@ -45,6 +45,7 @@ class StockPoolFilters(BaseModel):
 
 class ScanRequest(BaseModel):
     freq: str = Field(default="d", pattern="^(1m|5m|30m|d)$")
+    engine: str = Field(default="native", pattern="^(native|czsc)$")
     signal_side: str = Field(default="buy", pattern="^(buy|sell|all)$")
     realtime: bool = False
     filters: StockPoolFilters = Field(default_factory=StockPoolFilters)
@@ -111,6 +112,7 @@ def search_stock_symbols(
 def get_chan_chart(
     symbol: str,
     freq: str = Query(default="d", pattern="^(1m|5m|30m|d)$"),
+    engine: str = Query(default="native", pattern="^(native|czsc)$"),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     _: str = Depends(valid_admin_account),
@@ -172,7 +174,7 @@ def get_chan_chart(
         raise HTTPException(status_code=404, detail="可用K线不足20根")
 
     try:
-        analysis = analyze_bars(normalized_symbol, bars, freq=freq, confirmed=not realtime_merged)
+        analysis = analyze_bars(normalized_symbol, bars, freq=freq, confirmed=not realtime_merged, engine=engine)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
@@ -239,7 +241,9 @@ def preview_stock_pool(
 @router.post("/scans")
 def start_scan(payload: ScanRequest, _: str = Depends(valid_admin_account)):
     try:
-        run_id = ChanScanManager.start(payload.freq, payload.filters.model_dump(), payload.signal_side, payload.realtime)
+        run_id = ChanScanManager.start(
+            payload.freq, payload.filters.model_dump(), payload.signal_side, payload.realtime, engine=payload.engine
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"run_id": run_id, "status": "PENDING"}

@@ -71,15 +71,16 @@ def _load_1m_rows(ts_code: str, now: datetime) -> List[Dict[str, Any]]:
     return rows
 
 
-def _signals_on(ts_code: str, rows: List[Dict[str, Any]], freq: str, wanted: Sequence[str]) -> Dict[str, Any] | None:
+def _signals_on(ts_code: str, rows: List[Dict[str, Any]], freq: str, wanted: Sequence[str], engine: str) -> Dict[str, Any] | None:
     from .chan_analysis import analyze_bars
 
-    analysis = analyze_bars(ts_code, rows, freq, confirmed=False, include_history=False)
+    analysis = analyze_bars(ts_code, rows, freq, confirmed=False, include_history=False, engine=engine)
     hits = [s for s in (analysis.get("signals") or []) if s.get("type") in wanted]
     if not hits:
         return None
     return {
         "freq": freq,
+        "engine": engine,
         "signal": hits[0].get("type"),
         "bar_time": hits[0].get("bar_time"),
         "detail": hits[0].get("detail"),
@@ -88,7 +89,7 @@ def _signals_on(ts_code: str, rows: List[Dict[str, Any]], freq: str, wanted: Seq
     }
 
 
-def _detect(ts_code: str, now: datetime, wanted: Sequence[str]) -> Tuple[bool, Dict[str, Any]]:
+def _detect(ts_code: str, now: datetime, wanted: Sequence[str], engine: str = "native") -> Tuple[bool, Dict[str, Any]]:
     label = "/".join(wanted)
     try:
         rows_1m = _load_1m_rows(ts_code, now)
@@ -114,9 +115,9 @@ def _detect(ts_code: str, now: datetime, wanted: Sequence[str]) -> Tuple[bool, D
 
     for freq, rows in checks:
         try:
-            hit = _signals_on(ts_code, rows, freq, wanted)
+            hit = _signals_on(ts_code, rows, freq, wanted, engine)
         except Exception as exc:  # noqa: BLE001 - never let a chan error force/block a trade
-            logger.warning("AI stock chan %s %s detection failed for %s: %s", freq, label, ts_code, exc)
+            logger.warning("AI stock chan %s %s (%s) detection failed for %s: %s", freq, label, engine, ts_code, exc)
             continue
         if hit:
             return True, hit
@@ -132,11 +133,11 @@ def _pick_types(types: Sequence[str] | None, allowed: Sequence[str]) -> Tuple[st
     return tuple(allowed)
 
 
-def buy_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None) -> Tuple[bool, Dict[str, Any]]:
+def buy_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None, engine: str = "native") -> Tuple[bool, Dict[str, Any]]:
     """Whether a configured 买点 (default 一/二/三买) is active on the latest 1m (or 5m-close) bar."""
-    return _detect(ts_code, now, _pick_types(types, BUY_SIGNALS))
+    return _detect(ts_code, now, _pick_types(types, BUY_SIGNALS), engine)
 
 
-def sell_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None) -> Tuple[bool, Dict[str, Any]]:
+def sell_confirmed(ts_code: str, now: datetime, types: Sequence[str] | None = None, engine: str = "native") -> Tuple[bool, Dict[str, Any]]:
     """Whether a configured 卖点 (default 一/二/三卖) is active on the latest 1m (or 5m-close) bar."""
-    return _detect(ts_code, now, _pick_types(types, SELL_SIGNALS))
+    return _detect(ts_code, now, _pick_types(types, SELL_SIGNALS), engine)
