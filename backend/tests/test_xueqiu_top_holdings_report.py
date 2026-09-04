@@ -35,6 +35,8 @@ from src.robot.xueqiu_top_holdings_report import (
     execute_rank_acceleration_target_rebalance,
     execute_weight_price_ratio_target_rebalance,
     fetch_cube_manager_activity,
+    fetch_stock_metadata,
+    fetch_stock_metadata_map,
     latest_manager_rebalance_from_events,
     load_cached_cube_activity,
     load_or_refresh_year_top_cubes,
@@ -2784,3 +2786,151 @@ class XueqiuTopHoldingsReportTest(TestCase):
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+
+
+class FetchStockMetadataThrottleTest(TestCase):
+    """Regression: a throttled Xueqiu stock search must not silently drop stock_id.
+
+    When ``/query/v1/search/stock.json`` is rate limited it returns HTTP 200 with
+    ``{"code": 400016, "success": false}``. The previous implementation treated that
+    as "no such stock", produced a holding with no ``stock_id``, and Xueqiu rejected
+    the whole rebalance batch with ``error_code 20837`` (组合股票无效).
+    """
+
+    def _run_fetch(self, payload, *, status_code=200):
+        import httpx
+
+        def handler(_request):
+            return httpx.Response(status_code, json=payload)
+
+        real_async_client = httpx.AsyncClient
+
+        def fake_async_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(*args, **kwargs)
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.httpx.AsyncClient",
+            side_effect=fake_async_client,
+        ):
+            return asyncio.run(
+                fetch_stock_metadata(cookie="xq_a_token=test;", symbol="SZ000426")
+            )
+
+    def test_throttle_body_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._run_fetch({"code": 400016, "message": "", "success": False})
+
+    def test_no_exact_code_match_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._run_fetch({"stocks": [{"code": "SZ000001", "stock_id": 9}]})
+
+    def test_missing_stock_id_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._run_fetch({"stocks": [{"code": "SZ000426", "stock_id": None}]})
+
+    def test_exact_match_returns_stock_id(self):
+        meta = self._run_fetch(
+            {
+                "stocks": [
+                    {
+                        "code": "SZ000426",
+                        "stock_id": 1000123,
+                        "name": "兴业银锡",
+                        "ind_name": "有色金属",
+                    }
+                ]
+            }
+        )
+        self.assertEqual(1000123, meta["stock_id"])
+        self.assertEqual("兴业银锡", meta["stock_name"])
+        self.assertEqual("有色金属", meta["segment_name"])
+
+    def test_metadata_map_retries_then_gives_up(self):
+        attempts = {"n": 0}
+
+        async def always_throttled(*, cookie, symbol, timeout=15.0):
+            attempts["n"] += 1
+            raise RuntimeError("Xueqiu stock search rejected: code=400016")
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata",
+            new=AsyncMock(side_effect=always_throttled),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = asyncio.run(
+                fetch_stock_metadata_map(
+                    cookie="c", symbols=["SZ000426"], retries=3
+                )
+            )
+
+        self.assertEqual({}, result["SZ000426"])
+        self.assertEqual(3, attempts["n"])
+
+    def test_metadata_map_recovers_on_retry(self):
+        attempts = {"n": 0}
+
+        async def flaky(*, cookie, symbol, timeout=15.0):
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                raise RuntimeError("throttled")
+            return {"stock_id": 555, "stock_name": "兴业银锡", "segment_name": "有色金属"}
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata",
+            new=AsyncMock(side_effect=flaky),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = asyncio.run(
+                fetch_stock_metadata_map(
+                    cookie="c", symbols=["SZ000426"], retries=3
+                )
+            )
+
+        self.assertEqual(555, result["SZ000426"]["stock_id"])
+        self.assertEqual(2, attempts["n"])
+
+
+class BuildRebalancePayloadStockIdGuardTest(TestCase):
+    def test_raises_when_stock_id_unresolved(self):
+        top_items = [
+            {
+                "stock_symbol": "SZ.000426",
+                "stock_name": "兴业银锡",
+                "rebalance_weight_pct": 100.0,
+            }
+        ]
+        quotes = {
+            "SZ000426": {
+                "price": 10.0,
+                "name": "兴业银锡",
+                "quote": {"symbol": "SZ000426", "current": 10.0, "type": 11, "status": 1},
+            }
+        }
+        # Throttled metadata lookup collapses to an empty dict.
+        metadata = {"SZ000426": {}}
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_batch_quotes",
+            new=AsyncMock(return_value=quotes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata_map",
+            new=AsyncMock(return_value=metadata),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(
+                    build_rebalance_payload(
+                        cookie="xq_a_token=test;",
+                        target_cube_symbol="ZH3630096",
+                        target_cube_id=3664154,
+                        top_items=top_items,
+                    )
+                )
+
+        message = str(ctx.exception)
+        self.assertIn("20837", message)
+        self.assertIn("SZ000426", message)
