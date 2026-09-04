@@ -146,6 +146,9 @@ XUEQIU_ACTIVITY_REQUEST_MIN_INTERVAL_SECONDS = 0.35
 XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS = 0.08
 XUEQIU_ACTIVITY_HTTP_ERROR_COOLDOWN_SECONDS = 5.0
 XUEQIU_ACTIVITY_THROTTLE_STATUS_CODES = {400, 403, 429}
+# Xueqiu returns HTTP 200 with these body codes when a request is throttled
+# ("请求过于频繁"); the search endpoint used for stock_id lookup is affected.
+XUEQIU_THROTTLE_ERROR_CODES = {"10026", "400016"}
 XUEQIU_CUBE_RANK_HISTORY_TABLE = "xueqiu_cube_rank_history"
 XUEQIU_CUBE_RANK_HISTORY_COLUMNS = [
     "rank_date",
@@ -4786,15 +4789,30 @@ async def fetch_stock_metadata(
         )
         response.raise_for_status()
         payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected stock search payload for {raw_symbol}: {payload!r}")
+    body_code = str(payload.get("error_code") or payload.get("code") or "")
+    if payload.get("success") is False or body_code in XUEQIU_THROTTLE_ERROR_CODES:
+        raise RuntimeError(
+            f"Xueqiu stock search rejected for {raw_symbol}: "
+            f"code={body_code or None} message={payload.get('message')!r}"
+        )
     stocks = payload.get("stocks") or []
     exact = None
     for stock in stocks:
         if str(stock.get("code") or "").upper() == raw_symbol:
             exact = stock
             break
-    exact = exact or (stocks[0] if stocks else {})
+    if exact is None:
+        raise RuntimeError(
+            f"Xueqiu stock search returned no exact match for {raw_symbol} "
+            f"(candidates={[stock.get('code') for stock in stocks]})"
+        )
+    stock_id = safe_int(exact.get("stock_id"))
+    if not stock_id or stock_id <= 0:
+        raise RuntimeError(f"Xueqiu stock search missing stock_id for {raw_symbol}: {exact!r}")
     return {
-        "stock_id": safe_int(exact.get("stock_id")),
+        "stock_id": stock_id,
         "stock_name": exact.get("name") or "",
         "segment_name": exact.get("ind_name") or "",
         "raw": exact,
@@ -4806,22 +4824,36 @@ async def fetch_stock_metadata_map(
     cookie: str,
     symbols: List[str],
     timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
 ) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     for symbol in symbols:
         raw_symbol = to_raw_xueqiu_symbol(symbol)
         if not raw_symbol:
             continue
-        try:
-            result[raw_symbol] = await fetch_stock_metadata(
-                cookie=cookie,
-                symbol=raw_symbol,
-                timeout=timeout,
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                result[raw_symbol] = await fetch_stock_metadata(
+                    cookie=cookie,
+                    symbol=raw_symbol,
+                    timeout=timeout,
+                )
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < retries:
+                    await asyncio.sleep(min(8.0, 0.5 * (3 ** (attempt - 1))))
+        if last_error is not None:
+            logger.warning(
+                "Failed to fetch stock metadata for %s after %d attempt(s): %s",
+                raw_symbol,
+                max(1, retries),
+                last_error,
             )
-            await asyncio.sleep(0.05)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to fetch stock metadata for %s: %s", raw_symbol, exc)
             result[raw_symbol] = {}
+        await asyncio.sleep(0.35)
     return result
 
 
@@ -4921,6 +4953,17 @@ async def build_rebalance_payload(
         item["stock_name"] = stock_name or item.get("stock_name")
         item["stock_id"] = stock_id
         item["segment_name"] = segment_name
+
+    missing_stock_id = [
+        row["stock_symbol"]
+        for row in holdings
+        if not (safe_int(row.get("stock_id")) or 0) > 0
+    ]
+    if missing_stock_id:
+        raise RuntimeError(
+            "Xueqiu rebalance aborted: unresolved stock_id for "
+            f"{missing_stock_id}; 雪球会以 error_code 20837（组合股票无效）拒绝整批调仓，本次不提交。"
+        )
 
     cash_pct = round(100.0 - sum(safe_float(row.get("weight")) or 0.0 for row in holdings), 2)
     if abs(cash_pct) < 0.005:
