@@ -417,6 +417,7 @@ const AIStock = () => {
   const [paperStopLossFullPct, setPaperStopLossFullPct] = useState(-12.0);
   const [paperTradingStartMinute, setPaperTradingStartMinute] = useState(585);
   const [paperHoldEvalEnabled, setPaperHoldEvalEnabled] = useState(false);
+  const [paperChanEngine, setPaperChanEngine] = useState('native');
   const [paperChanBuyTypes, setPaperChanBuyTypes] = useState(['一买', '二买', '三买']);
   const [paperChanSellTypes, setPaperChanSellTypes] = useState(['一卖', '二卖', '三卖']);
   const [paperAiSellGraceDays, setPaperAiSellGraceDays] = useState(3);
@@ -589,6 +590,7 @@ const AIStock = () => {
     setPaperStopLossFullPct(p.stop_loss_full_pct ?? -12.0);
     setPaperTradingStartMinute(p.trading_start_minute ?? 585);
     setPaperHoldEvalEnabled(p.hold_evaluation_enabled ?? false);
+    setPaperChanEngine(p.chan_engine ?? 'native');
     setPaperChanBuyTypes(p.chan_buy_types ?? ['一买', '二买', '三买']);
     setPaperChanSellTypes(p.chan_sell_types ?? ['一卖', '二卖', '三卖']);
     setPaperAiSellGraceDays(p.ai_sell_grace_days ?? 3);
@@ -609,6 +611,7 @@ const AIStock = () => {
         stop_loss_full_pct: paperStopLossFullPct,
         trading_start_minute: paperTradingStartMinute,
         hold_evaluation_enabled: paperHoldEvalEnabled,
+        chan_engine: paperChanEngine,
         chan_buy_types: paperChanBuyTypes,
         chan_sell_types: paperChanSellTypes,
         ai_sell_grace_days: paperAiSellGraceDays,
@@ -623,7 +626,7 @@ const AIStock = () => {
     } finally {
       setSavingPaperConfig(false);
     }
-  }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperChanBuyTypes, paperChanSellTypes, paperAiSellGraceDays, paperTargetProfitPct]);
+  }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperChanEngine, paperChanBuyTypes, paperChanSellTypes, paperAiSellGraceDays, paperTargetProfitPct]);
 
   const curveOption = useMemo(() => {
     const rows = curve.slice(-600);
@@ -915,6 +918,9 @@ const AIStock = () => {
           <Switch checked={paperEnabled} onChange={setPaperEnabled} checkedChildren="启用" unCheckedChildren="停用" />
           <Divider style={{ margin: '4px 0' }}>买入（缠论 1m/5m 买点触发，每笔固定仓位）</Divider>
           <Row gutter={12}>
+            <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>信号引擎</Text>
+              <Select style={{ width: '100%' }} value={paperChanEngine} onChange={setPaperChanEngine}
+                options={[{ label: '自算结构引擎', value: 'native' }, { label: '开源 CZSC', value: 'czsc' }]} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>监控买入数量</Text><Input type="number" value={paperBuyTopN} onChange={e => setPaperBuyTopN(Number(e.target.value) || 1)} min={1} max={50} step={1} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>最低信心分</Text><Input type="number" value={paperBuyMinConfidence} onChange={e => setPaperBuyMinConfidence(Number(e.target.value) || 0)} min={0} max={100} step={1} /></Col>
             <Col span={8}><Text type="secondary" style={{ fontSize: 12 }}>单笔仓位比例</Text><Input type="number" value={paperPositionPct} onChange={e => setPaperPositionPct(Number(e.target.value) || 0)} min={0.01} max={1} step={0.01} /></Col>

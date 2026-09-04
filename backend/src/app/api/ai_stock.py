@@ -223,6 +223,7 @@ class PaperStrategyConfigUpdate(BaseModel):
     stop_loss_full_pct: Optional[float] = Field(default=None, ge=-100, le=0)
     trading_start_minute: Optional[float] = Field(default=None, ge=570, le=690)
     hold_evaluation_enabled: Optional[bool] = None
+    chan_engine: Optional[str] = Field(default=None, pattern="^(native|czsc)$", description="信号引擎：native=自算结构引擎，czsc=开源 CZSC")
     chan_buy_types: Optional[list[str]] = Field(default=None, description="进场认可的缠论买点，一买/二买/三买 的任意子集")
     chan_sell_types: Optional[list[str]] = Field(default=None, description="AI 建议卖出时认可的缠论卖点子集")
     ai_sell_grace_days: Optional[float] = Field(default=None, ge=0, le=60, description="AI 建议卖出后等不到缠论卖点，最多再等的交易日数；0=一直等")

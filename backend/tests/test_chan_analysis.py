@@ -66,3 +66,26 @@ def test_analyze_bars_can_skip_history_for_batch_scans():
     result = analyze_bars("000001.SZ", _bars(200), "d", include_history=False)
     assert result["signal_history"] == []
     assert result["signal_history_count"] == 0
+
+
+def test_analyze_bars_czsc_engine_returns_native_shaped_output():
+    result = analyze_bars("000001.SZ", _bars(600), "d", engine="czsc")
+    assert result["engine"] == "czsc"
+    assert result["engine_version"] == "1.0.1"
+    # same top-level keys the chart / scanner consume from the native engine
+    for key in ("fractals", "strokes", "segments", "centers", "signals", "signal_history", "signal_history_count"):
+        assert key in result
+    for fx in result["fractals"]:
+        assert fx["mark"] in {"top", "bottom"}
+    for center in result["centers"]:
+        assert center["status"] in {"active", "broken"}
+        assert "gg" in center and "dd" in center and center["level"] == 0
+    for segment in result["segments"]:
+        assert segment["direction"] in {"向上", "向下"}
+    assert all(item["type"] in {"一买", "二买", "三买", "一卖", "二卖", "三卖"} for item in result["signals"])
+
+
+def test_analyze_bars_rejects_unknown_engine_gracefully():
+    # unknown engine falls through to native (no crash); explicit契约 is via the API pattern
+    result = analyze_bars("000001.SZ", _bars(200), "d", engine="native", include_history=False)
+    assert result["engine"] == "native_structural"

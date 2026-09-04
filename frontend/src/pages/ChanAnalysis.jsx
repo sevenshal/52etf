@@ -29,6 +29,7 @@ const ChanAnalysis = () => {
   const symbolSearchTimer = useRef(null);
   const symbolSearchSequence = useRef(0);
   const [freq, setFreq] = useState('d');
+  const [engine, setEngine] = useState('native');
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -82,6 +83,7 @@ const ChanAnalysis = () => {
 
   const scanPayload = useCallback(values => ({
     freq: values.freq || 'd',
+    engine: values.engine || 'native',
     signal_side: 'buy',
     realtime: Boolean(values.realtime),
     filters: {
@@ -152,6 +154,7 @@ const ChanAnalysis = () => {
       const response = await request.get(`/api/chan-analysis/chart/${symbol}`, {
         params: {
           freq,
+          engine,
           start_date: (freq === 'd'
             ? dayjs().subtract(3, 'year')
             : dayjs().subtract(MINUTE_LOOKBACK_CALENDAR_DAYS, 'day')).format('YYYY-MM-DD'),
@@ -165,7 +168,7 @@ const ChanAnalysis = () => {
     } finally {
       setLoading(false);
     }
-  }, [freq, symbol]);
+  }, [freq, engine, symbol]);
 
   useEffect(() => { loadChart(); }, [loadChart]);
 
@@ -432,6 +435,7 @@ const ChanAnalysis = () => {
             onChange={setSymbol} placeholder="输入股票名称或代码" notFoundContent={symbolSearching ? <Spin size="small" /> : '没有匹配股票'}
             style={{ width: 240 }} />
           <Segmented options={PERIODS} value={freq} onChange={setFreq} />
+          <Segmented options={[{ label: '自算', value: 'native' }, { label: 'CZSC', value: 'czsc' }]} value={engine} onChange={setEngine} />
           <Button icon={<ReloadOutlined />} onClick={loadChart}>刷新</Button>
         </Space>
       </div>
@@ -440,7 +444,7 @@ const ChanAnalysis = () => {
         extra={payload?.analysis && <Space size="middle" wrap>
           <Space size={6}><Text type="secondary">历史买卖点</Text><Switch size="small" checked={showHistorySignals} onChange={setShowHistorySignals} /></Space>
           <Text type="secondary">方向性线段常显 · 悬停查看详情</Text>
-          <Text type="secondary">自算结构引擎 v{payload.analysis.engine_version} · {payload.analysis.bar_count}根</Text>
+          <Text type="secondary">{payload.analysis.engine === 'czsc' ? `CZSC ${payload.analysis.engine_version}` : `自算结构引擎 v${payload.analysis.engine_version}`} · {payload.analysis.bar_count}根</Text>
         </Space>}>
         <Spin spinning={loading}>
           <div className="chan-chart-wrap">
@@ -457,7 +461,10 @@ const ChanAnalysis = () => {
       </Card>
       <Card title="股票池缠论扫描" className="chan-signal-card"
         extra={<Text type="secondary">先按市值、流动性、指数过滤，再运行严格结构引擎</Text>}>
-        <Form form={scanForm} layout="inline" initialValues={{ freq: 'd', minTotalMv: 50, minAvgAmount: 1, limit: 500, realtime: false }}>
+        <Form form={scanForm} layout="inline" initialValues={{ freq: 'd', engine: 'native', minTotalMv: 50, minAvgAmount: 1, limit: 500, realtime: false }}>
+          <Form.Item name="engine" label="引擎"><Select style={{ width: 100 }} options={[
+            { label: '自算', value: 'native' }, { label: 'CZSC', value: 'czsc' },
+          ]} /></Form.Item>
           <Form.Item name="freq" label="周期"><Select style={{ width: 90 }} options={[
             { label: '日K', value: 'd' }, { label: '30m', value: '30m' }, { label: '5m', value: '5m' }, { label: '1m', value: '1m' },
           ]} /></Form.Item>

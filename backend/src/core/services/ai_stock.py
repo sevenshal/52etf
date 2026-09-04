@@ -82,6 +82,7 @@ NEWS_ANCHOR_TIME = "14:00"
 # Paper-trading Chan buy/sell point selection (configurable via strategy_params).
 CHAN_BUY_TYPES = ("一买", "二买", "三买")
 CHAN_SELL_TYPES = ("一卖", "二卖", "三卖")
+CHAN_ENGINES = ("native", "czsc")  # 自算结构引擎 / 开源 CZSC 引擎
 AI_SELL_GRACE_DAYS = 3  # AI 建议卖出后，等不到缠论卖点时最多再等这么多交易日就市价离场
 
 
@@ -2176,6 +2177,7 @@ class AIStockPaperTradingService:
                     "stop_loss_full_pct": -12.0,
                     "trading_start_minute": 585,
                     "hold_evaluation_enabled": False,
+                    "chan_engine": "native",
                     "chan_buy_types": list(CHAN_BUY_TYPES),
                     "chan_sell_types": list(CHAN_SELL_TYPES),
                     "ai_sell_grace_days": AI_SELL_GRACE_DAYS,
@@ -2288,6 +2290,7 @@ class AIStockPaperTradingService:
         position_pct = float(_safe_float(sp.get("position_pct"), 0.10))
         chan_buy_types = _valid_chan_types(sp.get("chan_buy_types"), CHAN_BUY_TYPES)
         chan_sell_types = _valid_chan_types(sp.get("chan_sell_types"), CHAN_SELL_TYPES)
+        chan_engine = sp.get("chan_engine") if sp.get("chan_engine") in CHAN_ENGINES else "native"
         # 硬止盈：无论 AI 目标价多高，涨到买入价 * (1 + target_profit_pct%) 就止盈；0 = 关闭
         target_profit_pct = _safe_float(sp.get("target_profit_pct"), 0.0) or 0.0
         # AI 建议卖出后等不到缠论卖点，最多再等这么多交易日就市价离场；<=0 = 一直等
@@ -2327,7 +2330,7 @@ class AIStockPaperTradingService:
             elif advice.get("action") == "卖出":
                 # AI 建议卖出：优先等缠论 1m/5m 配置的卖点确认；等不到就在
                 # ai_sell_grace_days 个交易日后市价离场，避免仓位被永久套住。
-                confirmed, chan_detail = ai_stock_chan.sell_confirmed(lot["ts_code"], timestamp, types=chan_sell_types)
+                confirmed, chan_detail = ai_stock_chan.sell_confirmed(lot["ts_code"], timestamp, types=chan_sell_types, engine=chan_engine)
                 if confirmed:
                     reason_code = "AI_ADVICE_FIRST_SELL"
                 elif ai_sell_grace_days > 0 and advice.get("sell_since") is not None:
@@ -2398,7 +2401,7 @@ class AIStockPaperTradingService:
             if price <= 0:
                 continue
             try:
-                confirmed, chan_detail = ai_stock_chan.buy_confirmed(ts_code, timestamp, types=chan_buy_types)
+                confirmed, chan_detail = ai_stock_chan.buy_confirmed(ts_code, timestamp, types=chan_buy_types, engine=chan_engine)
             except Exception as exc:
                 logger.warning("AI stock chan buy-confirm failed for %s: %s", ts_code, exc)
                 continue
@@ -2544,12 +2547,15 @@ class AIStockPaperTradingService:
         allowed = {
             "top_positions", "bottom_positions", "buy_top_n", "buy_min_confidence",
             "position_pct", "stop_loss_full_pct", "trading_start_minute",
-            "hold_evaluation_enabled", "chan_buy_types", "chan_sell_types",
+            "hold_evaluation_enabled", "chan_engine", "chan_buy_types", "chan_sell_types",
             "ai_sell_grace_days", "target_profit_pct",
         }
         unknown = set(parameters) - allowed
         if unknown:
             raise ValueError(f"未知参数: {', '.join(sorted(unknown))}")
+        if "chan_engine" in parameters:
+            if parameters["chan_engine"] not in CHAN_ENGINES:
+                raise ValueError(f"chan_engine 只能是 {', '.join(CHAN_ENGINES)}")
         list_params = {
             "chan_buy_types": CHAN_BUY_TYPES,
             "chan_sell_types": CHAN_SELL_TYPES,
@@ -2567,7 +2573,7 @@ class AIStockPaperTradingService:
                 raise ValueError(f"{name} 至少选一个，且只能是 {', '.join(choices)}")
             parameters[name] = picked
         for name, value in parameters.items():
-            if name in list_params:
+            if name in list_params or name == "chan_engine":
                 continue
             try:
                 value = float(value)
