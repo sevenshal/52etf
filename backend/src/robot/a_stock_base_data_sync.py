@@ -37,6 +37,20 @@ from ..core.analytics_database import (
 )
 from ..core.database import AIStockTHSIndexCache, get_db_ctx
 from ..core.duckdb_utils import connect_duckdb
+from ..core.tushare_statement_fields import (
+    BALANCESHEET_DATE_FIELDS,
+    BALANCESHEET_NUMERIC_FIELDS,
+    BALANCESHEET_TEXT_FIELDS,
+    CASHFLOW_DATE_FIELDS,
+    CASHFLOW_NUMERIC_FIELDS,
+    CASHFLOW_TEXT_FIELDS,
+    FINA_INDICATOR_DATE_FIELDS,
+    FINA_INDICATOR_NUMERIC_FIELDS,
+    FINA_INDICATOR_TEXT_FIELDS,
+    INCOME_DATE_FIELDS,
+    INCOME_NUMERIC_FIELDS,
+    INCOME_TEXT_FIELDS,
+)
 from ..core.services.chinabond import ChinaBondYieldCurveService
 from ..core.services.tushare import TushareService
 from .a_stock_base_data_config import (
@@ -2912,30 +2926,45 @@ class AStockBaseDataSyncService:
         }
 
 
-_INCOME_NUMERIC_COLUMNS = (
-    "rd_exp",
-    "revenue",
-    "n_income_attr_p",
-    "operate_profit",
-    "total_profit",
-    "total_cogs",
-    "basic_eps",
-    "income_tax",
-    "fin_exp_int_exp",
-)
+# 4 张财务报表的列白名单直接复用建表用的同一份 tushare 官方字段清单，
+# 而不是在这里再抄一遍：抄一遍的后果是"字段从接口拉回来了、却在写库前被静默丢弃"，
+# 这种 bug 只能靠肉眼比对两处列表才发现（`revenue` 就这么丢过一次）。
+_STATEMENT_REPORT_KEY_COLUMNS = ("ts_code", "end_date", "ann_date", "report_type")
+_STATEMENT_PERIOD_KEY_COLUMNS = ("ts_code", "end_date", "ann_date")
 
 
-def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [
+def _statement_frame_columns(
+    date_fields: Tuple[str, ...],
+    text_fields: Tuple[str, ...],
+    numeric_fields: Tuple[str, ...],
+) -> List[str]:
+    return [
         "id",
         "ts_code",
         "end_date",
-        "ann_date",
-        "report_type",
-        *_INCOME_NUMERIC_COLUMNS,
+        *date_fields,
+        *text_fields,
+        *numeric_fields,
         "created_at",
         "updated_at",
     ]
+
+
+def _normalize_statement_frame(
+    frame: pd.DataFrame,
+    *,
+    date_fields: Tuple[str, ...],
+    text_fields: Tuple[str, ...],
+    numeric_fields: Tuple[str, ...],
+    key_columns: Tuple[str, ...],
+) -> pd.DataFrame:
+    """把 tushare 的财务报表 DataFrame 归一化成可直接落库的列集合。
+
+    `id` 由 key_columns 做 sha1 得到，口径必须和历史保持一致，否则同一份报表会被
+    当成新行插进去（而不是覆盖），产生重复期数。参与主键的文本列(report_type)用
+    空串兜底，保证 None 和 "" 不会散成两个不同的 id。
+    """
+    columns = _statement_frame_columns(date_fields, text_fields, numeric_fields)
     if frame.empty:
         return pd.DataFrame(columns=columns)
 
@@ -2943,16 +2972,18 @@ def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = pd.DataFrame(index=frame.index)
     normalized["ts_code"] = _clean_text_series(frame, "ts_code")
     normalized["end_date"] = _date_series(frame, "end_date")
-    normalized["ann_date"] = _date_series(frame, "ann_date")
-    normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
-    for column in _INCOME_NUMERIC_COLUMNS:
+    for column in date_fields:
+        normalized[column] = _date_series(frame, column)
+    for column in text_fields:
+        series = _clean_text_series(frame, column)
+        normalized[column] = series.fillna("") if column in key_columns else series
+    for column in numeric_fields:
         normalized[column] = _numeric_series(frame, column, 4)
     normalized = normalized.dropna(subset=["ts_code", "end_date"])
     if normalized.empty:
         return pd.DataFrame(columns=columns)
 
-    key_columns = ["ts_code", "end_date", "ann_date", "report_type"]
-    normalized["id"] = normalized[key_columns].apply(
+    normalized["id"] = normalized[list(key_columns)].apply(
         lambda row: hashlib.sha1(
             "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
         ).hexdigest(),
@@ -2964,253 +2995,121 @@ def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return normalized.loc[:, columns]
 
 
-def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+def _bulk_upsert_statement_frame(
+    analytics_db: Session,
+    table_name: str,
+    frame: pd.DataFrame,
+    *,
+    date_fields: Tuple[str, ...],
+    text_fields: Tuple[str, ...],
+    numeric_fields: Tuple[str, ...],
+    key_columns: Tuple[str, ...],
+) -> int:
     if frame.empty:
         return 0
-    normalized = _normalize_income_frame(frame)
+    normalized = _normalize_statement_frame(
+        frame,
+        date_fields=date_fields,
+        text_fields=text_fields,
+        numeric_fields=numeric_fields,
+        key_columns=key_columns,
+    )
     if normalized.empty:
         return 0
-
     columns = list(normalized.columns)
-    table = AStockIncome.__table__
     analytics_db.commit()
     # Keep this on the same DuckDB bulk path used by market/index daily:
     # register one DataFrame and let DuckDB execute a set-based INSERT OR REPLACE.
-    _insert_or_replace_analytics_frame(
-        table.name,
-        columns,
-        normalized.loc[:, columns],
-    )
+    _insert_or_replace_analytics_frame(table_name, columns, normalized.loc[:, columns])
     return len(normalized)
 
 
-_BALANCESHEET_NUMERIC_COLUMNS = (
-    "total_assets",
-    "total_liab",
-    "total_cur_assets",
-    "total_cur_liab",
-    "total_hldr_eqy_exc_min_int",
-    "money_cap",
-    "accounts_receiv",
-    "inventories",
-    "goodwill",
-    "fix_assets",
-    "lt_borr",
-    "st_borr",
-    "notes_payable",
-    "acct_payable",
-)
+def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_statement_frame(
+        frame,
+        date_fields=INCOME_DATE_FIELDS,
+        text_fields=INCOME_TEXT_FIELDS,
+        numeric_fields=INCOME_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
+    )
+
+
+def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    return _bulk_upsert_statement_frame(
+        analytics_db,
+        AStockIncome.__tablename__,
+        frame,
+        date_fields=INCOME_DATE_FIELDS,
+        text_fields=INCOME_TEXT_FIELDS,
+        numeric_fields=INCOME_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
+    )
 
 
 def _normalize_balancesheet_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "id",
-        "ts_code",
-        "end_date",
-        "ann_date",
-        "report_type",
-        "comp_type",
-        *_BALANCESHEET_NUMERIC_COLUMNS,
-        "created_at",
-        "updated_at",
-    ]
-    if frame.empty:
-        return pd.DataFrame(columns=columns)
-
-    now = datetime.now()
-    normalized = pd.DataFrame(index=frame.index)
-    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
-    normalized["end_date"] = _date_series(frame, "end_date")
-    normalized["ann_date"] = _date_series(frame, "ann_date")
-    normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
-    normalized["comp_type"] = _clean_text_series(frame, "comp_type")
-    for column in _BALANCESHEET_NUMERIC_COLUMNS:
-        normalized[column] = _numeric_series(frame, column, 4)
-    normalized = normalized.dropna(subset=["ts_code", "end_date"])
-    if normalized.empty:
-        return pd.DataFrame(columns=columns)
-
-    key_columns = ["ts_code", "end_date", "ann_date", "report_type"]
-    normalized["id"] = normalized[key_columns].apply(
-        lambda row: hashlib.sha1(
-            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
-        ).hexdigest(),
-        axis=1,
+    return _normalize_statement_frame(
+        frame,
+        date_fields=BALANCESHEET_DATE_FIELDS,
+        text_fields=BALANCESHEET_TEXT_FIELDS,
+        numeric_fields=BALANCESHEET_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
     )
-    normalized["created_at"] = now
-    normalized["updated_at"] = now
-    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
-    return normalized.loc[:, columns]
 
 
 def _bulk_upsert_balancesheet_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
-    if frame.empty:
-        return 0
-    normalized = _normalize_balancesheet_frame(frame)
-    if normalized.empty:
-        return 0
-    columns = list(normalized.columns)
-    analytics_db.commit()
-    _insert_or_replace_analytics_frame(
+    return _bulk_upsert_statement_frame(
+        analytics_db,
         AStockBalanceSheet.__tablename__,
-        columns,
-        normalized.loc[:, columns],
+        frame,
+        date_fields=BALANCESHEET_DATE_FIELDS,
+        text_fields=BALANCESHEET_TEXT_FIELDS,
+        numeric_fields=BALANCESHEET_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
     )
-    return len(normalized)
-
-
-_CASHFLOW_NUMERIC_COLUMNS = (
-    "net_profit",
-    "n_cashflow_act",
-    "c_pay_acq_const_fiolta",
-    "free_cashflow",
-    "n_cashflow_inv_act",
-    "n_cash_flows_fnc_act",
-    "c_fr_sale_sg",
-    "end_bal_cash",
-    "n_incr_cash_cash_equ",
-    "c_pay_dist_dpcp_int_exp",
-)
 
 
 def _normalize_cashflow_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "id",
-        "ts_code",
-        "end_date",
-        "ann_date",
-        "report_type",
-        *_CASHFLOW_NUMERIC_COLUMNS,
-        "created_at",
-        "updated_at",
-    ]
-    if frame.empty:
-        return pd.DataFrame(columns=columns)
-
-    now = datetime.now()
-    normalized = pd.DataFrame(index=frame.index)
-    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
-    normalized["end_date"] = _date_series(frame, "end_date")
-    normalized["ann_date"] = _date_series(frame, "ann_date")
-    normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
-    for column in _CASHFLOW_NUMERIC_COLUMNS:
-        normalized[column] = _numeric_series(frame, column, 4)
-    normalized = normalized.dropna(subset=["ts_code", "end_date"])
-    if normalized.empty:
-        return pd.DataFrame(columns=columns)
-
-    key_columns = ["ts_code", "end_date", "ann_date", "report_type"]
-    normalized["id"] = normalized[key_columns].apply(
-        lambda row: hashlib.sha1(
-            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
-        ).hexdigest(),
-        axis=1,
+    return _normalize_statement_frame(
+        frame,
+        date_fields=CASHFLOW_DATE_FIELDS,
+        text_fields=CASHFLOW_TEXT_FIELDS,
+        numeric_fields=CASHFLOW_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
     )
-    normalized["created_at"] = now
-    normalized["updated_at"] = now
-    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
-    return normalized.loc[:, columns]
 
 
 def _bulk_upsert_cashflow_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
-    if frame.empty:
-        return 0
-    normalized = _normalize_cashflow_frame(frame)
-    if normalized.empty:
-        return 0
-    columns = list(normalized.columns)
-    analytics_db.commit()
-    _insert_or_replace_analytics_frame(
+    return _bulk_upsert_statement_frame(
+        analytics_db,
         AStockCashFlow.__tablename__,
-        columns,
-        normalized.loc[:, columns],
+        frame,
+        date_fields=CASHFLOW_DATE_FIELDS,
+        text_fields=CASHFLOW_TEXT_FIELDS,
+        numeric_fields=CASHFLOW_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_REPORT_KEY_COLUMNS,
     )
-    return len(normalized)
-
-
-_FINA_INDICATOR_NUMERIC_COLUMNS = (
-    "eps",
-    "dt_eps",
-    "bps",
-    "ocfps",
-    "roe",
-    "roe_waa",
-    "roe_dt",
-    "roa",
-    "roic",
-    "grossprofit_margin",
-    "netprofit_margin",
-    "debt_to_assets",
-    "current_ratio",
-    "quick_ratio",
-    "profit_dedt",
-    "extra_item",
-    "netprofit_yoy",
-    "dt_netprofit_yoy",
-    "or_yoy",
-    "op_yoy",
-    "ocf_to_or",
-    "ocf_to_debt",
-    "interestdebt",
-    "fcff",
-    "fcfe",
-    "netdebt",
-    "ebit",
-    "ebitda",
-)
 
 
 def _normalize_fina_indicator_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "id",
-        "ts_code",
-        "end_date",
-        "ann_date",
-        *_FINA_INDICATOR_NUMERIC_COLUMNS,
-        "created_at",
-        "updated_at",
-    ]
-    if frame.empty:
-        return pd.DataFrame(columns=columns)
-
-    now = datetime.now()
-    normalized = pd.DataFrame(index=frame.index)
-    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
-    normalized["end_date"] = _date_series(frame, "end_date")
-    normalized["ann_date"] = _date_series(frame, "ann_date")
-    for column in _FINA_INDICATOR_NUMERIC_COLUMNS:
-        normalized[column] = _numeric_series(frame, column, 4)
-    normalized = normalized.dropna(subset=["ts_code", "end_date"])
-    if normalized.empty:
-        return pd.DataFrame(columns=columns)
-
-    key_columns = ["ts_code", "end_date", "ann_date"]
-    normalized["id"] = normalized[key_columns].apply(
-        lambda row: hashlib.sha1(
-            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
-        ).hexdigest(),
-        axis=1,
+    return _normalize_statement_frame(
+        frame,
+        date_fields=FINA_INDICATOR_DATE_FIELDS,
+        text_fields=FINA_INDICATOR_TEXT_FIELDS,
+        numeric_fields=FINA_INDICATOR_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
     )
-    normalized["created_at"] = now
-    normalized["updated_at"] = now
-    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
-    return normalized.loc[:, columns]
 
 
 def _bulk_upsert_fina_indicator_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
-    if frame.empty:
-        return 0
-    normalized = _normalize_fina_indicator_frame(frame)
-    if normalized.empty:
-        return 0
-    columns = list(normalized.columns)
-    analytics_db.commit()
-    _insert_or_replace_analytics_frame(
+    return _bulk_upsert_statement_frame(
+        analytics_db,
         AStockFinaIndicator.__tablename__,
-        columns,
-        normalized.loc[:, columns],
+        frame,
+        date_fields=FINA_INDICATOR_DATE_FIELDS,
+        text_fields=FINA_INDICATOR_TEXT_FIELDS,
+        numeric_fields=FINA_INDICATOR_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
     )
-    return len(normalized)
 
 
 def _normalize_report_rc_frame(frame: pd.DataFrame) -> pd.DataFrame:

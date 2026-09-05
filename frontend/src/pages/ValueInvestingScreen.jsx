@@ -102,11 +102,39 @@ const expandedRowRender = record => {
         { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
         { key: 'cod', label: '税后债权成本', children: formatPercent(record.cost_of_debt_after_tax_pct) },
         { key: 'base_fcff', label: '基准FCFF(近3年均值,亿)', children: formatNumber(record.dcf_base_fcff_yi) },
+        {
+          key: 'base_fcff_source',
+          label: 'FCFF口径',
+          children:
+            record.dcf_base_fcff_source === 'cashflow_statement'
+              ? '现金流量表(经营现金流−资本开支+税后利息)'
+              : record.dcf_base_fcff_source === 'tushare_fina_indicator'
+                ? 'tushare财务指标(未经报表交叉验证)'
+                : '—',
+        },
+        {
+          key: 'fcff_cross_check',
+          label: 'FCFF交叉验证(tushare/报表口径)',
+          children: record.fcff_cross_check_ratio == null ? '—' : `${formatNumber(record.fcff_cross_check_ratio)}倍`,
+        },
         { key: 'fcff_cagr', label: 'FCFF复合增速', children: <SignedPercent value={record.fcff_cagr_pct} /> },
+        { key: 'near_term_growth', label: '近端增速(DCF采用)', children: <SignedPercent value={record.near_term_growth_pct} /> },
         { key: 'terminal_growth', label: '永续增长率', children: formatPercent(record.terminal_growth_pct) },
         { key: 'ev', label: '企业价值(DCF,亿)', children: formatNumber(record.dcf_enterprise_value_yi) },
+        { key: 'terminal_share', label: '终值占企业价值', children: formatPercent(record.dcf_terminal_value_share_pct) },
         { key: 'net_debt', label: '净债务(亿)', children: formatNumber(record.dcf_net_debt_yi) },
-        { key: 'equity_value', label: '股权价值(DCF,亿)', children: formatNumber(record.dcf_equity_value_yi) },
+        { key: 'parent_share', label: '归母利润占比', children: formatPercent(record.parent_profit_share_pct) },
+        {
+          key: 'minority_interest',
+          label: '少数股东扣除(亿)',
+          children:
+            record.dcf_minority_interest_yi == null
+              ? '-'
+              : `${formatNumber(record.dcf_minority_interest_yi)}（${
+                  record.dcf_minority_basis === 'proportionate' ? '按归母利润占比折算' : '账面少数股东权益'
+                }，账面 ${formatNumber(record.dcf_minority_book_yi)}）`,
+        },
+        { key: 'equity_value', label: '归母股权价值(DCF,亿)', children: formatNumber(record.dcf_equity_value_yi) },
         { key: 'market_cap', label: '当前市值(亿)', children: formatNumber(record.market_cap_yi) },
         { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
       ];
@@ -247,9 +275,11 @@ const buildColumns = () => [
         : (
           <Space direction="vertical" size={0} className="value-investing-return-cell">
             <Text strong className={signedClassName(value)}>{formatPercent(value)}</Text>
-            <Text type="secondary" className="value-investing-return-range">
-              ({formatPercent(record.expected_return_pct_bear)} ~ {formatPercent(record.expected_return_pct_bull)})
-            </Text>
+            {(record.expected_return_pct_bear != null || record.expected_return_pct_bull != null) && (
+              <Text type="secondary" className="value-investing-return-range">
+                ({formatPercent(record.expected_return_pct_bear)} ~ {formatPercent(record.expected_return_pct_bull)})
+              </Text>
+            )}
           </Space>
         )
     ),
@@ -370,6 +400,8 @@ const ValueInvestingScreen = () => {
           <Paragraph type="secondary" className="value-investing-intro">
             质量闸门(ROIC能否持续跑赢WACC + 现金流验证利润) → 两阶段FCFF DCF算内在价值(银行/保险/证券改用合理市净率)
             → 潜在回报率 = 内在价值 vs 当前价格，并给出WACC±150bp的悲观/乐观区间。仅做研究提示，不构成投资建议。
+            FCFF 取现金流量表口径(经营现金流−资本开支+税后利息)；股权价值按归母利润占比折算成归母口径
+            (与账面少数股东权益取较大的扣除额)后再与归母市值比较。
           </Paragraph>
         </div>
         <Space wrap align="start" className="value-investing-toolbar__controls">

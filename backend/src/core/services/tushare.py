@@ -12,6 +12,20 @@ from typing import Dict, List, Optional
 import pandas as pd
 import tushare as ts
 
+from ..tushare_statement_fields import (
+    BALANCESHEET_API_FIELDS,
+    BALANCESHEET_DATE_FIELDS,
+    BALANCESHEET_NUMERIC_FIELDS,
+    CASHFLOW_API_FIELDS,
+    CASHFLOW_DATE_FIELDS,
+    CASHFLOW_NUMERIC_FIELDS,
+    FINA_INDICATOR_API_FIELDS,
+    FINA_INDICATOR_DATE_FIELDS,
+    FINA_INDICATOR_NUMERIC_FIELDS,
+    INCOME_API_FIELDS,
+    INCOME_DATE_FIELDS,
+    INCOME_NUMERIC_FIELDS,
+)
 from .quote import QuoteObserver, QuoteProvider
 from .tushare_account import get_tushare_token_for_runtime
 
@@ -1874,6 +1888,41 @@ class TushareService(QuoteProvider):
         self._fina_indicator_cache[ts_code] = {}
         return {}
 
+    def _fetch_statement_page(
+        self,
+        rate_limiter,
+        api_fn,
+        api_fields: str,
+        api_name: str,
+        describe: str,
+        **params,
+    ) -> Optional[pd.DataFrame]:
+        """按全字段清单请求一页财务报表数据；请求失败时返回 None，调用方停止翻页。
+
+        我们按 tushare 官方文档「输出参数」的全集传 ``fields``（部分字段的默认显示
+        是 N，不显式点名就拿不到）。但不同账号的积分档位未必覆盖全部字段，而 tushare
+        对无权/未知字段是让整个请求报错、而不是省略那一列——所以这里在首次失败后退回
+        不传 ``fields``（只要默认字段集）再试一次，宁可少几列也不要让整张表同步失败。
+        """
+        for attempt_fields in (api_fields, None):
+            try:
+                rate_limiter.wait()
+                kwargs = dict(params)
+                if attempt_fields:
+                    kwargs["fields"] = attempt_fields
+                frame = api_fn(**kwargs)
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare %s fetch failed for %s (%s fields): %s",
+                    api_name,
+                    describe,
+                    "full" if attempt_fields else "default",
+                    exc,
+                )
+                continue
+            return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        return None
+
     def get_a_stock_income_frame(self, ts_code: str, limit: int = 2000) -> pd.DataFrame:
         """获取某只A股的历史利润表/收入表数据。"""
         ts_code = (ts_code or "").strip().upper()
@@ -1885,22 +1934,17 @@ class TushareService(QuoteProvider):
         frames = []
         offset = 0
         while True:
-            try:
-                self._income_rate_limiter.wait()
-                frame = self.pro.income(
-                    ts_code=ts_code,
-                    fields=(
-                        "ts_code,end_date,ann_date,rd_exp,report_type,"
-                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps,"
-                        "income_tax,fin_exp_int_exp"
-                    ),
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning("Tushare income fetch failed for %s offset=%s: %s", ts_code, offset, exc)
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._income_rate_limiter,
+                self.pro.income,
+                INCOME_API_FIELDS,
+                "income",
+                f"{ts_code} offset={offset}",
+                ts_code=ts_code,
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -1915,20 +1959,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *INCOME_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in (
-            "rd_exp",
-            "revenue",
-            "n_income_attr_p",
-            "operate_profit",
-            "total_profit",
-            "total_cogs",
-            "basic_eps",
-            "income_tax",
-            "fin_exp_int_exp",
-        ):
+        for column in INCOME_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -1958,31 +1992,19 @@ class TushareService(QuoteProvider):
         frames = []
         offset = 0
         while True:
-            try:
-                self._income_rate_limiter.wait()
-                frame = self.pro.income(
-                    ts_code=ts_code,
-                    start_date=start_value.strftime("%Y%m%d"),
-                    end_date=end_value.strftime("%Y%m%d"),
-                    fields=(
-                        "ts_code,end_date,ann_date,rd_exp,report_type,"
-                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps,"
-                        "income_tax,fin_exp_int_exp"
-                    ),
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Tushare income range fetch failed for %s %s~%s offset=%s: %s",
-                    ts_code,
-                    start_value,
-                    end_value,
-                    offset,
-                    exc,
-                )
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._income_rate_limiter,
+                self.pro.income,
+                INCOME_API_FIELDS,
+                "income range",
+                f"{ts_code} {start_value}~{end_value} offset={offset}",
+                ts_code=ts_code,
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -1996,20 +2018,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *INCOME_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in (
-            "rd_exp",
-            "revenue",
-            "n_income_attr_p",
-            "operate_profit",
-            "total_profit",
-            "total_cogs",
-            "basic_eps",
-            "income_tax",
-            "fin_exp_int_exp",
-        ):
+        for column in INCOME_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -2024,38 +2036,20 @@ class TushareService(QuoteProvider):
         if ts_code in self._balancesheet_frame_cache:
             return self._balancesheet_frame_cache[ts_code].copy()
 
-        fields = (
-            "ts_code,end_date,ann_date,report_type,comp_type,total_assets,total_liab,"
-            "total_cur_assets,total_cur_liab,total_hldr_eqy_exc_min_int,money_cap,"
-            "accounts_receiv,inventories,goodwill,fix_assets,lt_borr,st_borr,"
-            "notes_payable,acct_payable"
-        )
-        numeric_columns = (
-            "total_assets",
-            "total_liab",
-            "total_cur_assets",
-            "total_cur_liab",
-            "total_hldr_eqy_exc_min_int",
-            "money_cap",
-            "accounts_receiv",
-            "inventories",
-            "goodwill",
-            "fix_assets",
-            "lt_borr",
-            "st_borr",
-            "notes_payable",
-            "acct_payable",
-        )
         frames = []
         offset = 0
         while True:
-            try:
-                self._balancesheet_rate_limiter.wait()
-                frame = self.pro.balancesheet(ts_code=ts_code, fields=fields, limit=limit, offset=offset)
-            except Exception as exc:
-                self.logger.warning("Tushare balancesheet fetch failed for %s offset=%s: %s", ts_code, offset, exc)
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._balancesheet_rate_limiter,
+                self.pro.balancesheet,
+                BALANCESHEET_API_FIELDS,
+                "balancesheet",
+                f"{ts_code} offset={offset}",
+                ts_code=ts_code,
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -2070,10 +2064,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *BALANCESHEET_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in numeric_columns:
+        for column in BALANCESHEET_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -2102,52 +2096,22 @@ class TushareService(QuoteProvider):
         if not start_value or not end_value or start_value > end_value:
             return pd.DataFrame()
 
-        fields = (
-            "ts_code,end_date,ann_date,report_type,comp_type,total_assets,total_liab,"
-            "total_cur_assets,total_cur_liab,total_hldr_eqy_exc_min_int,money_cap,"
-            "accounts_receiv,inventories,goodwill,fix_assets,lt_borr,st_borr,"
-            "notes_payable,acct_payable"
-        )
-        numeric_columns = (
-            "total_assets",
-            "total_liab",
-            "total_cur_assets",
-            "total_cur_liab",
-            "total_hldr_eqy_exc_min_int",
-            "money_cap",
-            "accounts_receiv",
-            "inventories",
-            "goodwill",
-            "fix_assets",
-            "lt_borr",
-            "st_borr",
-            "notes_payable",
-            "acct_payable",
-        )
         frames = []
         offset = 0
         while True:
-            try:
-                self._balancesheet_rate_limiter.wait()
-                frame = self.pro.balancesheet(
-                    ts_code=ts_code,
-                    start_date=start_value.strftime("%Y%m%d"),
-                    end_date=end_value.strftime("%Y%m%d"),
-                    fields=fields,
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Tushare balancesheet range fetch failed for %s %s~%s offset=%s: %s",
-                    ts_code,
-                    start_value,
-                    end_value,
-                    offset,
-                    exc,
-                )
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._balancesheet_rate_limiter,
+                self.pro.balancesheet,
+                BALANCESHEET_API_FIELDS,
+                "balancesheet range",
+                f"{ts_code} {start_value}~{end_value} offset={offset}",
+                ts_code=ts_code,
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -2161,10 +2125,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *BALANCESHEET_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in numeric_columns:
+        for column in BALANCESHEET_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -2181,33 +2145,20 @@ class TushareService(QuoteProvider):
         if ts_code in self._cashflow_frame_cache:
             return self._cashflow_frame_cache[ts_code].copy()
 
-        fields = (
-            "ts_code,end_date,ann_date,report_type,net_profit,n_cashflow_act,"
-            "c_pay_acq_const_fiolta,free_cashflow,n_cashflow_inv_act,n_cash_flows_fnc_act,"
-            "c_fr_sale_sg,end_bal_cash,n_incr_cash_cash_equ,c_pay_dist_dpcp_int_exp"
-        )
-        numeric_columns = (
-            "net_profit",
-            "n_cashflow_act",
-            "c_pay_acq_const_fiolta",
-            "free_cashflow",
-            "n_cashflow_inv_act",
-            "n_cash_flows_fnc_act",
-            "c_fr_sale_sg",
-            "end_bal_cash",
-            "n_incr_cash_cash_equ",
-            "c_pay_dist_dpcp_int_exp",
-        )
         frames = []
         offset = 0
         while True:
-            try:
-                self._cashflow_rate_limiter.wait()
-                frame = self.pro.cashflow(ts_code=ts_code, fields=fields, limit=limit, offset=offset)
-            except Exception as exc:
-                self.logger.warning("Tushare cashflow fetch failed for %s offset=%s: %s", ts_code, offset, exc)
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._cashflow_rate_limiter,
+                self.pro.cashflow,
+                CASHFLOW_API_FIELDS,
+                "cashflow",
+                f"{ts_code} offset={offset}",
+                ts_code=ts_code,
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -2222,10 +2173,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *CASHFLOW_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in numeric_columns:
+        for column in CASHFLOW_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -2252,47 +2203,22 @@ class TushareService(QuoteProvider):
         if not start_value or not end_value or start_value > end_value:
             return pd.DataFrame()
 
-        fields = (
-            "ts_code,end_date,ann_date,report_type,net_profit,n_cashflow_act,"
-            "c_pay_acq_const_fiolta,free_cashflow,n_cashflow_inv_act,n_cash_flows_fnc_act,"
-            "c_fr_sale_sg,end_bal_cash,n_incr_cash_cash_equ,c_pay_dist_dpcp_int_exp"
-        )
-        numeric_columns = (
-            "net_profit",
-            "n_cashflow_act",
-            "c_pay_acq_const_fiolta",
-            "free_cashflow",
-            "n_cashflow_inv_act",
-            "n_cash_flows_fnc_act",
-            "c_fr_sale_sg",
-            "end_bal_cash",
-            "n_incr_cash_cash_equ",
-            "c_pay_dist_dpcp_int_exp",
-        )
         frames = []
         offset = 0
         while True:
-            try:
-                self._cashflow_rate_limiter.wait()
-                frame = self.pro.cashflow(
-                    ts_code=ts_code,
-                    start_date=start_value.strftime("%Y%m%d"),
-                    end_date=end_value.strftime("%Y%m%d"),
-                    fields=fields,
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Tushare cashflow range fetch failed for %s %s~%s offset=%s: %s",
-                    ts_code,
-                    start_value,
-                    end_value,
-                    offset,
-                    exc,
-                )
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._cashflow_rate_limiter,
+                self.pro.cashflow,
+                CASHFLOW_API_FIELDS,
+                "cashflow range",
+                f"{ts_code} {start_value}~{end_value} offset={offset}",
+                ts_code=ts_code,
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -2306,10 +2232,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date", "report_type"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *CASHFLOW_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in numeric_columns:
+        for column in CASHFLOW_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -2333,66 +2259,22 @@ class TushareService(QuoteProvider):
         if not start_value or not end_value or start_value > end_value:
             return pd.DataFrame()
 
-        fields = (
-            "ts_code,end_date,ann_date,eps,dt_eps,bps,ocfps,roe,roe_waa,roe_dt,roa,roic,"
-            "grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,quick_ratio,"
-            "profit_dedt,extra_item,netprofit_yoy,dt_netprofit_yoy,or_yoy,op_yoy,"
-            "ocf_to_or,ocf_to_debt,interestdebt,fcff,fcfe,netdebt,ebit,ebitda"
-        )
-        numeric_columns = (
-            "eps",
-            "dt_eps",
-            "bps",
-            "ocfps",
-            "roe",
-            "roe_waa",
-            "roe_dt",
-            "roa",
-            "roic",
-            "grossprofit_margin",
-            "netprofit_margin",
-            "debt_to_assets",
-            "current_ratio",
-            "quick_ratio",
-            "profit_dedt",
-            "extra_item",
-            "netprofit_yoy",
-            "dt_netprofit_yoy",
-            "or_yoy",
-            "op_yoy",
-            "ocf_to_or",
-            "ocf_to_debt",
-            "interestdebt",
-            "fcff",
-            "fcfe",
-            "netdebt",
-            "ebit",
-            "ebitda",
-        )
         frames = []
         offset = 0
         while True:
-            try:
-                self._fina_indicator_range_rate_limiter.wait()
-                frame = self.pro.fina_indicator(
-                    ts_code=ts_code,
-                    start_date=start_value.strftime("%Y%m%d"),
-                    end_date=end_value.strftime("%Y%m%d"),
-                    fields=fields,
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Tushare fina_indicator range fetch failed for %s %s~%s offset=%s: %s",
-                    ts_code,
-                    start_value,
-                    end_value,
-                    offset,
-                    exc,
-                )
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
+            frame = self._fetch_statement_page(
+                self._fina_indicator_range_rate_limiter,
+                self.pro.fina_indicator,
+                FINA_INDICATOR_API_FIELDS,
+                "fina_indicator range",
+                f"{ts_code} {start_value}~{end_value} offset={offset}",
+                ts_code=ts_code,
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None or frame.empty:
                 break
             frames.append(frame)
             if len(frame) < limit:
@@ -2406,10 +2288,10 @@ class TushareService(QuoteProvider):
             subset=["ts_code", "end_date", "ann_date"],
             keep="last",
         )
-        for column in ("end_date", "ann_date"):
+        for column in ("end_date", *FINA_INDICATOR_DATE_FIELDS):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in numeric_columns:
+        for column in FINA_INDICATOR_NUMERIC_FIELDS:
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["ts_code", "end_date"])
