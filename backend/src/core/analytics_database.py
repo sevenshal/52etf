@@ -21,6 +21,9 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_basic",
         "a_stock_adj_factor",
         "a_stock_income",
+        "a_stock_balancesheet",
+        "a_stock_cashflow",
+        "a_stock_fina_indicator",
         "a_stock_report_rc",
         "a_stock_fund_basic",
         "a_stock_fund_daily",
@@ -135,9 +138,100 @@ class AStockIncome(AnalyticsBase):
     ts_code = Column(String(16), nullable=False)
     end_date = Column(Date, nullable=False)
     ann_date = Column(Date)
-    operate_income = Column(Float)
     rd_exp = Column(Float)
     report_type = Column(String(16))
+    revenue = Column(Float)
+    n_income_attr_p = Column(Float)
+    operate_profit = Column(Float)
+    total_profit = Column(Float)
+    total_cogs = Column(Float)
+    basic_eps = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockBalanceSheet(AnalyticsBase):
+    """Tushare A股资产负债表缓存，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_balancesheet"
+
+    id = Column(String(80), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    end_date = Column(Date, nullable=False)
+    ann_date = Column(Date)
+    report_type = Column(String(16))
+    comp_type = Column(String(8))
+    total_assets = Column(Float)
+    total_liab = Column(Float)
+    total_cur_assets = Column(Float)
+    total_cur_liab = Column(Float)
+    total_hldr_eqy_exc_min_int = Column(Float)
+    money_cap = Column(Float)
+    accounts_receiv = Column(Float)
+    inventories = Column(Float)
+    goodwill = Column(Float)
+    fix_assets = Column(Float)
+    lt_borr = Column(Float)
+    st_borr = Column(Float)
+    notes_payable = Column(Float)
+    acct_payable = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockCashFlow(AnalyticsBase):
+    """Tushare A股现金流量表缓存，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_cashflow"
+
+    id = Column(String(80), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    end_date = Column(Date, nullable=False)
+    ann_date = Column(Date)
+    report_type = Column(String(16))
+    net_profit = Column(Float)
+    n_cashflow_act = Column(Float)
+    c_pay_acq_const_fiolta = Column(Float)
+    free_cashflow = Column(Float)
+    n_cashflow_inv_act = Column(Float)
+    n_cash_flows_fnc_act = Column(Float)
+    c_fr_sale_sg = Column(Float)
+    end_bal_cash = Column(Float)
+    n_incr_cash_cash_equ = Column(Float)
+    c_pay_dist_dpcp_int_exp = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFinaIndicator(AnalyticsBase):
+    """Tushare A股财务指标缓存(ROE/毛利率/负债率等)，存放在 DuckDB 分析库。"""
+    __tablename__ = "a_stock_fina_indicator"
+
+    id = Column(String(80), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    end_date = Column(Date, nullable=False)
+    ann_date = Column(Date)
+    eps = Column(Float)
+    dt_eps = Column(Float)
+    bps = Column(Float)
+    ocfps = Column(Float)
+    roe = Column(Float)
+    roe_waa = Column(Float)
+    roe_dt = Column(Float)
+    roa = Column(Float)
+    roic = Column(Float)
+    grossprofit_margin = Column(Float)
+    netprofit_margin = Column(Float)
+    debt_to_assets = Column(Float)
+    current_ratio = Column(Float)
+    quick_ratio = Column(Float)
+    profit_dedt = Column(Float)
+    extra_item = Column(Float)
+    netprofit_yoy = Column(Float)
+    dt_netprofit_yoy = Column(Float)
+    or_yoy = Column(Float)
+    op_yoy = Column(Float)
+    ocf_to_or = Column(Float)
+    ocf_to_debt = Column(Float)
+    interestdebt = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -558,6 +652,14 @@ def ensure_analytics_table_columns():
             "dv_ratio": "FLOAT",
             "dv_ttm": "FLOAT",
         },
+        "a_stock_income": {
+            "revenue": "FLOAT",
+            "n_income_attr_p": "FLOAT",
+            "operate_profit": "FLOAT",
+            "total_profit": "FLOAT",
+            "total_cogs": "FLOAT",
+            "basic_eps": "FLOAT",
+        },
     }
     with analytics_engine.begin() as conn:
         for table_name, columns in table_columns.items():
@@ -585,6 +687,12 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_ann ON a_stock_income(ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_ann ON a_stock_balancesheet(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_end ON a_stock_balancesheet(ts_code, end_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_cashflow_symbol_ann ON a_stock_cashflow(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_cashflow_symbol_end ON a_stock_cashflow(ts_code, end_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fina_indicator_symbol_ann ON a_stock_fina_indicator(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fina_indicator_symbol_end ON a_stock_fina_indicator(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_symbol_date ON a_stock_report_rc(ts_code, report_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_date_quarter ON a_stock_report_rc(report_date, quarter)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_report_rc_org_date ON a_stock_report_rc(org_name, report_date)",

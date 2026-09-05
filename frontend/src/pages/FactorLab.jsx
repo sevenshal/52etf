@@ -44,6 +44,7 @@ import ValuationSimulation from './ValuationSimulation';
 import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
 import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
 import NineTurnBreadthResearch from './NineTurnBreadthResearch';
+import ValueInvestingScreen from './ValueInvestingScreen';
 import './FactorLab.css';
 
 const { Text } = Typography;
@@ -59,6 +60,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'xueqiu-holdings', label: '雪球持仓' },
   { key: 'eastmoney-holdings', label: '东方财富' },
   { key: 'nine-turn-breadth', label: '九转宽度' },
+  { key: 'value-investing', label: '价值投资' },
   { key: 'db', label: 'DB' },
 ];
 
@@ -3258,6 +3260,8 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       {activeTab === 'eastmoney-holdings' && <EastmoneyHoldingsResearch />}
 
       {activeTab === 'nine-turn-breadth' && <NineTurnBreadthResearch />}
+
+      {activeTab === 'value-investing' && <ValueInvestingScreen />}
 
       {activeTab === 'valuation-sim' && <ValuationSimulation embedded />}
 
