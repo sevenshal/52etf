@@ -161,3 +161,9 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+.evc-stock-name {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Tag } from 'antd';
+import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Tag, Tooltip } from 'antd';
 import { FilterOutlined, SearchOutlined, StarFilled, StarOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import request from '../utils/request';
@@ -363,6 +363,22 @@ const EVCValuation = () => {
         (col.key !== 'market_cap_100m' || stocks.some(stock => stock.market_cap_100m !== null && stock.market_cap_100m !== undefined))
     ));
 
+    // 共识只取最近一次年报公告日之后的研报；若年报后还没有新研报，退回上一次年报
+    // 之后的研报参与计算，这时估值口径已经落后一个财年，必须显式标注。
+    const renderStaleTag = (record) => {
+        if (!record?.is_stale) {
+            return null;
+        }
+        const tip = record.consensus_window === 'post_prev_annual'
+            ? `最近一次年报(${record.latest_annual_ann_date || '-'})后暂无新研报，当前取上一次年报之后的研报计算`
+            : '缺少年报公告日，无法按年报切分研报窗口';
+        return (
+            <Tooltip title={tip}>
+                <Tag color="orange" style={{ marginLeft: 4 }}>待更新</Tag>
+            </Tooltip>
+        );
+    };
+
     const aStockColumns = [
         {
             title: '股票代码',
@@ -376,7 +392,18 @@ const EVCValuation = () => {
                 </Link>
             )
         },
-        { title: '名称', dataIndex: 'name', key: 'name', width: 100 },
+        {
+            title: '名称',
+            dataIndex: 'name',
+            key: 'name',
+            width: 130,
+            render: (value, record) => (
+                <span className="evc-stock-name">
+                    {value || '-'}
+                    {renderStaleTag(record)}
+                </span>
+            )
+        },
         { title: '行业', dataIndex: 'industry', key: 'industry', width: 110 },
         { title: '最新收盘', dataIndex: 'close', key: 'close', width: 90, render: value => formatFixed(value) },
         {
@@ -619,6 +646,7 @@ const EVCValuation = () => {
                                     {record.symbol}
                                 </Link>
                                 <span>{record.name || '-'}</span>
+                                {renderStaleTag(record)}
                             </div>
                             <Tag>{record.rating || '未评级'}</Tag>
                         </div>

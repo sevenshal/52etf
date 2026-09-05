@@ -11,6 +11,13 @@ from sqlalchemy import text
 A_STOCK_MARKET_CAP_UNIT = 10_000.0
 FLOAT_COMPARE_EPSILON = 1e-9
 
+# 研报取数窗口：post_latest_annual = 最近一次年报公告日之后(正常)；
+# post_prev_annual = 最近一次年报后暂无研报，退回上一次年报之后(估值待更新)；
+# unfiltered = 缺少年报公告日，无法按年报切窗口。
+CONSENSUS_WINDOW_POST_LATEST_ANNUAL = "post_latest_annual"
+CONSENSUS_WINDOW_POST_PREV_ANNUAL = "post_prev_annual"
+CONSENSUS_WINDOW_UNFILTERED = "unfiltered"
+
 
 def normalize_a_stock_symbol(symbol: Optional[str]) -> str:
     raw = str(symbol or "").strip().upper()
@@ -105,12 +112,27 @@ def _report_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str]:
     )
 
 
-def _target_price(row: Mapping[str, Any]) -> Optional[float]:
+def _target_price_bounds(row: Mapping[str, Any]) -> Optional[Tuple[float, float]]:
+    """返回单篇研报自洽的目标价 (下沿, 上沿)。
+
+    Tushare report_rc 的 min_price/max_price 经常只填一边(点目标价或数据缺失)，
+    单边填充时用另一边兜底，保证同一篇研报的下沿/上沿始终成对出现。否则按缺失
+    字段分别取 min/max 会让区间落在不同的研报子集上，出现"均值不在区间内"。
+    """
     min_price = _positive_float(row.get("min_price"))
     max_price = _positive_float(row.get("max_price"))
-    if min_price is not None and max_price is not None:
-        return (min_price + max_price) / 2.0
-    return max_price if max_price is not None else min_price
+    low = min_price if min_price is not None else max_price
+    high = max_price if max_price is not None else min_price
+    if low is None or high is None:
+        return None
+    return (low, high) if low <= high else (high, low)
+
+
+def _target_price(row: Mapping[str, Any]) -> Optional[float]:
+    bounds = _target_price_bounds(row)
+    if bounds is None:
+        return None
+    return (bounds[0] + bounds[1]) / 2.0
 
 
 def _row_to_date(value: Any) -> Optional[date]:
@@ -143,10 +165,55 @@ def _growth_pct(current_value: Optional[float], next_value: Optional[float]) -> 
     return (next_value / current_value - 1.0) * 100.0
 
 
+def _select_rows_by_annual_cutoff(
+    rows: Sequence[Mapping[str, Any]],
+    latest_annual_ann_date: Optional[date],
+    prev_annual_ann_date: Optional[date],
+) -> Tuple[Sequence[Mapping[str, Any]], str]:
+    """只保留最近一次年报公告日之后发布的研报。
+
+    年报披露后卖方才会按新的经营数据重新给盈利预测和目标价，混入年报前的旧研报
+    会把过时的目标价拉进共识。若最近一次年报后还没有带目标价的研报，退回到上一次
+    年报之后的研报，并把窗口标记为 post_prev_annual(前端提示"估值待更新")。
+    """
+    if latest_annual_ann_date is None:
+        return rows, CONSENSUS_WINDOW_UNFILTERED
+
+    def kept_since(cutoff: date) -> List[Mapping[str, Any]]:
+        selected: List[Mapping[str, Any]] = []
+        for row in rows:
+            report_date = _row_to_date(row.get("report_date"))
+            if report_date is not None and report_date >= cutoff:
+                selected.append(row)
+        return selected
+
+    def has_target(candidate_rows: Sequence[Mapping[str, Any]]) -> bool:
+        return any(_target_price_bounds(row) is not None for row in candidate_rows)
+
+    latest_rows = kept_since(latest_annual_ann_date)
+    if has_target(latest_rows):
+        return latest_rows, CONSENSUS_WINDOW_POST_LATEST_ANNUAL
+
+    if prev_annual_ann_date is not None:
+        prev_rows = kept_since(prev_annual_ann_date)
+        if has_target(prev_rows):
+            return prev_rows, CONSENSUS_WINDOW_POST_PREV_ANNUAL
+
+    return rows, CONSENSUS_WINDOW_UNFILTERED
+
+
 def _aggregate_report_rows(
     rows: Sequence[Mapping[str, Any]],
     latest_trade_date: Optional[date],
+    *,
+    latest_annual_ann_date: Optional[date] = None,
+    prev_annual_ann_date: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
+    rows, consensus_window = _select_rows_by_annual_cutoff(
+        rows,
+        latest_annual_ann_date,
+        prev_annual_ann_date,
+    )
     target_prices: Dict[Tuple[str, str, str, str], float] = {}
     target_lows: Dict[Tuple[str, str, str, str], float] = {}
     target_highs: Dict[Tuple[str, str, str, str], float] = {}
@@ -169,15 +236,11 @@ def _aggregate_report_rows(
         if rating:
             rating_counter[rating] += 1
 
-        target = _target_price(row)
-        if target is not None and key not in target_prices:
-            target_prices[key] = target
-        min_price = _positive_float(row.get("min_price"))
-        max_price = _positive_float(row.get("max_price"))
-        if min_price is not None and key not in target_lows:
-            target_lows[key] = min_price
-        if max_price is not None and key not in target_highs:
-            target_highs[key] = max_price
+        bounds = _target_price_bounds(row)
+        if bounds is not None and key not in target_prices:
+            target_prices[key] = (bounds[0] + bounds[1]) / 2.0
+            target_lows[key] = bounds[0]
+            target_highs[key] = bounds[1]
 
         fiscal_year = _parse_fiscal_year(row.get("quarter"))
         if fiscal_year is None:
@@ -212,8 +275,8 @@ def _aggregate_report_rows(
     return {
         "latest_report_date": latest_report_date,
         "target_price_avg": target_price_avg,
-        "target_price_min": min(target_lows.values()) if target_lows else min(target_prices.values()),
-        "target_price_max": max(target_highs.values()) if target_highs else max(target_prices.values()),
+        "target_price_min": min(target_lows.values()),
+        "target_price_max": max(target_highs.values()),
         "target_price_q25": _percentile(target_prices.values(), 0.25),
         "target_price_median": _percentile(target_prices.values(), 0.5),
         "target_price_q75": _percentile(target_prices.values(), 0.75),
@@ -231,6 +294,9 @@ def _aggregate_report_rows(
         "target_report_count": target_report_count,
         "organization_count": len(orgs),
         "rating": rating_counter.most_common(1)[0][0] if rating_counter else None,
+        "consensus_window": consensus_window,
+        "is_stale": consensus_window != CONSENSUS_WINDOW_POST_LATEST_ANNUAL,
+        "latest_annual_ann_date": latest_annual_ann_date,
     }
 
 
@@ -270,7 +336,12 @@ def build_a_stock_consensus_candidates(
         market_cap_100m = total_mv / A_STOCK_MARKET_CAP_UNIT if total_mv is not None else None
         circ_market_cap_100m = circ_mv / A_STOCK_MARKET_CAP_UNIT if circ_mv is not None else None
 
-        aggregate = _aggregate_report_rows(symbol_rows, latest_trade_date)
+        aggregate = _aggregate_report_rows(
+            symbol_rows,
+            latest_trade_date,
+            latest_annual_ann_date=_row_to_date(first.get("latest_annual_ann_date")),
+            prev_annual_ann_date=_row_to_date(first.get("prev_annual_ann_date")),
+        )
         if aggregate is None:
             continue
         target_report_count = aggregate["target_report_count"]
@@ -325,6 +396,9 @@ def build_a_stock_consensus_candidates(
             "target_report_count": target_report_count,
             "organization_count": aggregate["organization_count"],
             "rating": aggregate["rating"],
+            "consensus_window": aggregate["consensus_window"],
+            "is_stale": aggregate["is_stale"],
+            "latest_annual_ann_date": _date_to_iso(aggregate["latest_annual_ann_date"]),
         })
 
     candidates.sort(
@@ -787,6 +861,32 @@ def search_a_stock_consensus_candidates(
                 SELECT *
                 FROM a_stock_market_daily
                 WHERE trade_date = :latest_trade_date
+            ),
+            annual_ann AS (
+                -- 每个年度(end_date 为 12-31)只保留一个公告日，避免追溯调整/更正
+                -- 产生的多条记录把"上一次年报"挤成同一财年的重述公告。
+                SELECT ts_code, end_date, MAX(ann_date) AS ann_date
+                FROM a_stock_income
+                WHERE ann_date IS NOT NULL
+                  AND end_date IS NOT NULL
+                  AND strftime(end_date, '%m-%d') = '12-31'
+                GROUP BY ts_code, end_date
+            ),
+            annual_ranked AS (
+                SELECT
+                    ts_code,
+                    ann_date,
+                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) AS rn
+                FROM annual_ann
+            ),
+            annual_cutoff AS (
+                SELECT
+                    ts_code,
+                    MAX(CASE WHEN rn = 1 THEN ann_date END) AS latest_annual_ann_date,
+                    MAX(CASE WHEN rn = 2 THEN ann_date END) AS prev_annual_ann_date
+                FROM annual_ranked
+                WHERE rn <= 2
+                GROUP BY ts_code
             )
             SELECT
                 r.ts_code,
@@ -808,10 +908,13 @@ def search_a_stock_consensus_candidates(
                 m.trade_date,
                 m.close,
                 m.total_mv,
-                m.circ_mv
+                m.circ_mv,
+                a.latest_annual_ann_date,
+                a.prev_annual_ann_date
             FROM a_stock_report_rc r
             JOIN latest_market m ON m.ts_code = r.ts_code
             LEFT JOIN a_stock_basic b ON b.ts_code = r.ts_code
+            LEFT JOIN annual_cutoff a ON a.ts_code = r.ts_code
             WHERE 1 = 1
               {date_filter}
               {search_filter}
