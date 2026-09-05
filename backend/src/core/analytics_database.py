@@ -11,6 +11,20 @@ from .duckdb_utils import (
     ANALYTICS_DB_PATH,
     connect_duckdb_engine,
 )
+from .tushare_statement_fields import (
+    BALANCESHEET_DATE_FIELDS,
+    BALANCESHEET_NUMERIC_FIELDS,
+    BALANCESHEET_TEXT_FIELDS,
+    CASHFLOW_DATE_FIELDS,
+    CASHFLOW_NUMERIC_FIELDS,
+    CASHFLOW_TEXT_FIELDS,
+    FINA_INDICATOR_DATE_FIELDS,
+    FINA_INDICATOR_NUMERIC_FIELDS,
+    FINA_INDICATOR_TEXT_FIELDS,
+    INCOME_DATE_FIELDS,
+    INCOME_NUMERIC_FIELDS,
+    INCOME_TEXT_FIELDS,
+)
 
 ANALYTICS_DB_DIR = os.path.dirname(ANALYTICS_DB_PATH)
 if ANALYTICS_DB_DIR:
@@ -130,117 +144,73 @@ class AStockTHSDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
-class AStockIncome(AnalyticsBase):
-    """Tushare A股利润表/收入表缓存，存放在 DuckDB 分析库。"""
-    __tablename__ = "a_stock_income"
+def _financial_statement_model(
+    class_name: str,
+    table_name: str,
+    doc: str,
+    date_fields,
+    text_fields,
+    numeric_fields,
+):
+    """按 tushare 官方字段清单批量生成一张财务报表缓存表的 ORM 模型。
 
-    id = Column(String(80), primary_key=True)
-    ts_code = Column(String(16), nullable=False)
-    end_date = Column(Date, nullable=False)
-    ann_date = Column(Date)
-    rd_exp = Column(Float)
-    report_type = Column(String(16))
-    revenue = Column(Float)
-    n_income_attr_p = Column(Float)
-    operate_profit = Column(Float)
-    total_profit = Column(Float)
-    total_cogs = Column(Float)
-    basic_eps = Column(Float)
-    income_tax = Column(Float)
-    fin_exp_int_exp = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, nullable=False)
-
-
-class AStockBalanceSheet(AnalyticsBase):
-    """Tushare A股资产负债表缓存，存放在 DuckDB 分析库。"""
-    __tablename__ = "a_stock_balancesheet"
-
-    id = Column(String(80), primary_key=True)
-    ts_code = Column(String(16), nullable=False)
-    end_date = Column(Date, nullable=False)
-    ann_date = Column(Date)
-    report_type = Column(String(16))
-    comp_type = Column(String(8))
-    total_assets = Column(Float)
-    total_liab = Column(Float)
-    total_cur_assets = Column(Float)
-    total_cur_liab = Column(Float)
-    total_hldr_eqy_exc_min_int = Column(Float)
-    money_cap = Column(Float)
-    accounts_receiv = Column(Float)
-    inventories = Column(Float)
-    goodwill = Column(Float)
-    fix_assets = Column(Float)
-    lt_borr = Column(Float)
-    st_borr = Column(Float)
-    notes_payable = Column(Float)
-    acct_payable = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+    这几张表的列数在 90~160 之间(见 `tushare_statement_fields` 的模块说明：接口有
+    什么就存什么)，逐列手写既冗长又必然和同步侧的列白名单跑偏，所以统一由同一份
+    字段清单驱动生成。
+    """
+    attributes = {
+        "__tablename__": table_name,
+        "__doc__": doc,
+        "id": Column(String(80), primary_key=True),
+        "ts_code": Column(String(16), nullable=False),
+        "end_date": Column(Date, nullable=False),
+    }
+    for name in date_fields:
+        attributes[name] = Column(Date)
+    for name in text_fields:
+        attributes[name] = Column(String(16))
+    for name in numeric_fields:
+        attributes[name] = Column(Float)
+    attributes["created_at"] = Column(DateTime, default=datetime.now, nullable=False)
+    attributes["updated_at"] = Column(DateTime, default=datetime.now, nullable=False)
+    return type(class_name, (AnalyticsBase,), attributes)
 
 
-class AStockCashFlow(AnalyticsBase):
-    """Tushare A股现金流量表缓存，存放在 DuckDB 分析库。"""
-    __tablename__ = "a_stock_cashflow"
+AStockIncome = _financial_statement_model(
+    "AStockIncome",
+    "a_stock_income",
+    "Tushare A股利润表缓存(全字段)，存放在 DuckDB 分析库。",
+    INCOME_DATE_FIELDS,
+    INCOME_TEXT_FIELDS,
+    INCOME_NUMERIC_FIELDS,
+)
 
-    id = Column(String(80), primary_key=True)
-    ts_code = Column(String(16), nullable=False)
-    end_date = Column(Date, nullable=False)
-    ann_date = Column(Date)
-    report_type = Column(String(16))
-    net_profit = Column(Float)
-    n_cashflow_act = Column(Float)
-    c_pay_acq_const_fiolta = Column(Float)
-    free_cashflow = Column(Float)
-    n_cashflow_inv_act = Column(Float)
-    n_cash_flows_fnc_act = Column(Float)
-    c_fr_sale_sg = Column(Float)
-    end_bal_cash = Column(Float)
-    n_incr_cash_cash_equ = Column(Float)
-    c_pay_dist_dpcp_int_exp = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+AStockBalanceSheet = _financial_statement_model(
+    "AStockBalanceSheet",
+    "a_stock_balancesheet",
+    "Tushare A股资产负债表缓存(全字段)，存放在 DuckDB 分析库。",
+    BALANCESHEET_DATE_FIELDS,
+    BALANCESHEET_TEXT_FIELDS,
+    BALANCESHEET_NUMERIC_FIELDS,
+)
 
+AStockCashFlow = _financial_statement_model(
+    "AStockCashFlow",
+    "a_stock_cashflow",
+    "Tushare A股现金流量表缓存(全字段)，存放在 DuckDB 分析库。",
+    CASHFLOW_DATE_FIELDS,
+    CASHFLOW_TEXT_FIELDS,
+    CASHFLOW_NUMERIC_FIELDS,
+)
 
-class AStockFinaIndicator(AnalyticsBase):
-    """Tushare A股财务指标缓存(ROE/毛利率/负债率等)，存放在 DuckDB 分析库。"""
-    __tablename__ = "a_stock_fina_indicator"
-
-    id = Column(String(80), primary_key=True)
-    ts_code = Column(String(16), nullable=False)
-    end_date = Column(Date, nullable=False)
-    ann_date = Column(Date)
-    eps = Column(Float)
-    dt_eps = Column(Float)
-    bps = Column(Float)
-    ocfps = Column(Float)
-    roe = Column(Float)
-    roe_waa = Column(Float)
-    roe_dt = Column(Float)
-    roa = Column(Float)
-    roic = Column(Float)
-    grossprofit_margin = Column(Float)
-    netprofit_margin = Column(Float)
-    debt_to_assets = Column(Float)
-    current_ratio = Column(Float)
-    quick_ratio = Column(Float)
-    profit_dedt = Column(Float)
-    extra_item = Column(Float)
-    netprofit_yoy = Column(Float)
-    dt_netprofit_yoy = Column(Float)
-    or_yoy = Column(Float)
-    op_yoy = Column(Float)
-    ocf_to_or = Column(Float)
-    ocf_to_debt = Column(Float)
-    interestdebt = Column(Float)
-    fcff = Column(Float)
-    fcfe = Column(Float)
-    netdebt = Column(Float)
-    ebit = Column(Float)
-    ebitda = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+AStockFinaIndicator = _financial_statement_model(
+    "AStockFinaIndicator",
+    "a_stock_fina_indicator",
+    "Tushare A股财务指标缓存(全字段: ROE/毛利率/负债率/FCFF等)，存放在 DuckDB 分析库。",
+    FINA_INDICATOR_DATE_FIELDS,
+    FINA_INDICATOR_TEXT_FIELDS,
+    FINA_INDICATOR_NUMERIC_FIELDS,
+)
 
 
 class AStockReportRc(AnalyticsBase):
@@ -648,6 +618,14 @@ class HKIndexWeightSnapshot(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+def _financial_statement_column_types(date_fields, text_fields, numeric_fields):
+    """财务报表表的「列名 -> DuckDB 类型」映射，与 ORM 模型生成用的是同一份字段清单。"""
+    columns = {name: "DATE" for name in date_fields}
+    columns.update({name: "VARCHAR" for name in text_fields})
+    columns.update({name: "FLOAT" for name in numeric_fields})
+    return columns
+
+
 def ensure_analytics_table_columns():
     """为存量 DuckDB 表补充新增字段（幂等，沿用主库 ensure_table_columns 模式）。"""
     table_columns = {
@@ -659,23 +637,20 @@ def ensure_analytics_table_columns():
             "dv_ratio": "FLOAT",
             "dv_ttm": "FLOAT",
         },
-        "a_stock_income": {
-            "revenue": "FLOAT",
-            "n_income_attr_p": "FLOAT",
-            "operate_profit": "FLOAT",
-            "total_profit": "FLOAT",
-            "total_cogs": "FLOAT",
-            "basic_eps": "FLOAT",
-            "income_tax": "FLOAT",
-            "fin_exp_int_exp": "FLOAT",
-        },
-        "a_stock_fina_indicator": {
-            "fcff": "FLOAT",
-            "fcfe": "FLOAT",
-            "netdebt": "FLOAT",
-            "ebit": "FLOAT",
-            "ebitda": "FLOAT",
-        },
+        # 4 张财务报表按 tushare 官方字段全集建表，存量库里缺的列在这里统一补齐，
+        # 列清单与建表/同步共用同一份定义(见 tushare_statement_fields)。
+        "a_stock_income": _financial_statement_column_types(
+            INCOME_DATE_FIELDS, INCOME_TEXT_FIELDS, INCOME_NUMERIC_FIELDS
+        ),
+        "a_stock_balancesheet": _financial_statement_column_types(
+            BALANCESHEET_DATE_FIELDS, BALANCESHEET_TEXT_FIELDS, BALANCESHEET_NUMERIC_FIELDS
+        ),
+        "a_stock_cashflow": _financial_statement_column_types(
+            CASHFLOW_DATE_FIELDS, CASHFLOW_TEXT_FIELDS, CASHFLOW_NUMERIC_FIELDS
+        ),
+        "a_stock_fina_indicator": _financial_statement_column_types(
+            FINA_INDICATOR_DATE_FIELDS, FINA_INDICATOR_TEXT_FIELDS, FINA_INDICATOR_NUMERIC_FIELDS
+        ),
     }
     with analytics_engine.begin() as conn:
         for table_name, columns in table_columns.items():
@@ -691,7 +666,7 @@ def ensure_analytics_table_columns():
                 conn.execute(text("DROP VIEW IF EXISTS a_stock_market_daily_qfq"))
             for column_name in missing:
                 conn.execute(text(
-                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {columns[column_name]}"
+                    f'ALTER TABLE {table_name} ADD COLUMN "{column_name}" {columns[column_name]}'
                 ))
 
 

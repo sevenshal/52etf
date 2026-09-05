@@ -30,6 +30,7 @@ API → 前端页面。请重点核查「5. 需要重点 review 的设计决策�
 | [#15](https://github.com/sevenshal/52etf/pull/15) | 在"A股基础数据同步"任务的执行结果摘要里补上新增3张表的保存行数，方便从页面确认同步是否生效 |
 | [#16](https://github.com/sevenshal/52etf/pull/16) / [#17](https://github.com/sevenshal/52etf/pull/17) | 扫描器方法论重写：ROIC-vs-WACC 质量闸门 + 两阶段 FCFF DCF 内在价值（原来的中位数打法废弃）；发现并修复 DCF 终值爆炸的模型缺陷；接入中债国债收益率曲线作为无风险利率 |
 | [#19](https://github.com/sevenshal/52etf/pull/19) | 新增"内在价值同比闸门"：最新年报算出的内在价值必须不低于去年同期算出的内在价值 |
+| 本次会话(未提交) | 财务报表按 tushare 官方字段**全集**同步(见 3.5)；修掉让华特达因算出 1410% 回报率的 5 个问题(见第 9 节) |
 
 以及一个**发现但特意没有在本次改动范围内修的 bug**（已作为独立后台任务提出，未合并）：
 `a_stock_innovation_momentum_virtual.py` 里研发动量因子用的 `operate_income` 字段在 tushare
@@ -39,25 +40,32 @@ API → 前端页面。请重点核查「5. 需要重点 review 的设计决策�
 
 ## 3. 数据层
 
-### 3.1 新增/扩展的 DuckDB 表（`backend/src/core/analytics_database.py`）
+### 3.1 DuckDB 表结构：按 tushare 官方字段全集建表
 
-- `a_stock_balancesheet`（新增）：`total_assets`/`total_liab`/`total_cur_assets`/`total_cur_liab`/
-  `total_hldr_eqy_exc_min_int`/`money_cap`/`accounts_receiv`/`inventories`/`goodwill`/`fix_assets`/
-  `lt_borr`/`st_borr`/`notes_payable`/`acct_payable`/`comp_type`（1一般工商业 2银行 3保险 4证券，
-  用于区分金融/非金融口径）
-- `a_stock_cashflow`（新增）：`net_profit`/`n_cashflow_act`/`c_pay_acq_const_fiolta`/`free_cashflow`/
-  `n_cashflow_inv_act`/`n_cash_flows_fnc_act`/`c_fr_sale_sg`/`end_bal_cash`/`n_incr_cash_cash_equ`/
-  `c_pay_dist_dpcp_int_exp`
-- `a_stock_fina_indicator`（新增）：`eps`/`dt_eps`/`bps`/`ocfps`/`roe`/`roe_waa`/`roe_dt`/`roa`/`roic`/
-  `grossprofit_margin`/`netprofit_margin`/`debt_to_assets`/`current_ratio`/`quick_ratio`/`profit_dedt`/
-  `extra_item`/`netprofit_yoy`/`dt_netprofit_yoy`/`or_yoy`/`op_yoy`/`ocf_to_or`/`ocf_to_debt`/
-  `interestdebt`/`fcff`/`fcfe`/`netdebt`/`ebit`/`ebitda`
-- `a_stock_income`（扩展已有表）：补上 `revenue`/`n_income_attr_p`/`operate_profit`/`total_profit`/
-  `total_cogs`/`basic_eps`/`income_tax`/`fin_exp_int_exp`（原来只有 `operate_income`/`rd_exp`）
+**单一事实来源：`backend/src/core/tushare_statement_fields.py`。** 4 张财务报表的列清单直接来自
+tushare 官方文档「输出参数」表的全集，一份定义同时驱动三个消费方：
 
-**为什么直接拿 `fcff`/`fcfe`/`netdebt`/`ebit`/`ebitda`**：tushare 的 `fina_indicator` 接口本身就
-按标准口径算好了这些指标，没有自己从现金流量表拿 OCF 减资本开支去近似——这样比自己拼凑更准，
-也少写很多容易出错的代码。
+| 表 | 接口 | 列数 | 官方文档 |
+|---|---|---|---|
+| `a_stock_income` | `income` | 97 | doc_id=33 |
+| `a_stock_balancesheet` | `balancesheet` | 161 | doc_id=36 |
+| `a_stock_cashflow` | `cashflow` | 100 | doc_id=44 |
+| `a_stock_fina_indicator` | `fina_indicator` | 170 | doc_id=79 |
+
+三个消费方：`services/tushare.py`（拼 `fields=` 参数、数值列转换）、`core/analytics_database.py`
+（`_financial_statement_model()` 批量生成 ORM 模型、`ensure_analytics_table_columns()` 给存量表
+补列）、`robot/a_stock_base_data_sync.py`（`_normalize_statement_frame()` 的归一化列白名单）。
+以前这三处各抄一份列表，`revenue` 就因此丢过一次（见 3.4）；现在改一处就够了。
+
+**为什么连当前用不到的字段也存**（用户明确要求）：tushare 的增量同步只在"该股票完全没有记录"
+或"最新公告已过期"时才重新抓取，为新增列补齐历史必须走 `force_full_refresh=True` 的一次性全量
+回填、还要手工把脚本部署到生产机，代价远高于一次性多存几十个 FLOAT 列。这次修 1410% 的 bug
+时就撞上了：`minority_int`（少数股东权益）当初没同步，导致模型当场没法修。
+
+各接口都有部分字段「默认显示」是 N（如 `fina_indicator.ocf_to_or`、`roe_avg`），不显式点名就
+拿不到，所以必须传全量 `fields`。作为保险，`TushareService._fetch_statement_page()` 在带全字段
+请求失败时会退回不传 `fields` 重试一次——不同账号的积分档位未必覆盖全部字段，而 tushare 对
+无权字段是整个请求报错、而不是省略那一列；宁可少几列，也不要让整张表的同步失败。
 
 ### 3.2 同步引擎（`backend/src/robot/a_stock_base_data_sync.py`）
 
@@ -71,6 +79,10 @@ API → 前端页面。请重点核查「5. 需要重点 review 的设计决策�
   环境已经跑过一次旧字段列表的同步之后才发现需要的能力——**详见第 7 节遗留任务**。
 - 配套脚本 `backend/scripts/backfill_financial_statement_new_fields.py`：对 4 张财务报表统一调用
   `force_full_refresh=True` 做一次性回填，支持 `--symbols` 参数先在少量股票上验证。
+- 归一化/落库现在由一个通用的 `_normalize_statement_frame()` + `_bulk_upsert_statement_frame()`
+  驱动，4 张表各自只剩一个几行的薄封装。`id` 的 sha1 主键口径保持不变（利润表/资产负债表/
+  现金流量表用 `ts_code+end_date+ann_date+report_type`，财务指标用前三者），否则同一份报表会被
+  当成新行插进去而不是覆盖，产生重复期数。
 
 ### 3.3 无风险利率的真实数据源（`backend/src/robot/a_stock_base_data_config.py`）
 
@@ -88,6 +100,15 @@ chinabond.py`，抓信用债曲线用的同一套代码）实测确认了曲线�
    `_normalize_income_frame`/`_bulk_upsert_income_frame` 的列白名单没有同步更新，导致这些字段
    从 tushare 拉回来之后又在写库前被静默丢弃。已修复（现在从一个 `_INCOME_NUMERIC_COLUMNS`
    元组统一驱动，避免同类遗漏）。
+
+### 3.5 生产库的自动补列
+
+`ensure_analytics_table_columns()` 现在也由 `tushare_statement_fields` 驱动，生产库里已经建好的
+窄版表会在服务启动时自动 `ALTER TABLE ADD COLUMN` 补齐几百列（已有行原样保留、新列为 NULL），
+不需要人工执行 SQL。回归测试见
+`backend/tests/test_analytics_schema_upgrade.py::test_existing_financial_statement_tables_get_the_full_tushare_field_set`。
+
+**补列只是把列建出来，历史数据仍然是 NULL**，要靠第 7 节的一次性回填脚本填。
 
 ## 4. 扫描引擎方法论（`backend/src/core/services/value_investing_scanner.py`）
 
@@ -119,7 +140,10 @@ chinabond.py`，抓信用债曲线用的同一套代码）实测确认了曲线�
   `MIN_BETA_OBSERVATIONS=200` 个重合交易日。
 - **Blume 调整**（PR #17 新增，见 5.1）：`adjusted_beta = 2/3 * raw_beta + 1/3 * 1.0`，且
   `raw_beta` 先 clip 到 `[0.2, 3.0]`。
-- **股权成本** = CAPM = 无风险利率 + adjusted_beta × 股权风险溢价。
+- **股权成本** = `max(MIN_COST_OF_EQUITY, 无风险利率 + adjusted_beta × 股权风险溢价)`。
+  `MIN_COST_OF_EQUITY=0.08` 是本次新增的绝对下限：无风险利率现在只有 1.7%，低 beta 股票的 CAPM
+  结果会掉到 6% 上下，那不是"这家公司风险低"，而是"A股投资者不可能只要 6% 的年化回报还承担
+  股票风险"——贴现率一低，终值倍数立刻膨胀（见第 9 节）。
 - **无风险利率**：默认（`risk_free_rate=None`）现取中债国债收益率曲线10年期最新值；曲线未同步
   到时退回静态假设 `DEFAULT_RISK_FREE_RATE=0.025`；调用方可显式传值覆盖自动取值。返回结果的
   `assumptions.risk_free_rate_source` 会标注实际用的是 `chinabond_10y` / `default_fallback` /
@@ -133,21 +157,51 @@ chinabond.py`，抓信用债曲线用的同一套代码）实测确认了曲线�
 
 ### 4.4 内在价值（`_intrinsic_value_snapshot`）
 
-- **非金融**：两阶段 FCFF DCF（`_two_stage_fcff_value`）。基准 FCFF = 近3年(或更少)平均值；
-  近端增速 = FCFF 复合增速，缺失则退回净利润复合增速，都缺则为 0，clip 到
-  `NEAR_TERM_GROWTH_BOUNDS=(-0.15, 0.30)`；显式预测期 `DCF_EXPLICIT_YEARS=5` 年，增速从近端
-  线性衰减到永续增长率 `DEFAULT_TERMINAL_GROWTH_RATE=0.03`；终值用永续增长模型按 WACC 折现；
-  企业价值减净债务（`netdebt` 字段，缺失时退回 `interestdebt - money_cap`）得股权价值；
-  `expected_return_pct = 股权价值 / 当前市值 - 1`。
+- **非金融**：两阶段 FCFF DCF（`_two_stage_fcff_value`）。
+  - **基准 FCFF** = 近3年（或更少）平均值，序列由 `_fcff_history()` 给出，口径是**现金流量表**：
+    `经营活动现金流(n_cashflow_act) − 资本开支(c_pay_acq_const_fiolta) + 利息费用×(1−实际税率)`。
+    tushare 的 `fina_indicator.fcff` **只留作交叉验证**（结果里的 `fcff_cross_check_ratio` =
+    tushare 口径 / 报表口径，同为最近3期窗口），原因见第 9 节。现金流量表口径完全算不出来时才
+    退回 tushare 口径，此时 `dcf_base_fcff_source` 标成 `tushare_fina_indicator` 以示未经验证。
+  - **近端增速** = FCFF 复合增速，缺失则退回归母净利润复合增速，都缺则为 0，再 clip 到
+    `NEAR_TERM_GROWTH_BOUNDS=(-0.15, 0.30)`。复合增速由 `_series_cagr_pct()` 算：首尾各取 2 期
+    均值做端点（不足4期才退回单点），且 `|CAGR| > MAX_PLAUSIBLE_CAGR_PCT=100` 时直接判废返回
+    `None`——这种量级只会出现在"基期恰好接近0"的序列上，是序列不可用的信号。
+  - **永续增长率** = `min(入参, 无风险利率)`：一家公司不可能永远以高于长期国债的名义速度增长，
+    终局就是它大于整个经济体。1.7% 的无风险利率配 3% 的永续增长本身就自相矛盾，而这个矛盾会
+    直接把 WACC−g 利差压窄、把终值吹大。
+  - 显式预测期 `DCF_EXPLICIT_YEARS=5` 年，增速从近端线性衰减到永续增长率；终值用永续增长模型
+    按 WACC 折现。
+  - **归母口径**（`_parent_equity_value()`）：`全体股东股权价值 = 企业价值 − 净债务`，再扣掉少数
+    股东的索取权得到归母股权价值。净债务取 `netdebt`，缺失时退回 `interestdebt − money_cap`。
+    少数股东的扣除额取以下两者**较大**的一个：
+    - **账面**：`minority_int`，缺失时退回 `total_hldr_eqy_inc_min_int − total_hldr_eqy_exc_min_int`；
+    - **按比例**：`全体股东股权价值 × (1 − 归母利润占比)`。归母利润占比由 `_parent_profit_share()`
+      给出，取最近3期**合计**（单年合并净利润可能接近0甚至为负，比值会失真），三档兜底：
+      `n_income_attr_p / n_income` → `n_income_attr_p / (n_income_attr_p + minority_gain)` →
+      `total_hldr_eqy_exc_min_int / total_hldr_eqy_inc_min_int`。
+    为什么不能只减账面：那是拿一个账面数去减一个 DCF 数。华特达因的控股子公司 ROIC 24%，账面
+    少数股东权益 24 亿，但少数股东真正拥有的是这家子公司未来现金流的近一半（按 DCF 折出来 84 亿）。
+    两种口径各有失效场景（比例法在子公司亏损时失真、账面法在子公司高回报时失真），取大是保守的
+    那一侧。两者都拿不到时退回纯账面口径，结果里的 `dcf_minority_basis` 会标明实际用的是
+    `proportionate` 还是 `book`。
+    悲观/乐观情形会各自重新折算一次归母价值——按比例法时少数股东索取权随企业价值一起变，不能
+    沿用基准情形算出来的那个固定扣除额。
+  - `expected_return_pct = 归母股权价值 / 当前市值 - 1`。
 - **金融**：FCFF DCF 不适用（存贷款不是资本开支/营运资金变动），改用分析师覆盖银行/险资的标准
   替代框架"合理市净率"：`fair P/B = (ROE - g) / (股权成本 - g)`，
   `expected_return_pct = fair P/B / 当前PB - 1`。
-- **`MIN_WACC_TERMINAL_SPREAD=0.03`**（PR #17 从 `0.01` 改上来，见 5.2）：WACC 与永续增长率的
-  利差低于这个阈值时直接判定 DCF/合理PB 不可用，返回 `None` 而不是一个失真的数字。
+- **两道 DCF 可用性闸门**，任一不过就返回 `None` 而不是一个失真的精确数字：
+  - `MIN_WACC_TERMINAL_SPREAD=0.03`：WACC 与永续增长率的利差下限（PR #17 从 `0.01` 改上来）。
+  - `MAX_TERMINAL_VALUE_SHARE=0.85`（本次新增）：终值现值占企业价值的上限。利差闸门只卡住
+    WACC−g 这一个入口，"估值几乎全部来自第6年以后的假设"才是失真的真正信号。结果里会返回
+    `dcf_terminal_value_share_pct` 供人工判断。
 - 同时给出悲观/乐观区间（`expected_return_pct_bear`/`_bull`）：贴现率 ±150bp
   (`SCENARIO_DISCOUNT_RATE_SPREAD`)，非金融的近端增速额外乘以 `(0.5, 1.3)`
-  (`SCENARIO_GROWTH_MULTIPLIER`)。**注意：悲观/乐观区间没有联动调整永续增长率**，只调了
-  贴现率和近端增速——见 5.3。
+  (`SCENARIO_GROWTH_MULTIPLIER`) 后**重新 clip** 回 `NEAR_TERM_GROWTH_BOUNDS`。乐观情形的贴现率
+  只允许比基准低；利差地板挡住时直接不给乐观值（返回 `None`），而不是给一个比基准还差的
+  "乐观"数字——旧代码就是这个 bug，见第 9 节第 5 条。**悲观/乐观区间仍然没有联动调整永续
+  增长率**，只调了贴现率和近端增速——见 5.3。
 - 旧版的"估值均值回归"、"市盈率倒数(E/P)"、"trailing FCFF收益率"仍作为交叉验证字段
   （`reversion_return_pct`/`earnings_yield_pct`/`fcf_yield_pct`）返回，但不再参与
   `expected_return_pct` 的计算。
@@ -157,7 +211,9 @@ chinabond.py`，抓信用债曲线用的同一套代码）实测确认了曲线�
 `_intrinsic_value_snapshot()` 分别用两段切片各调用一次：
 
 - **当期**：用完整的年报历史（截止最新一期）
-- **去年同期**：去掉最新一期年报（`fina_history.iloc[:-1]`、`income_history.iloc[:-1]`）
+- **去年同期**：去掉最新一期年报（4 张表的切片一起去掉最新一期，含资产负债表——去年那次快照
+  要用去年的少数股东权益和货币资金，否则两次快照的净债务/少数股东口径会打架，同比差值就成了
+  噪声。为此资产负债表也从"只取最新1期"改成取完整年报历史）
 
 两次调用**用同一个 WACC / 股权成本**（不随切片重新计算），只让基本面输入（FCFF、净利润、ROE）
 随切片变化——这是刻意的简化，目的是让这次对比只反映"公司自身基本面是在变好还是变差"，不掺入
@@ -174,7 +230,7 @@ Blume 调整是成熟市场（主要是美股）长期研究得出的经验公�
 本地化验证**——权重是否应该更保守（比如更接近1，收缩力度更大）完全没有经过 A 股数据的实证检验，
 纯粹是"业界通用做法"的直接搬用。
 
-### 5.2 `MIN_WACC_TERMINAL_SPREAD=0.03` 是怎么定出来的
+### 5.2 `MIN_WACC_TERMINAL_SPREAD=0.03` 是怎么定出来的（已部分缓解，见第 9 节）
 
 老实说：**这个值是看到"老凤祥"那一个案例算出 2548% 的离谱回报率之后，反推出来的一个工程补丁**，
 不是从大样本统计里得出的阈值。原来是 `0.01`，观察到 `WACC-g=2.1pp` 时终值变成年FCFF的48倍这个
@@ -185,7 +241,13 @@ WACC-g利差一般在4-7pp"，但这句话本身也只是我个人对教科书/�
 天然窄）。**强烈建议 reviewer 在生产数据跑出全市场结果后，把 `wacc_pct - terminal_growth_pct`
 的分布拉出来看一眼，重新校准这个阈值。**
 
-### 5.3 悲观/乐观区间没有联动调整永续增长率
+**本次会话的后续**：这个担心被验证了——华特达因（000915.SZ）以 `WACC−g=3.1pp`（只比阈值高
+0.1pp）擦过闸门，算出 1410% 的回报率。现在不再只靠这一个阈值：股权成本加了 8% 的绝对下限、
+永续增长率被压到不超过无风险利率、另加一道"终值占企业价值不得超过 85%"的闸门。三者都是从
+"这个数字为什么不可信"出发的约束，比继续调 `MIN_WACC_TERMINAL_SPREAD` 这个魔数更稳。阈值
+本身没有改，仍然建议用真实全市场数据校准一次。
+
+### 5.3 悲观/乐观区间没有联动调整永续增长率（仍未做）
 
 我在最早设计时口头提过"三档都应该联动调整永续增长率"，但实际实现里悲观/乐观区间只调了贴现率
 和近端增速，永续增长率三档保持不变（见 `screen_value_investing_candidates` 里
@@ -240,15 +302,22 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
   `income_tax`/`fin_exp_int_exp`/`fcff`/`fcfe`/`netdebt`/`ebit`/`ebitda` 等字段**之前**跑的），
   这意味着截至本文档撰写时，生产 DuckDB 里这些新字段大概率仍是空的，`backfill_financial_
   statement_new_fields.py` 需要在生产环境执行一次（见第 7 节）。
-- 唯一一次真实数据验证是用户手动跑了一次扫描，反馈"老凤祥"(600612.SH) 算出 2548% 的离谱回报率
-  ——这暴露了 5.2 节的问题并已修复，但**修复后没有再用真实数据复核这一只、或任何其他股票**。
+- 用户手动跑真实扫描发现过两次离谱回报率："老凤祥"(600612.SH) 2548%（暴露 5.2 节的利差问题）、
+  "华特达因"(000915.SZ) 1410%（暴露第 9 节的 5 个问题）。两次都已修，但**修复后都没有再用真实
+  数据复核这两只、或任何其他股票**——第 9 节的修复目前只有合成数据回归测试
+  （`backend/tests/test_value_investing_scanner.py`）覆盖。
 - ROIC-WACC 质量闸门、内在价值同比闸门在真实全市场数据上的"通过率"是多少（会不会把95%的股票
   都筛掉，或者反过来筛得太松）完全未知。
 
 ## 7. 遗留任务（需要人工在生产环境执行）
 
 1. **跑一次性回填脚本**：`cd backend && python scripts/backfill_financial_statement_new_fields.py`
-   （可先用 `--symbols` 跑少量股票验证），把新增字段补进已有的历史年份。这台机器的部署方式是
+   （可先用 `--symbols` 跑少量股票验证），把新增字段补进已有的历史年份。**这次要补的是几百列**
+   （4 张表改成按 tushare 官方字段全集建表），不再只是当初那几个字段；服务启动时会自动把列
+   `ALTER TABLE ADD COLUMN` 建出来，但历史行的值仍然是 NULL，必须靠这个脚本填。
+   扫描器现在依赖 `minority_int`（少数股东权益）和现金流量表的
+   `n_cashflow_act`/`c_pay_acq_const_fiolta`，**回填之前跑扫描会拿不到少数股东权益**（按 0 处理，
+   等于退回旧的失真口径）。这台机器的部署方式是
    CI 把代码打包进 `quant_server.pyz`，`scripts/` 目录不在打包产物里，需要手动把脚本文件放到
    `/home/quantd/quant_prod/backend/scripts/` 下（详见与用户对话中给出的具体命令，本文档不
    重复贴那部分运维细节）。
@@ -256,7 +325,11 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
    - 通过质量闸门的股票数量是否合理（不能是0，也不能是"全市场都过"）
    - `wacc_pct - terminal_growth_pct` 的实际分布，重新校核 5.2 节的 `MIN_WACC_TERMINAL_SPREAD`
    - 金融股 return% 是否如 5.4 节预期的系统性偏高
-   - `fcff`/`netdebt` 等字段在真实数据里的缺失率
+   - `fcff`/`netdebt`/`minority_int` 等字段在真实数据里的缺失率
+   - `fcff_cross_check_ratio`（tushare 口径 / 现金流量表口径）的全市场分布：如果普遍接近 1，说明
+     tushare 的 fcff 大体可信、华特达因只是个例；如果普遍偏大，说明这次改口径改对了
+   - `dcf_terminal_value_share_pct` 的分布，校准 `MAX_TERMINAL_VALUE_SHARE=0.85`
+   - 因为终值占比闸门被判定"DCF 不可用"的股票占比（会不会误伤太多真实的高成长低负债公司）
 3. 股权风险溢价（ERP）目前没有实时数据源，如果能找到可靠来源（第三方研究机构定期发布的 A 股
    ERP估计、或用沪深300隐含股权风险溢价算法）可以替换掉 5.5 节的静态假设。
 4. 5.3 节提到的悲观/乐观区间未联动永续增长率，如果决定要做，改动点在
@@ -269,7 +342,8 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
 | `backend/src/core/services/value_investing_scanner.py` | 扫描引擎核心逻辑，本文档大部分内容对应这个文件 |
 | `backend/src/app/api/value_investing.py` | `GET /api/value-investing/screen`，管理员专用 |
 | `backend/src/core/services/tushare.py` | 新增的 balancesheet/cashflow/fina_indicator 拉取方法，income 拉取方法扩展字段 |
-| `backend/src/core/analytics_database.py` | 新增/扩展的表结构 |
+| `backend/src/core/tushare_statement_fields.py` | **4 张财务报表的 tushare 官方字段全集，建表/同步/请求三处共用的单一事实来源** |
+| `backend/src/core/analytics_database.py` | 表结构（`_financial_statement_model()` 按字段清单生成）、存量表自动补列 |
 | `backend/src/robot/a_stock_base_data_sync.py` | 通用增量同步引擎 `_sync_statement_data`、`force_full_refresh` |
 | `backend/src/robot/a_stock_base_data_config.py` | chinabond 曲线配置，含新增的国债曲线 |
 | `backend/src/robot/a_stock_innovation_momentum_virtual.py` | 修复了 `operate_income` → `revenue` 的 bug |
@@ -277,3 +351,40 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
 | `backend/scripts/verify_value_investing_tushare_access.py` | 验证 tushare 账号权限的诊断脚本 |
 | `backend/scripts/inspect_a_stock_income_revenue_gap.py` | 验证 `operate_income` 历史是否为空的诊断脚本 |
 | `frontend/src/pages/ValueInvestingScreen.jsx` / `.css` | 「研究」→「价值投资」页面 |
+| `backend/tests/test_value_investing_scanner.py` | 第 9 节 5 个问题的回归测试（合成数据） |
+| `backend/tests/test_analytics_schema_upgrade.py` | 旧窄表 → 自动补列 → 已有行保留 的升级测试 |
+
+## 9. 华特达因 1410% 案例：5 个问题及修复
+
+用户在真实数据上跑出华特达因（000915.SZ）的"潜在回报率 1410.2%（悲观 658.7% ~ 乐观 1128.8%）"。
+输入是：基准FCFF 14.68亿 / 归母净利约4.2亿（PE 14.13 倒推）/ 市值 59.5亿 / WACC 6.1% /
+FCFF复合增速 339.6% / 企业价值 878亿。用扫描器的公式逐项复算能完全对上，所以不是显示问题，
+是四层错误叠乘，外加一个区间计算的 bug。
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | **口径错配（最致命）**：FCFF 是"全体股东+债权人"口径，`total_mv` 只是母公司上市股本。华特达因的利润绝大部分来自持股约五成的控股子公司，`equity_value = EV − net_debt` 少减了少数股东权益，单这一项就放大约 2 倍。当时 `minority_int` 根本没同步，改不了 | 分两步做完（见下面「1 的第二层」）：先同步 `minority_int` 减掉账面少数股东权益，再改成按归母利润占比折算、与账面取较大者 |
+| 2 | **基准 FCFF 不可信**：页面自己的两个交叉验证字段就互相打脸——E/P 7.1% vs FCFF收益率 20.6%，差近 3 倍；而"经营现金流/净利润 = 1.09"说明 OCF 和净利润同量级，FCFF 不可能是净利润的 3 倍。根因是 tushare `fcff` 公式里的"营运资金增加"项在这家公司上算出了巨额营运资金释放 | DCF 基准改用现金流量表口径（OCF − 资本开支 + 税后利息），tushare 的 `fcff` 降为交叉验证字段，偏离倍数 `fcff_cross_check_ratio` 输出到结果里 |
+| 3 | **增速 clip 把垃圾值变成最乐观值**：FCFF 复合增速 339.6%（反推最老一年只有约 330 万、最新 12.3 亿，5 年 370 倍），`_estimate_near_term_growth` 直接 clip 到 30% 上限。339.6% 的含义是"这个序列不可用"，不是"增速非常高" | `_series_cagr_pct()` 首尾各取 2 期均值做端点；`|CAGR| > 100%` 直接判废返回 `None`，退回利润增速或 0 |
+| 4 | **WACC 6.1% 太低、终值利差 3.1pp 擦过闸门**：`rf 1.68% + 调整后beta 0.73 × ERP 6%`，有息负债≈0 所以 WACC 就等于股权成本。终值倍数 1/3.1% = 32 倍，终值占 EV 的 88% | 股权成本加 `MIN_COST_OF_EQUITY=8%` 地板；永续增长率压到不超过无风险利率；新增 `MAX_TERMINAL_VALUE_SHARE=0.85` 闸门 |
+| 5 | **区间计算 bug：乐观贴现率比基准还高**：`bull_wacc = max(g + MIN_WACC_TERMINAL_SPREAD×1.5, wacc − 150bp) = max(7.5%, 4.6%) = 7.5%`，比基准 6.1% 还高，于是"乐观"1128.8% < "基准"1410.2%，基准值落在自己的区间之外。另外 `bull_growth = 30% × 1.3 = 39%` 突破了 30% 上界 | 乐观贴现率只允许比基准低，利差地板挡住时直接不给乐观值；情景增速乘完重新 clip |
+
+### 1 的第二层：账面少数股东权益仍然不够
+
+只减账面少数股东权益，等于拿一个账面数去减一个 DCF 数。子公司 ROIC 越高，账面越低估少数股东的
+索取权，归母价值就越被高估。所以又加了一层：用 `n_income_attr_p / n_income`（两个字段都是这次
+全量同步才有的）算出归母利润占比，把全体股东的股权价值按比例切一刀，和账面取较大者。
+
+同一组输入（合成复现）逐层的效果：
+
+| 口径 | 少数股东扣除(亿) | 归母股权价值(亿) | 回报率 |
+|---|---|---|---|
+| 不减少数股东（原始 bug） | 0 | 168 | 1403% |
+| 减账面少数股东权益 | 24.0 | 148 | 149% |
+| **按归母利润占比 51.2% 折算（当前）** | **83.9** | **88.1** | **48.1%** |
+
+企业价值 152亿、终值占比 74.6% 三档相同。48% 对一只 PE 14、ROIC 24% 的股票是个可信的量级。
+
+**没有按最初说法实现的一处**：原本说"FCFF 与现金流量表口径偏离过大就返回 `unavailable_reason`
+不硬算"。实际实现改成了"现金流量表口径当主口径、tushare 只做交叉验证"——用一个可审计的数字
+去算，比因为两个数不一致就把这只股票整个丢掉更有用。偏离倍数仍然输出到结果里供人工判断。
