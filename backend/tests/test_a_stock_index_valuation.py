@@ -211,3 +211,35 @@ def test_load_a_stock_consensus_valuation_map_builds_forward_range():
     assert result["600519.SH"]["fair_value_hi"] == pytest.approx(130)
     assert result["600519.SH"]["forward_next_fy_lo"] == pytest.approx(156)
     assert result["600519.SH"]["forward_next_fy_hi"] == pytest.approx(156)
+
+
+def test_calculate_weighted_index_valuation_reports_stale_constituent_weight():
+    holdings = [_holding("AAA.SH", 0.6), _holding("BBB.SZ", 0.4)]
+    fresh = _valuation("AAA.SH", 10, 8, 12, 10, 14)
+    fresh.is_stale = False
+    stale = _valuation("BBB.SZ", 20, 10, 30, 20, 40)
+    stale.is_stale = True
+    valuations = {"AAA.SH": fresh, "BBB.SZ": stale}
+
+    result = calculate_weighted_index_valuation(
+        index_level=1000,
+        holdings=holdings,
+        valuations=valuations,
+    )
+
+    assert result["stale_covered_count"] == 1
+    assert result["stale_weight_ratio"] == pytest.approx(0.4)
+
+
+def test_calculate_weighted_index_valuation_treats_missing_stale_flag_as_fresh():
+    holdings = [_holding("AAA.SH", 1.0)]
+    valuations = {"AAA.SH": _valuation("AAA.SH", 10, 8, 12, 10, 14)}
+
+    result = calculate_weighted_index_valuation(
+        index_level=1000,
+        holdings=holdings,
+        valuations=valuations,
+    )
+
+    assert result["stale_covered_count"] == 0
+    assert result["stale_weight_ratio"] == pytest.approx(0)
