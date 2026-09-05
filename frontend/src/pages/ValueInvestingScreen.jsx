@@ -69,52 +69,60 @@ const DEFAULT_FILTERS = {
   minTotalMv: null,
   excludeSt: true,
   topN: 100,
-  minAvgRoe: null,
+  minRoicWaccSpreadPct: null,
   minOcfToNp: null,
   minFcfPositiveYears: null,
   maxDebtToAssets: null,
   minAvgRoeFinancial: null,
+  riskFreeRatePct: null,
+  equityRiskPremiumPct: null,
+  terminalGrowthRatePct: null,
 };
 
-const expandedRowRender = record => (
-  <Descriptions
-    size="small"
-    column={3}
-    className="value-investing-detail"
-    items={[
-      {
-        key: 'reversion',
-        label: '估值均值回归',
-        children: <SignedPercent value={record.reversion_return_pct} />,
-      },
-      {
-        key: 'growth',
-        label: 'FCF收益率+利润复合增速',
-        children: <SignedPercent value={record.growth_return_pct} />,
-      },
-      {
-        key: 'earnings_yield',
-        label: '市盈率倒数(E/P)',
-        children: <SignedPercent value={record.earnings_yield_pct} />,
-      },
-      {
-        key: 'fcf_yield',
-        label: 'FCF收益率',
-        children: <SignedPercent value={record.fcf_yield_pct} />,
-      },
-      {
-        key: 'profit_cagr',
-        label: '净利润复合增速(CAGR)',
-        children: <SignedPercent value={record.profit_cagr_pct} />,
-      },
-      {
-        key: 'ocf_to_np',
-        label: '经营现金流/净利润',
-        children: formatNumber(record.ocf_to_net_profit),
-      },
-    ]}
-  />
-);
+const expandedRowRender = record => {
+  const items = record.is_financial
+    ? [
+        { key: 'roe', label: '近5年平均ROE', children: formatPercent(record.avg_roe_pct) },
+        { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
+        { key: 'beta', label: 'Beta', children: formatNumber(record.beta) },
+        { key: 'justified_pb', label: '合理市净率 fair P/B', children: formatNumber(record.justified_pb) },
+        { key: 'pb', label: '当前PB', children: formatNumber(record.pb) },
+        {
+          key: 'method',
+          label: '估值方法',
+          children: 'fair P/B = (ROE−永续增长率)/(股权成本−永续增长率)，银行/保险/证券的FCFF不适用DCF',
+        },
+      ]
+    : [
+        { key: 'roic', label: '近5年平均ROIC', children: formatPercent(record.avg_roic_pct) },
+        { key: 'wacc', label: 'WACC', children: formatPercent(record.wacc_pct) },
+        { key: 'spread', label: 'ROIC−WACC价差', children: <SignedPercent value={record.roic_wacc_spread_pct} /> },
+        { key: 'beta', label: 'Beta', children: formatNumber(record.beta) },
+        { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
+        { key: 'cod', label: '税后债权成本', children: formatPercent(record.cost_of_debt_after_tax_pct) },
+        { key: 'base_fcff', label: '基准FCFF(近3年均值,亿)', children: formatNumber(record.dcf_base_fcff_yi) },
+        { key: 'fcff_cagr', label: 'FCFF复合增速', children: <SignedPercent value={record.fcff_cagr_pct} /> },
+        { key: 'terminal_growth', label: '永续增长率', children: formatPercent(record.terminal_growth_pct) },
+        { key: 'ev', label: '企业价值(DCF,亿)', children: formatNumber(record.dcf_enterprise_value_yi) },
+        { key: 'net_debt', label: '净债务(亿)', children: formatNumber(record.dcf_net_debt_yi) },
+        { key: 'equity_value', label: '股权价值(DCF,亿)', children: formatNumber(record.dcf_equity_value_yi) },
+        { key: 'market_cap', label: '当前市值(亿)', children: formatNumber(record.market_cap_yi) },
+        { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
+      ];
+  const crossCheckItems = [
+    { key: 'reversion', label: '交叉验证-估值均值回归', children: <SignedPercent value={record.reversion_return_pct} /> },
+    { key: 'earnings_yield', label: '交叉验证-市盈率倒数(E/P)', children: <SignedPercent value={record.earnings_yield_pct} /> },
+    { key: 'fcf_yield', label: '交叉验证-FCFF收益率', children: <SignedPercent value={record.fcf_yield_pct} /> },
+  ];
+  return (
+    <div className="value-investing-detail-wrap">
+      {record.dcf_unavailable_reason && (
+        <Alert type="warning" showIcon className="value-investing-detail-warning" message={record.dcf_unavailable_reason} />
+      )}
+      <Descriptions size="small" column={3} className="value-investing-detail" items={[...items, ...crossCheckItems]} />
+    </div>
+  );
+};
 
 const buildColumns = () => [
   {
@@ -178,13 +186,31 @@ const buildColumns = () => [
     ),
   },
   {
-    title: '近5年平均ROE',
-    dataIndex: 'avg_roe_pct',
-    key: 'avg_roe_pct',
-    width: 120,
+    title: (
+      <Tooltip title="非金融显示ROIC(资本回报率，资本结构中性)，银行/保险/证券显示ROE">
+        ROIC/ROE
+      </Tooltip>
+    ),
+    key: 'roic_or_roe',
+    width: 100,
     align: 'right',
-    sorter: (a, b) => (a.avg_roe_pct ?? -Infinity) - (b.avg_roe_pct ?? -Infinity),
-    render: value => formatPercent(value),
+    sorter: (a, b) => {
+      const av = a.is_financial ? a.avg_roe_pct : a.avg_roic_pct;
+      const bv = b.is_financial ? b.avg_roe_pct : b.avg_roic_pct;
+      return (av ?? -Infinity) - (bv ?? -Infinity);
+    },
+    render: (_, record) => formatPercent(record.is_financial ? record.avg_roe_pct : record.avg_roic_pct),
+  },
+  {
+    title: (
+      <Tooltip title="非金融显示WACC(加权资本成本)，银行/保险/证券显示股权成本(CAPM)">
+        WACC/股权成本
+      </Tooltip>
+    ),
+    key: 'wacc_or_coe',
+    width: 110,
+    align: 'right',
+    render: (_, record) => formatPercent(record.is_financial ? record.cost_of_equity_pct : record.wacc_pct),
   },
   {
     title: '资产负债率',
@@ -197,22 +223,29 @@ const buildColumns = () => [
   {
     title: (
       <Space size={4}>
-        潜在回报率
-        <Tooltip title="估值均值回归 / FCF收益率+历史利润复合增速 / 市盈率倒数三种估算的中位数，展开行查看明细">
+        潜在回报率(悲观~乐观)
+        <Tooltip title="非金融：两阶段FCFF DCF算出的股权价值 vs 当前市值；银行/保险/证券：合理市净率 vs 当前PB。悲观/乐观区间来自WACC或股权成本 ±1.5个百分点，展开行查看完整假设">
           <InfoCircleOutlined />
         </Tooltip>
       </Space>
     ),
     dataIndex: 'expected_return_pct',
     key: 'expected_return_pct',
-    width: 130,
+    width: 220,
     align: 'right',
     defaultSortOrder: 'descend',
     sorter: (a, b) => (a.expected_return_pct ?? -Infinity) - (b.expected_return_pct ?? -Infinity),
-    render: value => (
+    render: (value, record) => (
       value === null || value === undefined
-        ? <Text type="secondary">数据不足</Text>
-        : <Text strong className={signedClassName(value)}>{formatPercent(value)}</Text>
+        ? <Text type="secondary">{record.dcf_unavailable_reason || '数据不足'}</Text>
+        : (
+          <Space direction="vertical" size={0} className="value-investing-return-cell">
+            <Text strong className={signedClassName(value)}>{formatPercent(value)}</Text>
+            <Text type="secondary" className="value-investing-return-range">
+              ({formatPercent(record.expected_return_pct_bear)} ~ {formatPercent(record.expected_return_pct_bull)})
+            </Text>
+          </Space>
+        )
     ),
   },
 ];
@@ -237,10 +270,17 @@ const excludedColumns = [
     render: value => value || '-',
   },
   {
-    title: '近5年平均ROE',
-    dataIndex: 'avg_roe_pct',
-    key: 'avg_roe_pct',
-    width: 120,
+    title: 'ROIC/ROE',
+    key: 'roic_or_roe',
+    width: 100,
+    align: 'right',
+    render: (_, record) => formatPercent(record.is_financial ? record.avg_roe_pct : record.avg_roic_pct),
+  },
+  {
+    title: 'WACC',
+    dataIndex: 'wacc_pct',
+    key: 'wacc_pct',
+    width: 90,
     align: 'right',
     render: value => formatPercent(value),
   },
@@ -269,7 +309,9 @@ const ValueInvestingScreen = () => {
         exclude_st: filters.excludeSt,
       };
       if (filters.minTotalMv !== null && filters.minTotalMv !== undefined) params.min_total_mv = filters.minTotalMv;
-      if (filters.minAvgRoe !== null && filters.minAvgRoe !== undefined) params.min_avg_roe = filters.minAvgRoe;
+      if (filters.minRoicWaccSpreadPct !== null && filters.minRoicWaccSpreadPct !== undefined) {
+        params.min_roic_wacc_spread_pct = filters.minRoicWaccSpreadPct;
+      }
       if (filters.minOcfToNp !== null && filters.minOcfToNp !== undefined) params.min_ocf_to_np = filters.minOcfToNp;
       if (filters.minFcfPositiveYears !== null && filters.minFcfPositiveYears !== undefined) {
         params.min_fcf_positive_years = filters.minFcfPositiveYears;
@@ -279,6 +321,15 @@ const ValueInvestingScreen = () => {
       }
       if (filters.minAvgRoeFinancial !== null && filters.minAvgRoeFinancial !== undefined) {
         params.min_avg_roe_financial = filters.minAvgRoeFinancial;
+      }
+      if (filters.riskFreeRatePct !== null && filters.riskFreeRatePct !== undefined) {
+        params.risk_free_rate_pct = filters.riskFreeRatePct;
+      }
+      if (filters.equityRiskPremiumPct !== null && filters.equityRiskPremiumPct !== undefined) {
+        params.equity_risk_premium_pct = filters.equityRiskPremiumPct;
+      }
+      if (filters.terminalGrowthRatePct !== null && filters.terminalGrowthRatePct !== undefined) {
+        params.terminal_growth_rate_pct = filters.terminalGrowthRatePct;
       }
       const { data } = await request.get('/api/value-investing/screen', { params });
       setResult(data);
@@ -300,8 +351,8 @@ const ValueInvestingScreen = () => {
         <div>
           <Title level={3}>价值投资扫描</Title>
           <Paragraph type="secondary" className="value-investing-intro">
-            质量闸门(现金流验证利润 + 资产负债健康度) → 估值分位数(自身近5年历史) → 潜在回报率(三种独立测算取中位数)。
-            仅做研究提示，不构成投资建议。
+            质量闸门(ROIC能否持续跑赢WACC + 现金流验证利润) → 两阶段FCFF DCF算内在价值(银行/保险/证券改用合理市净率)
+            → 潜在回报率 = 内在价值 vs 当前价格，并给出WACC±150bp的悲观/乐观区间。仅做研究提示，不构成投资建议。
           </Paragraph>
         </div>
         <Space wrap align="start" className="value-investing-toolbar__controls">
@@ -338,19 +389,25 @@ const ValueInvestingScreen = () => {
         items={[
           {
             key: 'advanced',
-            label: '质量闸门高级参数(留空使用默认阈值)',
+            label: '质量闸门与WACC/DCF假设(留空使用默认值)',
             children: (
               <Space wrap size="middle">
-                <InputNumber addonBefore="近5年平均ROE下限(%)" value={filters.minAvgRoe}
-                  onChange={value => setFilters(current => ({ ...current, minAvgRoe: value }))} style={{ width: 240 }} />
+                <InputNumber addonBefore="ROIC-WACC价差下限(pp)" value={filters.minRoicWaccSpreadPct}
+                  onChange={value => setFilters(current => ({ ...current, minRoicWaccSpreadPct: value }))} style={{ width: 240 }} />
                 <InputNumber addonBefore="经营现金流/净利润下限" step={0.1} value={filters.minOcfToNp}
                   onChange={value => setFilters(current => ({ ...current, minOcfToNp: value }))} style={{ width: 240 }} />
-                <InputNumber addonBefore="FCF为正最少年数" min={0} max={5} value={filters.minFcfPositiveYears}
+                <InputNumber addonBefore="FCFF为正最少年数" min={0} max={5} value={filters.minFcfPositiveYears}
                   onChange={value => setFilters(current => ({ ...current, minFcfPositiveYears: value }))} style={{ width: 220 }} />
                 <InputNumber addonBefore="资产负债率上限(%)" value={filters.maxDebtToAssets}
                   onChange={value => setFilters(current => ({ ...current, maxDebtToAssets: value }))} style={{ width: 220 }} />
                 <InputNumber addonBefore="金融类ROE下限(%)" value={filters.minAvgRoeFinancial}
                   onChange={value => setFilters(current => ({ ...current, minAvgRoeFinancial: value }))} style={{ width: 220 }} />
+                <InputNumber addonBefore="无风险利率(%)" step={0.1} value={filters.riskFreeRatePct}
+                  onChange={value => setFilters(current => ({ ...current, riskFreeRatePct: value }))} style={{ width: 220 }} />
+                <InputNumber addonBefore="股权风险溢价(%)" step={0.1} value={filters.equityRiskPremiumPct}
+                  onChange={value => setFilters(current => ({ ...current, equityRiskPremiumPct: value }))} style={{ width: 220 }} />
+                <InputNumber addonBefore="永续增长率(%)" step={0.1} value={filters.terminalGrowthRatePct}
+                  onChange={value => setFilters(current => ({ ...current, terminalGrowthRatePct: value }))} style={{ width: 220 }} />
               </Space>
             ),
           },

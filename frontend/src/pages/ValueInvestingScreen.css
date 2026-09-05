@@ -45,6 +45,24 @@
   color: #cf1322;
 }
 
+.value-investing-return-cell {
+  align-items: flex-end;
+}
+
+.value-investing-return-range {
+  font-size: 12px;
+}
+
+.value-investing-detail-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.value-investing-detail-warning {
+  margin-bottom: 0;
+}
+
 .value-investing-excluded {
   margin-top: 16px;
 }

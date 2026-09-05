@@ -1891,7 +1891,8 @@ class TushareService(QuoteProvider):
                     ts_code=ts_code,
                     fields=(
                         "ts_code,end_date,ann_date,rd_exp,report_type,"
-                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps"
+                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps,"
+                        "income_tax,fin_exp_int_exp"
                     ),
                     limit=limit,
                     offset=offset,
@@ -1925,6 +1926,8 @@ class TushareService(QuoteProvider):
             "total_profit",
             "total_cogs",
             "basic_eps",
+            "income_tax",
+            "fin_exp_int_exp",
         ):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
@@ -1963,7 +1966,8 @@ class TushareService(QuoteProvider):
                     end_date=end_value.strftime("%Y%m%d"),
                     fields=(
                         "ts_code,end_date,ann_date,rd_exp,report_type,"
-                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps"
+                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps,"
+                        "income_tax,fin_exp_int_exp"
                     ),
                     limit=limit,
                     offset=offset,
@@ -2003,6 +2007,8 @@ class TushareService(QuoteProvider):
             "total_profit",
             "total_cogs",
             "basic_eps",
+            "income_tax",
+            "fin_exp_int_exp",
         ):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
@@ -2331,7 +2337,7 @@ class TushareService(QuoteProvider):
             "ts_code,end_date,ann_date,eps,dt_eps,bps,ocfps,roe,roe_waa,roe_dt,roa,roic,"
             "grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,quick_ratio,"
             "profit_dedt,extra_item,netprofit_yoy,dt_netprofit_yoy,or_yoy,op_yoy,"
-            "ocf_to_or,ocf_to_debt,interestdebt"
+            "ocf_to_or,ocf_to_debt,interestdebt,fcff,fcfe,netdebt,ebit,ebitda"
         )
         numeric_columns = (
             "eps",
@@ -2357,6 +2363,11 @@ class TushareService(QuoteProvider):
             "ocf_to_or",
             "ocf_to_debt",
             "interestdebt",
+            "fcff",
+            "fcfe",
+            "netdebt",
+            "ebit",
+            "ebitda",
         )
         frames = []
         offset = 0

@@ -2920,6 +2920,8 @@ _INCOME_NUMERIC_COLUMNS = (
     "total_profit",
     "total_cogs",
     "basic_eps",
+    "income_tax",
+    "fin_exp_int_exp",
 )
 
 
@@ -3150,6 +3152,11 @@ _FINA_INDICATOR_NUMERIC_COLUMNS = (
     "ocf_to_or",
     "ocf_to_debt",
     "interestdebt",
+    "fcff",
+    "fcfe",
+    "netdebt",
+    "ebit",
+    "ebitda",
 )
 
 
@@ -3886,7 +3893,12 @@ def sync_a_stock_income_data(
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    force_full_refresh: bool = False,
 ) -> Dict:
+    """force_full_refresh=True 会假装每个symbol都没有历史数据，逼着重新抓取完整
+    回溯窗口——用于给已经同步过的表新增字段之后，把新字段回填进已有的历史年份
+    (正常的增量/回补逻辑只在"该symbol没有任何记录"或"最新公告已经过期"时才会
+    重新抓取，已经存在的行不会因为schema新增了列就被自动刷新)。"""
     end_value = _parse_date(end_date) or date.today()
     default_start = DEFAULT_START_DATE - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS)
     owns_analytics_db = analytics_db is None
@@ -3894,7 +3906,7 @@ def sync_a_stock_income_data(
     try:
         explicit_start = _parse_date(start_date)
         earliest_ann_date, latest_ann_date = _income_ann_date_bounds(analytics_session)
-        symbol_bounds = _income_ann_date_bounds_by_symbol(analytics_session)
+        symbol_bounds = {} if force_full_refresh else _income_ann_date_bounds_by_symbol(analytics_session)
         symbol_list_dates = _income_list_dates_by_symbol(analytics_session)
         analytics_session.commit()
         start_value = explicit_start or default_start
@@ -4335,12 +4347,18 @@ def _sync_statement_data(
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    force_full_refresh: bool = False,
 ) -> Dict:
     """通用财务报表(资产负债表/现金流量表/财务指标)增量同步引擎。
 
     控制流与 `sync_a_stock_income_data` 完全一致(逐symbol规划增量/回补范围、
     多线程抓取、批量落库)，通过 fetch_range_fn/upsert_fn 参数化具体报表接口，
     避免三张报表各自复制一份近千行的同步逻辑。
+
+    force_full_refresh=True 会假装每个symbol都没有历史数据，逼着重新抓取完整
+    回溯窗口——用于给已经同步过的表新增字段之后，把新字段回填进已有的历史年份
+    (正常的增量/回补逻辑只在"该symbol没有任何记录"或"最新公告已经过期"时才会
+    重新抓取，已经存在的行不会因为schema新增了列就被自动刷新)。
     """
     end_value = _parse_date(end_date) or date.today()
     default_start = DEFAULT_START_DATE - timedelta(days=lookback_days)
@@ -4349,7 +4367,7 @@ def _sync_statement_data(
     try:
         explicit_start = _parse_date(start_date)
         earliest_ann_date, latest_ann_date = _statement_ann_date_bounds(analytics_session, table_name)
-        symbol_bounds = _statement_ann_date_bounds_by_symbol(analytics_session, table_name)
+        symbol_bounds = {} if force_full_refresh else _statement_ann_date_bounds_by_symbol(analytics_session, table_name)
         symbol_list_dates = _income_list_dates_by_symbol(analytics_session)
         analytics_session.commit()
         start_value = explicit_start or default_start
@@ -4625,6 +4643,7 @@ def sync_a_stock_balancesheet_data(
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    force_full_refresh: bool = False,
 ) -> Dict:
     return _sync_statement_data(
         statement_label="资产负债表",
@@ -4640,6 +4659,7 @@ def sync_a_stock_balancesheet_data(
         tushare_service=tushare_service,
         analytics_db=analytics_db,
         progress_callback=progress_callback,
+        force_full_refresh=force_full_refresh,
     )
 
 
@@ -4652,6 +4672,7 @@ def sync_a_stock_cashflow_data(
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    force_full_refresh: bool = False,
 ) -> Dict:
     return _sync_statement_data(
         statement_label="现金流量表",
@@ -4667,6 +4688,7 @@ def sync_a_stock_cashflow_data(
         tushare_service=tushare_service,
         analytics_db=analytics_db,
         progress_callback=progress_callback,
+        force_full_refresh=force_full_refresh,
     )
 
 
@@ -4679,6 +4701,7 @@ def sync_a_stock_fina_indicator_data(
     tushare_service: Optional[TushareService] = None,
     analytics_db: Optional[Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    force_full_refresh: bool = False,
 ) -> Dict:
     return _sync_statement_data(
         statement_label="财务指标",
@@ -4694,6 +4717,7 @@ def sync_a_stock_fina_indicator_data(
         tushare_service=tushare_service,
         analytics_db=analytics_db,
         progress_callback=progress_callback,
+        force_full_refresh=force_full_refresh,
     )
 
 
