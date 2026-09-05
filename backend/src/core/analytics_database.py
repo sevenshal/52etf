@@ -146,6 +146,8 @@ class AStockIncome(AnalyticsBase):
     total_profit = Column(Float)
     total_cogs = Column(Float)
     basic_eps = Column(Float)
+    income_tax = Column(Float)
+    fin_exp_int_exp = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -232,6 +234,11 @@ class AStockFinaIndicator(AnalyticsBase):
     ocf_to_or = Column(Float)
     ocf_to_debt = Column(Float)
     interestdebt = Column(Float)
+    fcff = Column(Float)
+    fcfe = Column(Float)
+    netdebt = Column(Float)
+    ebit = Column(Float)
+    ebitda = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -659,6 +666,15 @@ def ensure_analytics_table_columns():
             "total_profit": "FLOAT",
             "total_cogs": "FLOAT",
             "basic_eps": "FLOAT",
+            "income_tax": "FLOAT",
+            "fin_exp_int_exp": "FLOAT",
+        },
+        "a_stock_fina_indicator": {
+            "fcff": "FLOAT",
+            "fcfe": "FLOAT",
+            "netdebt": "FLOAT",
+            "ebit": "FLOAT",
+            "ebitda": "FLOAT",
         },
     }
     with analytics_engine.begin() as conn:
