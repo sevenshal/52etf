@@ -460,3 +460,122 @@ def test_search_consensus_candidates_symbol_query_ignores_report_window():
 
     assert [item["symbol"] for item in result] == ["300721.SZ"]
     assert result[0]["latest_report_date"] == "2022-12-20"
+
+
+def _consensus_row(day, *, min_price=None, max_price=None, report_date=None, quarter="2026", eps=1.0):
+    return {
+        "ts_code": "600612.SH",
+        "report_name": "老凤祥",
+        "stock_name": "老凤祥",
+        "industry": "服饰",
+        "market": "主板",
+        "trade_date": date(2026, 9, 4),
+        "close": 33.80,
+        "total_mv": 1_768_000.0,
+        "circ_mv": 1_072_000.0,
+        "report_date": report_date or date(2026, 8, day),
+        "report_title": f"报告{day}",
+        "org_name": f"机构{day}",
+        "author_name": f"分析师{day}",
+        "quarter": quarter,
+        "eps": eps,
+        "min_price": min_price,
+        "max_price": max_price,
+    }
+
+
+def test_consensus_target_range_covers_average_when_bounds_are_one_sided():
+    """单边填充 min_price/max_price 时，区间必须仍然包住均值。
+
+    真实数据里多数研报只填 min_price(max_price 为空)，只有个别研报两边都填。
+    旧实现把 min/max 分别取自不同的研报子集，会算出 42.45 ~ 42.45 的"点区间"
+    却配上 60+ 的均值。
+    """
+    rows = [_consensus_row(day, min_price=price) for day, price in
+            enumerate([70.0, 68.0, 65.0, 62.0, 60.0, 58.0], start=1)]
+    rows.append(_consensus_row(7, min_price=42.45, max_price=42.45))
+
+    result = _aggregate_report_rows(rows, date(2026, 9, 4))
+
+    assert result["target_price_min"] == 42.45
+    assert result["target_price_max"] == 70.0
+    assert result["target_price_min"] <= result["target_price_avg"] <= result["target_price_max"]
+
+
+def test_consensus_target_bounds_tolerate_inverted_min_max():
+    rows = [_consensus_row(1, min_price=80.0, max_price=60.0)]
+
+    result = _aggregate_report_rows(rows, date(2026, 9, 4))
+
+    assert result["target_price_min"] == 60.0
+    assert result["target_price_max"] == 80.0
+    assert result["target_price_avg"] == 70.0
+
+
+def test_consensus_only_uses_reports_published_after_latest_annual_report():
+    rows = [
+        _consensus_row(1, min_price=90.0, max_price=90.0, report_date=date(2026, 3, 10)),
+        _consensus_row(2, min_price=60.0, max_price=60.0, report_date=date(2026, 5, 20)),
+    ]
+
+    result = _aggregate_report_rows(
+        rows,
+        date(2026, 9, 4),
+        latest_annual_ann_date=date(2026, 4, 25),
+        prev_annual_ann_date=date(2025, 4, 26),
+    )
+
+    assert result["target_report_count"] == 1
+    assert result["target_price_avg"] == 60.0
+    assert result["consensus_window"] == "post_latest_annual"
+    assert result["is_stale"] is False
+
+
+def test_consensus_falls_back_to_previous_annual_window_and_marks_stale():
+    rows = [
+        _consensus_row(1, min_price=90.0, max_price=90.0, report_date=date(2024, 12, 1)),
+        _consensus_row(2, min_price=60.0, max_price=60.0, report_date=date(2026, 3, 10)),
+    ]
+
+    result = _aggregate_report_rows(
+        rows,
+        date(2026, 9, 4),
+        latest_annual_ann_date=date(2026, 4, 25),
+        prev_annual_ann_date=date(2025, 4, 26),
+    )
+
+    assert result["target_report_count"] == 1
+    assert result["target_price_avg"] == 60.0
+    assert result["consensus_window"] == "post_prev_annual"
+    assert result["is_stale"] is True
+
+
+def test_consensus_window_unfiltered_without_annual_announcement_date():
+    rows = [_consensus_row(1, min_price=60.0, max_price=60.0, report_date=date(2024, 12, 1))]
+
+    result = _aggregate_report_rows(rows, date(2026, 9, 4))
+
+    assert result["target_report_count"] == 1
+    assert result["consensus_window"] == "unfiltered"
+    assert result["is_stale"] is True
+
+
+def test_consensus_candidates_expose_annual_report_window_flags():
+    rows = [
+        dict(_consensus_row(1, min_price=90.0, max_price=90.0, report_date=date(2026, 3, 10)),
+             latest_annual_ann_date=date(2026, 4, 25), prev_annual_ann_date=date(2025, 4, 26)),
+        dict(_consensus_row(2, min_price=60.0, max_price=60.0, report_date=date(2026, 5, 20)),
+             latest_annual_ann_date=date(2026, 4, 25), prev_annual_ann_date=date(2025, 4, 26)),
+    ]
+
+    candidates = build_a_stock_consensus_candidates(rows, date(2026, 9, 4), has_search=True)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["target_report_count"] == 1
+    assert candidate["target_price_min"] == 60.0
+    assert candidate["consensus_window"] == "post_latest_annual"
+    assert candidate["is_stale"] is False
+    assert candidate["latest_annual_ann_date"] == "2026-04-25"
+    # 低估率仍取最悲观的单家下沿
+    assert round(candidate["undervalue_pct"], 2) == round((60.0 / 33.80 - 1) * 100, 2)
