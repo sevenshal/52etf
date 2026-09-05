@@ -26,6 +26,9 @@ def screen_value_investing(
     min_fcf_positive_years: int | None = Query(default=None, description="质量闸门：近5年FCFF为正的最少年数"),
     max_debt_to_assets: float | None = Query(default=None, description="质量闸门：资产负债率上限(%)"),
     min_avg_roe_financial: float | None = Query(default=None, description="银行/保险/证券质量闸门：近5年平均ROE下限(%)"),
+    min_value_growth_pct: float | None = Query(
+        default=None, description="质量闸门：最新年报算出的内在价值相比去年同期的同比增幅下限(%)，默认0即不能倒退"
+    ),
     risk_free_rate_pct: float | None = Query(
         default=None, description="WACC假设：无风险利率(%)，留空自动取中债国债收益率曲线10年期利率"
     ),
@@ -51,6 +54,7 @@ def screen_value_investing(
             "min_fcf_positive_years": min_fcf_positive_years,
             "max_debt_to_assets": max_debt_to_assets,
             "min_avg_roe_financial": min_avg_roe_financial,
+            "min_value_growth_pct": min_value_growth_pct,
         }.items()
         if value is not None
     }

@@ -30,6 +30,12 @@
    - 同时给出 WACC/股权成本 ±150bp 的悲观/乐观区间，而不是单点估计
    - 估值均值回归、市盈率倒数(E/P)、trailing FCFF收益率仍作为交叉验证字段返回，
      但不再用于计算 return%，避免"跟自己历史比"这种不依赖基本面的逻辑主导结果
+4. 内在价值同比增长闸门 —— 用"截止最新年报"和"截止去年年报"(去掉最新一期，
+   WACC/股权成本假设保持不变，只让基本面输入随年报切片变化)分别按上面同一套
+   公式各算一次内在价值，要求同比不能倒退。这是为了防止"当前静态快照看着便宜，
+   但基本面已经在恶化"的价值陷阱：一家公司哪怕5年平均ROIC还压得住WACC，如果
+   最新一年相比上一年内在价值在缩水，也不该现在就选进来。数据不够算出去年那次
+   快照时，按"无法确认价值是否增长"处理，直接不通过，而不是放行。
 
 无风险利率默认现取中债国债收益率曲线(到期)的10年期利率(同一套已有的chinabond
 爬取基础设施，只是多同步一条曲线定义)；曲线还没同步到时退回静态假设。股权风险
@@ -84,6 +90,10 @@ DEFAULT_QUALITY_THRESHOLDS = {
     "max_debt_to_assets": 70.0,
     # 银行/保险/证券：资本结构与工商业完全不同，退回 ROE 闸门
     "min_avg_roe_financial": 8.0,
+    # 用最新年报 vs 去年年报分别按同一套公式算出的内在价值(非金融:股权价值，
+    # 金融:合理市净率)必须同比增长；0.0 表示至少不能倒退，防止"现在看着便宜、
+    # 但基本面已经在恶化"的价值陷阱只看静态快照选不出来。
+    "min_value_growth_pct": 0.0,
 }
 
 # tushare comp_type: 1=一般工商业 2=银行 3=保险 4=证券
@@ -336,6 +346,104 @@ def _estimate_near_term_growth(fcff_cagr_pct: Optional[float], profit_cagr_pct: 
     return _clip(growth, *NEAR_TERM_GROWTH_BOUNDS)
 
 
+def _intrinsic_value_snapshot(
+    *,
+    is_financial: bool,
+    fina_slice: Optional[pd.DataFrame],
+    income_slice: Optional[pd.DataFrame],
+    cost_of_equity: Optional[float],
+    wacc: Optional[float],
+    terminal_growth_rate: float,
+    money_cap: Optional[float],
+) -> Dict[str, Any]:
+    """给定一段年报切片(截止到某一年)算出当期的基准情形内在价值。
+
+    抽成独立函数是为了让"用截止到今年的年报算一次、用截止到去年的年报(去掉最新
+    一期)再算一次"完全走同一套公式——只有这样两次结果的差才代表"公司本身创造的
+    价值是否在增长"，而不是两套口径打架出来的噪声。非金融返回股权价值(元)，
+    金融返回合理市净率(fair P/B)。
+    """
+    result: Dict[str, Any] = {
+        "equity_value": None,
+        "enterprise_value": None,
+        "net_debt": None,
+        "justified_pb": None,
+        "base_fcff": None,
+        "near_term_growth": None,
+        "fcff_cagr_pct": None,
+        "profit_cagr_pct": None,
+        "unavailable_reason": None,
+    }
+
+    if is_financial:
+        avg_roe = (
+            safe_float(fina_slice["roe"].mean())
+            if fina_slice is not None and "roe" in fina_slice and not fina_slice.empty
+            else None
+        )
+        avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
+        result["justified_pb"] = _justified_pb(avg_roe_frac, cost_of_equity, terminal_growth_rate)
+        if result["justified_pb"] is None:
+            result["unavailable_reason"] = "股权成本或ROE数据不足，无法估算合理市净率"
+        return result
+
+    if fina_slice is not None and "fcff" in fina_slice and not fina_slice.empty:
+        fcff_series = fina_slice[["end_date", "fcff"]].dropna()
+        recent_fcff = fcff_series["fcff"].tolist()[-3:]
+        result["base_fcff"] = safe_float(sum(recent_fcff) / len(recent_fcff)) if recent_fcff else None
+        if len(fcff_series) >= 2:
+            oldest_fcff = safe_float(fcff_series.iloc[0]["fcff"])
+            latest_fcff = safe_float(fcff_series.iloc[-1]["fcff"])
+            years_span = fcff_series.iloc[-1]["end_date"].year - fcff_series.iloc[0]["end_date"].year
+            result["fcff_cagr_pct"] = _cagr_pct(latest_fcff, oldest_fcff, years_span)
+
+    if income_slice is not None and len(income_slice) >= 2 and "n_income_attr_p" in income_slice:
+        oldest_profit = safe_float(income_slice.iloc[0]["n_income_attr_p"])
+        latest_profit = safe_float(income_slice.iloc[-1]["n_income_attr_p"])
+        years_span = income_slice.iloc[-1]["end_date"].year - income_slice.iloc[0]["end_date"].year
+        result["profit_cagr_pct"] = _cagr_pct(latest_profit, oldest_profit, years_span)
+
+    result["near_term_growth"] = _estimate_near_term_growth(result["fcff_cagr_pct"], result["profit_cagr_pct"])
+
+    if wacc is None:
+        result["unavailable_reason"] = "市值或有息负债数据不足，无法估算WACC"
+        return result
+    if result["base_fcff"] is None or result["base_fcff"] <= 0:
+        result["unavailable_reason"] = "近年FCFF为负或缺失，DCF不适用"
+        return result
+
+    ev = _two_stage_fcff_value(result["base_fcff"], result["near_term_growth"], terminal_growth_rate, wacc)
+    if ev is None:
+        result["unavailable_reason"] = "WACC与永续增长率利差过窄，DCF结果不稳定"
+        return result
+
+    net_debt = None
+    if fina_slice is not None and "netdebt" in fina_slice and not fina_slice.empty:
+        net_debt = safe_float(fina_slice.iloc[-1]["netdebt"])
+    if net_debt is None:
+        interest_debt = (
+            safe_float(fina_slice.iloc[-1]["interestdebt"])
+            if fina_slice is not None and "interestdebt" in fina_slice and not fina_slice.empty
+            else None
+        )
+        net_debt = (interest_debt or 0.0) - (money_cap or 0.0)
+
+    result["enterprise_value"] = ev
+    result["net_debt"] = net_debt
+    result["equity_value"] = ev - net_debt
+    return result
+
+
+def _value_growth_pct(is_financial: bool, current: Dict[str, Any], prior: Dict[str, Any]) -> Optional[float]:
+    """比较"今年"与"去年"两次内在价值快照，算出计算出来的价值同比增长了多少。"""
+    key = "justified_pb" if is_financial else "equity_value"
+    current_value = current.get(key)
+    prior_value = prior.get(key)
+    if current_value is None or prior_value is None or prior_value <= 0:
+        return None
+    return (current_value / prior_value - 1.0) * 100.0
+
+
 def _quality_assessment(
     *,
     is_financial: bool,
@@ -346,12 +454,23 @@ def _quality_assessment(
     ocf_to_np: Optional[float],
     fcf_positive_years: int,
     debt_to_assets: Optional[float],
+    value_growth_pct: Optional[float],
     thresholds: Dict[str, float],
 ) -> Dict[str, Any]:
     reasons: List[str] = []
     if years_available < MIN_ANNUAL_PERIODS_FOR_QUALITY:
         reasons.append(f"年报数据不足{MIN_ANNUAL_PERIODS_FOR_QUALITY}期，无法判断质量")
         return {"passes": False, "reasons": reasons}
+
+    min_value_growth = thresholds["min_value_growth_pct"]
+    if value_growth_pct is None:
+        reasons.append("年报数据不足以对比去年同期计算出的内在价值，无法判断价值是否在增长")
+    elif value_growth_pct < min_value_growth:
+        reasons.append(
+            f"按最新年报算出的内在价值比去年同期下降了{-value_growth_pct:.1f}%"
+            if value_growth_pct < 0
+            else f"按最新年报算出的内在价值同比只增长{value_growth_pct:.1f}%，低于阈值{min_value_growth}%"
+        )
 
     if is_financial:
         min_roe = thresholds["min_avg_roe_financial"]
@@ -528,19 +647,9 @@ def screen_value_investing_candidates(
             if total_assets and total_assets > 0 and total_liab is not None:
                 debt_to_assets = total_liab / total_assets * 100.0
 
-        quality = _quality_assessment(
-            is_financial=is_financial,
-            avg_roe=avg_roe,
-            avg_roic=avg_roic,
-            wacc_pct=None,  # 先占位，WACC 算出来后如果不通过闸门也不影响已经失败的判断
-            years_available=years_available,
-            ocf_to_np=ocf_to_np,
-            fcf_positive_years=fcf_positive_years,
-            debt_to_assets=debt_to_assets,
-            thresholds=thresholds,
-        ) if is_financial else None  # 非金融要先算出 WACC 才能判断闸门，见下方
-
-        # --- WACC（金融、非金融都要用到股权成本，非金融还要用债权成本） ---
+        # --- WACC（金融、非金融都要用到股权成本，非金融还要用债权成本）——放在质量
+        # 闸门判断之前，因为闸门本身现在也要用到"内在价值同比是否增长"这个判据，
+        # 而算内在价值需要先有WACC/股权成本。
         income_history = income_by_symbol.get(ts_code)
         income_latest_row = income_history.iloc[-1].to_dict() if income_history is not None and not income_history.empty else {}
         beta = beta_by_symbol.get(ts_code)
@@ -555,19 +664,46 @@ def screen_value_investing_candidates(
             equity_risk_premium=equity_risk_premium,
         )
         wacc_pct = safe_float(wacc_info["wacc"] * 100.0) if wacc_info else None
+        cost_of_equity = wacc_info["cost_of_equity"] if wacc_info else None
+        money_cap = safe_float(bs_row.get("money_cap"))
 
-        if not is_financial:
-            quality = _quality_assessment(
-                is_financial=False,
-                avg_roe=avg_roe,
-                avg_roic=avg_roic,
-                wacc_pct=wacc_pct,
-                years_available=years_available,
-                ocf_to_np=ocf_to_np,
-                fcf_positive_years=fcf_positive_years,
-                debt_to_assets=debt_to_assets,
-                thresholds=thresholds,
-            )
+        # --- 内在价值：分别用"截止最新年报"和"截止去年年报(去掉最新一期)"两个
+        # 切片走同一套公式各算一次，差值就是基本面本身是在变好还是变差，不依赖
+        # 估值倍数是否重估。
+        current_snapshot = _intrinsic_value_snapshot(
+            is_financial=is_financial,
+            fina_slice=fina_history,
+            income_slice=income_history,
+            cost_of_equity=cost_of_equity,
+            wacc=wacc_info["wacc"] if wacc_info else None,
+            terminal_growth_rate=terminal_growth_rate,
+            money_cap=money_cap,
+        )
+        prior_fina_slice = fina_history.iloc[:-1] if fina_history is not None and len(fina_history) > 1 else None
+        prior_income_slice = income_history.iloc[:-1] if income_history is not None and len(income_history) > 1 else None
+        prior_snapshot = _intrinsic_value_snapshot(
+            is_financial=is_financial,
+            fina_slice=prior_fina_slice,
+            income_slice=prior_income_slice,
+            cost_of_equity=cost_of_equity,
+            wacc=wacc_info["wacc"] if wacc_info else None,
+            terminal_growth_rate=terminal_growth_rate,
+            money_cap=money_cap,
+        )
+        value_growth_pct = _value_growth_pct(is_financial, current_snapshot, prior_snapshot)
+
+        quality = _quality_assessment(
+            is_financial=is_financial,
+            avg_roe=avg_roe,
+            avg_roic=avg_roic,
+            wacc_pct=wacc_pct,
+            years_available=years_available,
+            ocf_to_np=ocf_to_np,
+            fcf_positive_years=fcf_positive_years,
+            debt_to_assets=debt_to_assets,
+            value_growth_pct=value_growth_pct,
+            thresholds=thresholds,
+        )
 
         if not quality["passes"]:
             candidates.append(
@@ -581,6 +717,7 @@ def screen_value_investing_candidates(
                     "avg_roe_pct": avg_roe,
                     "avg_roic_pct": avg_roic,
                     "wacc_pct": wacc_pct,
+                    "value_growth_pct": safe_float(value_growth_pct, 1),
                     "expected_return_pct": None,
                 }
             )
@@ -616,20 +753,17 @@ def screen_value_investing_candidates(
         expected_return_pct = None
         expected_return_pct_bear = None
         expected_return_pct_bull = None
-        dcf_unavailable_reason = None
-        justified_pb = None
-        dcf_enterprise_value = None
-        dcf_equity_value = None
-        dcf_net_debt = None
-        dcf_base_fcff = None
-        fcff_cagr_pct = None
+        dcf_unavailable_reason = current_snapshot["unavailable_reason"]
+        justified_pb = current_snapshot["justified_pb"]
+        dcf_enterprise_value = current_snapshot["enterprise_value"]
+        dcf_equity_value = current_snapshot["equity_value"]
+        dcf_net_debt = current_snapshot["net_debt"]
+        dcf_base_fcff = current_snapshot["base_fcff"]
+        fcff_cagr_pct = current_snapshot["fcff_cagr_pct"]
         fcf_yield_pct = None
-
-        cost_of_equity = wacc_info["cost_of_equity"] if wacc_info else None
 
         if is_financial:
             avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
-            justified_pb = _justified_pb(avg_roe_frac, cost_of_equity, terminal_growth_rate)
             if justified_pb is not None and pb and pb > 0:
                 expected_return_pct = (justified_pb / pb - 1.0) * 100.0
                 if cost_of_equity is not None:
@@ -637,54 +771,26 @@ def screen_value_investing_candidates(
                     bull_pb = _justified_pb(avg_roe_frac, cost_of_equity - SCENARIO_DISCOUNT_RATE_SPREAD, terminal_growth_rate)
                     expected_return_pct_bear = (bear_pb / pb - 1.0) * 100.0 if bear_pb is not None else None
                     expected_return_pct_bull = (bull_pb / pb - 1.0) * 100.0 if bull_pb is not None else None
-            else:
-                dcf_unavailable_reason = "股权成本或ROE数据不足，无法估算合理市净率"
         else:
-            if fina_history is not None and "fcff" in fina_history:
-                fcff_series = fina_history[["end_date", "fcff"]].dropna()
-                recent_fcff = fcff_series["fcff"].tolist()[-3:]
-                dcf_base_fcff = safe_float(sum(recent_fcff) / len(recent_fcff)) if recent_fcff else None
-                if len(fcff_series) >= 2:
-                    oldest_fcff = safe_float(fcff_series.iloc[0]["fcff"])
-                    latest_fcff = safe_float(fcff_series.iloc[-1]["fcff"])
-                    fcff_years_span = fcff_series.iloc[-1]["end_date"].year - fcff_series.iloc[0]["end_date"].year
-                    fcff_cagr_pct = _cagr_pct(latest_fcff, oldest_fcff, fcff_years_span)
-            near_term_growth = _estimate_near_term_growth(fcff_cagr_pct, profit_cagr_pct)
-
+            near_term_growth = current_snapshot["near_term_growth"]
             latest_fcff_value = safe_float(fina_latest_row.get("fcff"))
             if latest_fcff_value is not None and market_cap_yuan:
                 fcf_yield_pct = latest_fcff_value / market_cap_yuan * 100.0
 
-            if wacc_info is None:
-                dcf_unavailable_reason = "市值或有息负债数据不足，无法估算WACC"
-            elif dcf_base_fcff is None or dcf_base_fcff <= 0:
-                dcf_unavailable_reason = "近年FCFF为负或缺失，DCF不适用"
-            else:
+            if wacc_info is not None and dcf_equity_value is not None and market_cap_yuan and market_cap_yuan > 0:
                 wacc = wacc_info["wacc"]
-                dcf_ev = _two_stage_fcff_value(dcf_base_fcff, near_term_growth, terminal_growth_rate, wacc)
-                if dcf_ev is None:
-                    dcf_unavailable_reason = "WACC与永续增长率利差过窄，DCF结果不稳定"
-                else:
-                    dcf_enterprise_value = dcf_ev
-                    dcf_net_debt = safe_float(fina_latest_row.get("netdebt"))
-                    if dcf_net_debt is None:
-                        interest_debt = safe_float(fina_latest_row.get("interestdebt")) or 0.0
-                        money_cap = safe_float(bs_row.get("money_cap")) or 0.0
-                        dcf_net_debt = interest_debt - money_cap
-                    dcf_equity_value = dcf_ev - dcf_net_debt
-                    if market_cap_yuan and market_cap_yuan > 0:
-                        expected_return_pct = (dcf_equity_value / market_cap_yuan - 1.0) * 100.0
+                expected_return_pct = (dcf_equity_value / market_cap_yuan - 1.0) * 100.0
 
-                        bear_wacc = wacc + SCENARIO_DISCOUNT_RATE_SPREAD
-                        bull_wacc = max(terminal_growth_rate + MIN_WACC_TERMINAL_SPREAD * 1.5, wacc - SCENARIO_DISCOUNT_RATE_SPREAD)
-                        bear_growth = near_term_growth * SCENARIO_GROWTH_MULTIPLIER[0]
-                        bull_growth = near_term_growth * SCENARIO_GROWTH_MULTIPLIER[1]
-                        bear_ev = _two_stage_fcff_value(dcf_base_fcff, bear_growth, terminal_growth_rate, bear_wacc)
-                        bull_ev = _two_stage_fcff_value(dcf_base_fcff, bull_growth, terminal_growth_rate, bull_wacc)
-                        if bear_ev is not None:
-                            expected_return_pct_bear = ((bear_ev - dcf_net_debt) / market_cap_yuan - 1.0) * 100.0
-                        if bull_ev is not None:
-                            expected_return_pct_bull = ((bull_ev - dcf_net_debt) / market_cap_yuan - 1.0) * 100.0
+                bear_wacc = wacc + SCENARIO_DISCOUNT_RATE_SPREAD
+                bull_wacc = max(terminal_growth_rate + MIN_WACC_TERMINAL_SPREAD * 1.5, wacc - SCENARIO_DISCOUNT_RATE_SPREAD)
+                bear_growth = near_term_growth * SCENARIO_GROWTH_MULTIPLIER[0]
+                bull_growth = near_term_growth * SCENARIO_GROWTH_MULTIPLIER[1]
+                bear_ev = _two_stage_fcff_value(dcf_base_fcff, bear_growth, terminal_growth_rate, bear_wacc)
+                bull_ev = _two_stage_fcff_value(dcf_base_fcff, bull_growth, terminal_growth_rate, bull_wacc)
+                if bear_ev is not None:
+                    expected_return_pct_bear = ((bear_ev - dcf_net_debt) / market_cap_yuan - 1.0) * 100.0
+                if bull_ev is not None:
+                    expected_return_pct_bull = ((bull_ev - dcf_net_debt) / market_cap_yuan - 1.0) * 100.0
 
         candidates.append(
             {
@@ -699,6 +805,7 @@ def screen_value_investing_candidates(
                 "ocf_to_net_profit": ocf_to_np,
                 "fcf_positive_years": fcf_positive_years,
                 "debt_to_assets_pct": debt_to_assets,
+                "value_growth_pct": safe_float(value_growth_pct, 1),
                 "close": safe_float(market_row.get("close")),
                 "pe_ttm": pe_ttm,
                 "pb": pb,
