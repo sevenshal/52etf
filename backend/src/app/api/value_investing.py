@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, Query
 
 from ...core.services.value_investing_scanner import (
     DEFAULT_EQUITY_RISK_PREMIUM,
-    DEFAULT_RISK_FREE_RATE,
     DEFAULT_TERMINAL_GROWTH_RATE,
     screen_value_investing_candidates,
 )
@@ -27,8 +26,8 @@ def screen_value_investing(
     min_fcf_positive_years: int | None = Query(default=None, description="质量闸门：近5年FCFF为正的最少年数"),
     max_debt_to_assets: float | None = Query(default=None, description="质量闸门：资产负债率上限(%)"),
     min_avg_roe_financial: float | None = Query(default=None, description="银行/保险/证券质量闸门：近5年平均ROE下限(%)"),
-    risk_free_rate_pct: float = Query(
-        default=DEFAULT_RISK_FREE_RATE * 100.0, description="WACC假设：无风险利率(%)，本系统未同步国债收益率曲线，需人工设定"
+    risk_free_rate_pct: float | None = Query(
+        default=None, description="WACC假设：无风险利率(%)，留空自动取中债国债收益率曲线10年期利率"
     ),
     equity_risk_premium_pct: float = Query(
         default=DEFAULT_EQUITY_RISK_PREMIUM * 100.0, description="WACC假设：股权风险溢价(%)"
@@ -61,7 +60,7 @@ def screen_value_investing(
         quality_overrides=overrides or None,
         top_n=top_n,
         as_of=as_of,
-        risk_free_rate=risk_free_rate_pct / 100.0,
+        risk_free_rate=(risk_free_rate_pct / 100.0) if risk_free_rate_pct is not None else None,
         equity_risk_premium=equity_risk_premium_pct / 100.0,
         terminal_growth_rate=terminal_growth_rate_pct / 100.0,
     )

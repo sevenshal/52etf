@@ -470,7 +470,19 @@ CHINABOND_CREDIT_CURVES = [
         "rating": "AA",
         "pair_key": "urban_investment_bond",
     },
+    {
+        # 主权国债曲线，不是信用利差曲线，但复用同一套通用同步逻辑最省事：
+        # 价值投资DCF/WACC的无风险利率就是从这条曲线的10年期利率现取的。
+        "curve_id": "2c9081e50a2f9606010a3068cae70001",
+        "curve_name": "中债国债收益率曲线(到期)",
+        "category": "国债",
+        "rating": "主权",
+        "pair_key": "government_bond",
+    },
 ]
+# 价值投资WACC模型无风险利率取用的曲线与期限
+CHINABOND_GOVERNMENT_BOND_CURVE_ID = "2c9081e50a2f9606010a3068cae70001"
+RISK_FREE_RATE_TERM_YEARS = 10.0
 MIN_MARKET_DAILY_ROWS = 3500
 MAX_MARKET_DAILY_OHL_ZERO_PCT = 1.0
 RAW_FETCH_LOOKBACK_DAYS = 180
