@@ -55,13 +55,18 @@ MARKET_INDEX_CODE = "000985.SH"  # 中证全指：覆盖面最广的宽基指数
 BETA_LOOKBACK_DAYS = 730
 MIN_BETA_OBSERVATIONS = 200
 DEFAULT_BETA = 1.0
+BETA_CLIP_BOUNDS = (0.2, 3.0)  # 单股票2年日收益率回归的合理范围，防止噪声估计值失真
+BLUME_ADJUSTMENT_WEIGHT = 2.0 / 3.0  # adjusted_beta = w*raw_beta + (1-w)*1.0，业界标准做法
 DEFAULT_RISK_FREE_RATE = 0.025
 DEFAULT_EQUITY_RISK_PREMIUM = 0.06
 DEFAULT_COST_OF_DEBT_PRETAX = 0.045
 DEFAULT_EFFECTIVE_TAX_RATE = 0.25
 DEFAULT_TERMINAL_GROWTH_RATE = 0.03
 DCF_EXPLICIT_YEARS = 5
-MIN_WACC_TERMINAL_SPREAD = 0.01
+# WACC 与永续增长率的利差下限：终值 = 第N年FCFF×(1+g)/(WACC-g)，利差越窄终值
+# 倍数越夸张(利差1pp对应~100倍，3pp对应~34倍，5pp对应~21倍)。1pp 太松，
+# 实际跑数据时出现过 WACC-g 只有2.1pp、终值炸到年FCFF 48倍的案例，改成3pp。
+MIN_WACC_TERMINAL_SPREAD = 0.03
 NEAR_TERM_GROWTH_BOUNDS = (-0.15, 0.30)
 SCENARIO_DISCOUNT_RATE_SPREAD = 0.015
 SCENARIO_GROWTH_MULTIPLIER = (0.5, 1.3)  # (悲观, 乐观) 相对近端增速的倍数
@@ -214,7 +219,13 @@ def _wacc_components(
     if total_capital <= 0:
         return None
 
-    effective_beta = beta if beta is not None and math.isfinite(beta) and beta > 0 else DEFAULT_BETA
+    raw_beta = beta if beta is not None and math.isfinite(beta) and beta > 0 else DEFAULT_BETA
+    raw_beta = _clip(raw_beta, BETA_CLIP_BOUNDS[0], BETA_CLIP_BOUNDS[1])
+    # Blume调整：把单只股票2年日收益率回归出来的beta往1.0收缩，这是业界standard做法
+    # (Bloomberg终端的"adjusted beta"就是这个公式)——单股票回归噪声很大，尤其是
+    # 交易不活跃、流动性差的股票，原始beta经常出现0.3、0.4这种不合理的低值，
+    # 直接拖低股权成本/WACC，进而让DCF终值因为利差过窄而爆炸。
+    effective_beta = BLUME_ADJUSTMENT_WEIGHT * raw_beta + (1.0 - BLUME_ADJUSTMENT_WEIGHT) * 1.0
     cost_of_equity = risk_free_rate + effective_beta * equity_risk_premium
 
     if debt > 0 and interest_expense and interest_expense > 0:
