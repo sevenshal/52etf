@@ -45,6 +45,8 @@ def calculate_weighted_index_valuation(
         "forward_next_fy_hi": 0.0,
     }
     covered_count = 0
+    stale_covered_weight = 0.0
+    stale_covered_count = 0
     forward_covered_weight = 0.0
     effective_covered_weight = 0.0
     forward_effective_covered_weight = 0.0
@@ -78,6 +80,10 @@ def calculate_weighted_index_valuation(
         covered_weight += weight
         effective_covered_weight += effective_weight
         covered_count += 1
+        # 该成分股最近一次年报后还没有新研报，目标价口径落后一个财年。
+        if getattr(valuation, "is_stale", False):
+            stale_covered_weight += weight
+            stale_covered_count += 1
         valuation_dates.append(valuation.date)
         for key, value in current_values.items():
             current_weighted_multiples[key] += effective_weight * value / price
@@ -98,6 +104,7 @@ def calculate_weighted_index_valuation(
         "index_level": level,
         "constituent_count": sum(1 for _ in holdings) if isinstance(holdings, list) else None,
         "covered_count": covered_count,
+        "stale_covered_count": stale_covered_count,
         "forward_covered_count": forward_covered_count,
         "total_weight": round(total_weight, 8),
         "covered_weight": round(covered_weight, 8),
@@ -105,6 +112,10 @@ def calculate_weighted_index_valuation(
         "forward_covered_weight": round(forward_covered_weight, 8),
         "forward_effective_covered_weight": round(forward_effective_covered_weight, 8),
         "coverage_ratio": round(coverage_ratio, 6),
+        "stale_weight_ratio": round(
+            stale_covered_weight / covered_weight if covered_weight > 0 else 0.0,
+            6,
+        ),
         "effective_coverage_ratio": round(
             effective_covered_weight / total_weight if total_weight > 0 else 0.0,
             6,

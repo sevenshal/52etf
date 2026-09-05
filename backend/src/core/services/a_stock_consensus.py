@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -580,6 +581,61 @@ def load_a_stock_consensus_history(
     )
 
 
+def load_a_stock_annual_ann_dates(
+    db: Any,
+    symbols: Sequence[str],
+) -> Dict[str, List[date]]:
+    """按股票加载历次年报公告日(升序)。
+
+    只认 end_date 为 12-31 的年报；同一财年若有更正/追溯调整产生多条记录，
+    取该财年最新的一个公告日，避免重述公告把"上一次年报"挤成同一财年。
+    """
+    if not symbols:
+        return {}
+    ann_dates: Dict[str, List[date]] = defaultdict(list)
+    for offset in range(0, len(symbols), 500):
+        chunk = symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        rows = db.execute(
+            text(
+                f"""
+                SELECT ts_code, end_date, MAX(ann_date) AS ann_date
+                FROM a_stock_income
+                WHERE ts_code IN ({placeholders})
+                  AND ann_date IS NOT NULL
+                  AND end_date IS NOT NULL
+                  AND strftime(end_date, '%m-%d') = '12-31'
+                GROUP BY ts_code, end_date
+                """
+            ),
+            symbol_params,
+        ).mappings().all()
+        for row in rows:
+            ann_date = _row_to_date(row.get("ann_date"))
+            symbol = str(row.get("ts_code") or "").strip().upper()
+            if ann_date is not None and symbol:
+                ann_dates[symbol].append(ann_date)
+    return {symbol: sorted(set(values)) for symbol, values in ann_dates.items()}
+
+
+def _annual_cutoffs_as_of(
+    ann_dates: Sequence[date],
+    as_of: Optional[date],
+) -> Tuple[Optional[date], Optional[date]]:
+    """取截至 as_of 已经公告的最近一次/上一次年报公告日。
+
+    历史曲线是逐日回放的，某一天能看到的年报必须是那天之前已经披露的，
+    否则会把未来信息漏进当天的共识窗口。
+    """
+    if not ann_dates or as_of is None:
+        return None, None
+    disclosed = bisect_right(ann_dates, as_of)
+    latest = ann_dates[disclosed - 1] if disclosed >= 1 else None
+    previous = ann_dates[disclosed - 2] if disclosed >= 2 else None
+    return latest, previous
+
+
 def load_a_stock_consensus_valuation_map(
     db: Any,
     symbols: Iterable[str],
@@ -628,9 +684,20 @@ def load_a_stock_consensus_valuation_map(
     for row in rows:
         grouped[str(row.get("ts_code") or "").upper()].append(row)
 
+    annual_ann_dates = load_a_stock_annual_ann_dates(db, list(grouped))
+
     result: Dict[str, Dict[str, Any]] = {}
     for symbol, symbol_rows in grouped.items():
-        aggregate = _aggregate_report_rows(symbol_rows, latest_trade_date)
+        latest_annual, prev_annual = _annual_cutoffs_as_of(
+            annual_ann_dates.get(symbol, []),
+            latest_trade_date,
+        )
+        aggregate = _aggregate_report_rows(
+            symbol_rows,
+            latest_trade_date,
+            latest_annual_ann_date=latest_annual,
+            prev_annual_ann_date=prev_annual,
+        )
         close = _positive_float(symbol_rows[0].get("close"))
         if aggregate is None or close is None:
             continue
@@ -656,6 +723,7 @@ def load_a_stock_consensus_valuation_map(
             "report_count": aggregate.get("report_count"),
             "target_report_count": aggregate.get("target_report_count"),
             "organization_count": aggregate.get("organization_count"),
+            "is_stale": aggregate.get("is_stale"),
         }
     return result
 
@@ -713,9 +781,12 @@ def load_a_stock_consensus_valuation_history_map(
         for row in report_rows:
             reports_by_symbol[str(row.get("ts_code") or "").upper()].append(row)
 
+    annual_ann_dates = load_a_stock_annual_ann_dates(db, list(reports_by_symbol))
+
     result: Dict[date, Dict[str, Dict[str, Any]]] = defaultdict(dict)
     lookback = timedelta(days=max(1, min(int(report_lookback_days), 1095)))
     for symbol, report_rows in reports_by_symbol.items():
+        symbol_ann_dates = annual_ann_dates.get(symbol, [])
         dated_rows = [
             (report_day, row)
             for row in report_rows
@@ -724,6 +795,7 @@ def load_a_stock_consensus_valuation_history_map(
         cursor = 0
         active_rows: List[Mapping[str, Any]] = []
         aggregate: Optional[Dict[str, Any]] = None
+        cutoffs: Tuple[Optional[date], Optional[date]] = (None, None)
         for trade_day in normalized_dates:
             close = market_by_date.get(trade_day, {}).get(symbol)
             window_start = trade_day - lookback
@@ -739,8 +811,18 @@ def load_a_stock_consensus_valuation_history_map(
             if len(retained_rows) != len(active_rows):
                 active_rows = retained_rows
                 changed = True
+            # 年报公告日跨过去时窗口口径变了，即使研报集合没变也要重算。
+            day_cutoffs = _annual_cutoffs_as_of(symbol_ann_dates, trade_day)
+            if day_cutoffs != cutoffs:
+                cutoffs = day_cutoffs
+                changed = True
             if changed:
-                aggregate = _aggregate_report_rows(active_rows, trade_day)
+                aggregate = _aggregate_report_rows(
+                    active_rows,
+                    trade_day,
+                    latest_annual_ann_date=cutoffs[0],
+                    prev_annual_ann_date=cutoffs[1],
+                )
             if close is None or aggregate is None:
                 continue
             growth_pct = aggregate.get("growth_pct")
@@ -762,6 +844,7 @@ def load_a_stock_consensus_valuation_history_map(
                     aggregate["target_price_q75"] * growth_factor if growth_factor is not None else None
                 ),
                 "target_report_count": aggregate.get("target_report_count"),
+                "is_stale": aggregate.get("is_stale"),
             }
     return {day: values for day, values in result.items()}
 

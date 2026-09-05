@@ -2,6 +2,8 @@ from datetime import date
 
 from src.core.services.a_stock_consensus import (
     _aggregate_report_rows,
+    _annual_cutoffs_as_of,
+    load_a_stock_consensus_valuation_history_map,
     build_a_stock_consensus_history,
     build_a_stock_rolling_consensus_history,
     build_a_stock_consensus_candidates,
@@ -579,3 +581,85 @@ def test_consensus_candidates_expose_annual_report_window_flags():
     assert candidate["latest_annual_ann_date"] == "2026-04-25"
     # 低估率仍取最悲观的单家下沿
     assert round(candidate["undervalue_pct"], 2) == round((60.0 / 33.80 - 1) * 100, 2)
+
+
+def _valuation_history_fake_db(report_rows, market_rows, annual_rows):
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class FakeDb:
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            if "a_stock_income" in sql:
+                return Result(annual_rows)
+            if "a_stock_report_rc" in sql:
+                return Result(report_rows)
+            return Result(market_rows)
+
+    return FakeDb()
+
+
+def _history_report_row(report_date, target, title):
+    return {
+        "ts_code": "600519.SH",
+        "report_name": "贵州茅台",
+        "report_date": report_date,
+        "report_title": title,
+        "org_name": f"机构{title}",
+        "author_name": f"分析师{title}",
+        "quarter": "2026",
+        "eps": 1.0,
+        "pe": None,
+        "np": None,
+        "rating": "买入",
+        "min_price": target,
+        "max_price": target,
+    }
+
+
+def test_valuation_history_drops_reports_published_before_the_annual_report():
+    """逐日回放时，年报公告日之后的交易日不应再用年报之前的旧目标价。"""
+    report_rows = [
+        _history_report_row(date(2026, 3, 10), 120.0, "年报前"),
+        _history_report_row(date(2026, 5, 20), 80.0, "年报后"),
+    ]
+    trade_dates = [date(2026, 4, 1), date(2026, 5, 1), date(2026, 6, 1)]
+    market_rows = [
+        {"ts_code": "600519.SH", "trade_date": day, "close": 100.0} for day in trade_dates
+    ]
+    annual_rows = [
+        {"ts_code": "600519.SH", "end_date": date(2025, 12, 31), "ann_date": date(2026, 4, 25)},
+        {"ts_code": "600519.SH", "end_date": date(2024, 12, 31), "ann_date": date(2025, 4, 26)},
+    ]
+
+    history = load_a_stock_consensus_valuation_history_map(
+        _valuation_history_fake_db(report_rows, market_rows, annual_rows),
+        ["600519.SH"],
+        trade_dates,
+    )
+
+    # 2026-04-01：当天 2026 年的年报还没披露，只能按上一次年报切窗口，旧研报仍然有效。
+    assert history[date(2026, 4, 1)]["600519.SH"]["fair_value_mid"] == 120.0
+    assert history[date(2026, 4, 1)]["600519.SH"]["is_stale"] is False
+    # 2026-05-01：年报已披露但还没有新研报，退回上一次年报窗口并标记待更新。
+    assert history[date(2026, 5, 1)]["600519.SH"]["fair_value_mid"] == 120.0
+    assert history[date(2026, 5, 1)]["600519.SH"]["is_stale"] is True
+    # 2026-06-01：年报后有新研报，旧的 120 被排除，只用 80。
+    assert history[date(2026, 6, 1)]["600519.SH"]["fair_value_mid"] == 80.0
+    assert history[date(2026, 6, 1)]["600519.SH"]["is_stale"] is False
+
+
+def test_annual_cutoffs_as_of_never_uses_undisclosed_annual_reports():
+    ann_dates = [date(2024, 4, 20), date(2025, 4, 26), date(2026, 4, 25)]
+
+    assert _annual_cutoffs_as_of(ann_dates, date(2026, 4, 24)) == (date(2025, 4, 26), date(2024, 4, 20))
+    assert _annual_cutoffs_as_of(ann_dates, date(2026, 4, 25)) == (date(2026, 4, 25), date(2025, 4, 26))
+    assert _annual_cutoffs_as_of(ann_dates, date(2023, 1, 1)) == (None, None)
+    assert _annual_cutoffs_as_of([], date(2026, 4, 25)) == (None, None)
