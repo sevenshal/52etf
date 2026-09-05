@@ -20,6 +20,18 @@ TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
 )
+TUSHARE_BALANCESHEET_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_BALANCESHEET_MAX_REQUESTS_PER_MINUTE", "450")),
+)
+TUSHARE_CASHFLOW_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_CASHFLOW_MAX_REQUESTS_PER_MINUTE", "450")),
+)
+TUSHARE_FINA_INDICATOR_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_FINA_INDICATOR_MAX_REQUESTS_PER_MINUTE", "450")),
+)
 TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE", "420")),
@@ -111,6 +123,18 @@ class TushareService(QuoteProvider):
         TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
+    _balancesheet_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_BALANCESHEET_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _cashflow_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_CASHFLOW_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _fina_indicator_range_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_FINA_INDICATOR_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
     _option_daily_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_OPTION_DAILY_MAX_REQUESTS_PER_MINUTE,
         60.0,
@@ -162,6 +186,9 @@ class TushareService(QuoteProvider):
         self._fund_share_frame: Optional[pd.DataFrame] = None
         self._fina_indicator_cache: Dict[str, Dict] = {}
         self._income_frame_cache: Dict[str, pd.DataFrame] = {}
+        self._balancesheet_frame_cache: Dict[str, pd.DataFrame] = {}
+        self._cashflow_frame_cache: Dict[str, pd.DataFrame] = {}
+        self._fina_indicator_frame_cache: Dict[str, pd.DataFrame] = {}
 
     @classmethod
     def get_instance(cls, token: Optional[str] = None):
@@ -1862,7 +1889,10 @@ class TushareService(QuoteProvider):
                 self._income_rate_limiter.wait()
                 frame = self.pro.income(
                     ts_code=ts_code,
-                    fields="ts_code,end_date,ann_date,operate_income,rd_exp,report_type",
+                    fields=(
+                        "ts_code,end_date,ann_date,rd_exp,report_type,"
+                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps"
+                    ),
                     limit=limit,
                     offset=offset,
                 )
@@ -1887,7 +1917,15 @@ class TushareService(QuoteProvider):
         for column in ("end_date", "ann_date"):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in ("operate_income", "rd_exp"):
+        for column in (
+            "rd_exp",
+            "revenue",
+            "n_income_attr_p",
+            "operate_profit",
+            "total_profit",
+            "total_cogs",
+            "basic_eps",
+        ):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
@@ -1923,7 +1961,10 @@ class TushareService(QuoteProvider):
                     ts_code=ts_code,
                     start_date=start_value.strftime("%Y%m%d"),
                     end_date=end_value.strftime("%Y%m%d"),
-                    fields="ts_code,end_date,ann_date,operate_income,rd_exp,report_type",
+                    fields=(
+                        "ts_code,end_date,ann_date,rd_exp,report_type,"
+                        "revenue,n_income_attr_p,operate_profit,total_profit,total_cogs,basic_eps"
+                    ),
                     limit=limit,
                     offset=offset,
                 )
@@ -1954,11 +1995,412 @@ class TushareService(QuoteProvider):
         for column in ("end_date", "ann_date"):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
-        for column in ("operate_income", "rd_exp"):
+        for column in (
+            "rd_exp",
+            "revenue",
+            "n_income_attr_p",
+            "operate_profit",
+            "total_profit",
+            "total_cogs",
+            "basic_eps",
+        ):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         if "report_type" in result.columns:
             result["report_type"] = result["report_type"].astype("string")
+        return result.dropna(subset=["ts_code", "end_date"])
+
+    def get_a_stock_balancesheet_frame(self, ts_code: str, limit: int = 2000) -> pd.DataFrame:
+        """获取某只A股的历史资产负债表数据。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            return pd.DataFrame()
+        if ts_code in self._balancesheet_frame_cache:
+            return self._balancesheet_frame_cache[ts_code].copy()
+
+        fields = (
+            "ts_code,end_date,ann_date,report_type,comp_type,total_assets,total_liab,"
+            "total_cur_assets,total_cur_liab,total_hldr_eqy_exc_min_int,money_cap,"
+            "accounts_receiv,inventories,goodwill,fix_assets,lt_borr,st_borr,"
+            "notes_payable,acct_payable"
+        )
+        numeric_columns = (
+            "total_assets",
+            "total_liab",
+            "total_cur_assets",
+            "total_cur_liab",
+            "total_hldr_eqy_exc_min_int",
+            "money_cap",
+            "accounts_receiv",
+            "inventories",
+            "goodwill",
+            "fix_assets",
+            "lt_borr",
+            "st_borr",
+            "notes_payable",
+            "acct_payable",
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._balancesheet_rate_limiter.wait()
+                frame = self.pro.balancesheet(ts_code=ts_code, fields=fields, limit=limit, offset=offset)
+            except Exception as exc:
+                self.logger.warning("Tushare balancesheet fetch failed for %s offset=%s: %s", ts_code, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            self._balancesheet_frame_cache[ts_code] = pd.DataFrame()
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date", "report_type"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "report_type" in result.columns:
+            result["report_type"] = result["report_type"].astype(str)
+        if "comp_type" in result.columns:
+            result["comp_type"] = result["comp_type"].astype(str)
+        result = result.dropna(subset=["ts_code", "end_date"])
+        result = result.sort_values(["ann_date", "end_date"], na_position="first").reset_index(drop=True)
+        self._balancesheet_frame_cache[ts_code] = result
+        return result.copy()
+
+    def get_a_stock_balancesheet_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """按股票代码和公告日期分页获取一段时间内的A股资产负债表数据。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            self.logger.warning("Skip Tushare balancesheet range fetch for %s~%s: ts_code is required", start_date, end_date)
+            return pd.DataFrame()
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        fields = (
+            "ts_code,end_date,ann_date,report_type,comp_type,total_assets,total_liab,"
+            "total_cur_assets,total_cur_liab,total_hldr_eqy_exc_min_int,money_cap,"
+            "accounts_receiv,inventories,goodwill,fix_assets,lt_borr,st_borr,"
+            "notes_payable,acct_payable"
+        )
+        numeric_columns = (
+            "total_assets",
+            "total_liab",
+            "total_cur_assets",
+            "total_cur_liab",
+            "total_hldr_eqy_exc_min_int",
+            "money_cap",
+            "accounts_receiv",
+            "inventories",
+            "goodwill",
+            "fix_assets",
+            "lt_borr",
+            "st_borr",
+            "notes_payable",
+            "acct_payable",
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._balancesheet_rate_limiter.wait()
+                frame = self.pro.balancesheet(
+                    ts_code=ts_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare balancesheet range fetch failed for %s %s~%s offset=%s: %s",
+                    ts_code,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date", "report_type"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "report_type" in result.columns:
+            result["report_type"] = result["report_type"].astype("string")
+        if "comp_type" in result.columns:
+            result["comp_type"] = result["comp_type"].astype("string")
+        return result.dropna(subset=["ts_code", "end_date"])
+
+    def get_a_stock_cashflow_frame(self, ts_code: str, limit: int = 2000) -> pd.DataFrame:
+        """获取某只A股的历史现金流量表数据。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            return pd.DataFrame()
+        if ts_code in self._cashflow_frame_cache:
+            return self._cashflow_frame_cache[ts_code].copy()
+
+        fields = (
+            "ts_code,end_date,ann_date,report_type,net_profit,n_cashflow_act,"
+            "c_pay_acq_const_fiolta,free_cashflow,n_cashflow_inv_act,n_cash_flows_fnc_act,"
+            "c_fr_sale_sg,end_bal_cash,n_incr_cash_cash_equ,c_pay_dist_dpcp_int_exp"
+        )
+        numeric_columns = (
+            "net_profit",
+            "n_cashflow_act",
+            "c_pay_acq_const_fiolta",
+            "free_cashflow",
+            "n_cashflow_inv_act",
+            "n_cash_flows_fnc_act",
+            "c_fr_sale_sg",
+            "end_bal_cash",
+            "n_incr_cash_cash_equ",
+            "c_pay_dist_dpcp_int_exp",
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._cashflow_rate_limiter.wait()
+                frame = self.pro.cashflow(ts_code=ts_code, fields=fields, limit=limit, offset=offset)
+            except Exception as exc:
+                self.logger.warning("Tushare cashflow fetch failed for %s offset=%s: %s", ts_code, offset, exc)
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            self._cashflow_frame_cache[ts_code] = pd.DataFrame()
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date", "report_type"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "report_type" in result.columns:
+            result["report_type"] = result["report_type"].astype(str)
+        result = result.dropna(subset=["ts_code", "end_date"])
+        result = result.sort_values(["ann_date", "end_date"], na_position="first").reset_index(drop=True)
+        self._cashflow_frame_cache[ts_code] = result
+        return result.copy()
+
+    def get_a_stock_cashflow_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """按股票代码和公告日期分页获取一段时间内的A股现金流量表数据。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            self.logger.warning("Skip Tushare cashflow range fetch for %s~%s: ts_code is required", start_date, end_date)
+            return pd.DataFrame()
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        fields = (
+            "ts_code,end_date,ann_date,report_type,net_profit,n_cashflow_act,"
+            "c_pay_acq_const_fiolta,free_cashflow,n_cashflow_inv_act,n_cash_flows_fnc_act,"
+            "c_fr_sale_sg,end_bal_cash,n_incr_cash_cash_equ,c_pay_dist_dpcp_int_exp"
+        )
+        numeric_columns = (
+            "net_profit",
+            "n_cashflow_act",
+            "c_pay_acq_const_fiolta",
+            "free_cashflow",
+            "n_cashflow_inv_act",
+            "n_cash_flows_fnc_act",
+            "c_fr_sale_sg",
+            "end_bal_cash",
+            "n_incr_cash_cash_equ",
+            "c_pay_dist_dpcp_int_exp",
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._cashflow_rate_limiter.wait()
+                frame = self.pro.cashflow(
+                    ts_code=ts_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare cashflow range fetch failed for %s %s~%s offset=%s: %s",
+                    ts_code,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date", "report_type"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "report_type" in result.columns:
+            result["report_type"] = result["report_type"].astype("string")
+        return result.dropna(subset=["ts_code", "end_date"])
+
+    def get_a_stock_fina_indicator_range_frame(
+        self,
+        start_date: date,
+        end_date: date,
+        ts_code: Optional[str] = None,
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """按股票代码和公告日期分页获取一段时间内的A股财务指标数据(ROE/毛利率/负债率等)。"""
+        ts_code = (ts_code or "").strip().upper()
+        if not ts_code:
+            self.logger.warning("Skip Tushare fina_indicator range fetch for %s~%s: ts_code is required", start_date, end_date)
+            return pd.DataFrame()
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+
+        fields = (
+            "ts_code,end_date,ann_date,eps,dt_eps,bps,ocfps,roe,roe_waa,roe_dt,roa,roic,"
+            "grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,quick_ratio,"
+            "profit_dedt,extra_item,netprofit_yoy,dt_netprofit_yoy,or_yoy,op_yoy,"
+            "ocf_to_or,ocf_to_debt,interestdebt"
+        )
+        numeric_columns = (
+            "eps",
+            "dt_eps",
+            "bps",
+            "ocfps",
+            "roe",
+            "roe_waa",
+            "roe_dt",
+            "roa",
+            "roic",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+            "current_ratio",
+            "quick_ratio",
+            "profit_dedt",
+            "extra_item",
+            "netprofit_yoy",
+            "dt_netprofit_yoy",
+            "or_yoy",
+            "op_yoy",
+            "ocf_to_or",
+            "ocf_to_debt",
+            "interestdebt",
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._fina_indicator_range_rate_limiter.wait()
+                frame = self.pro.fina_indicator(
+                    ts_code=ts_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields=fields,
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare fina_indicator range fetch failed for %s %s~%s offset=%s: %s",
+                    ts_code,
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "end_date", "ann_date"],
+            keep="last",
+        )
+        for column in ("end_date", "ann_date"):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["ts_code", "end_date"])
 
     def _fetch_frame(self, symbol: str, start_date: date, end_date: date) -> pd.DataFrame:

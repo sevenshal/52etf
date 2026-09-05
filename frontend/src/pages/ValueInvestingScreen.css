@@ -1,0 +1,61 @@
+.value-investing-screen {
+  min-width: 0;
+}
+
+.value-investing-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+
+.value-investing-toolbar h3 {
+  margin: 0 0 4px;
+}
+
+.value-investing-intro {
+  max-width: 640px;
+  margin-bottom: 0 !important;
+}
+
+.value-investing-toolbar__controls {
+  justify-content: flex-end;
+}
+
+.value-investing-advanced {
+  margin-bottom: 16px;
+}
+
+.value-investing-status {
+  margin-bottom: 16px;
+}
+
+.value-investing-summary {
+  margin-bottom: 16px;
+}
+
+.value-investing-table .is-positive,
+.value-investing-detail .is-positive {
+  color: #389e0d;
+}
+
+.value-investing-table .is-negative,
+.value-investing-detail .is-negative {
+  color: #cf1322;
+}
+
+.value-investing-excluded {
+  margin-top: 16px;
+}
+
+@media (max-width: 800px) {
+  .value-investing-toolbar {
+    flex-direction: column;
+  }
+
+  .value-investing-toolbar__controls {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

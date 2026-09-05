@@ -12,9 +12,12 @@ from sqlalchemy.orm import Session
 from ..core.analytics_database import (
     ANALYTICS_DB_PATH,
     AStockAdjFactor,
+    AStockBalanceSheet,
     AStockBasic,
+    AStockCashFlow,
     AStockChinaBondYieldCurveDaily,
     AStockChinaBondYieldCurveDef,
+    AStockFinaIndicator,
     AStockFundAdjFactor,
     AStockFundBasic,
     AStockFundDaily,
@@ -2557,6 +2560,66 @@ class AStockBaseDataSyncService:
             progress_callback=self.progress_callback,
         )
 
+        self._progress(
+            "同步A股资产负债表财务数据缓存",
+            84,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=income_end.isoformat(),
+            mode=income_sync_mode,
+            symbol_scope=income_symbol_scope,
+            symbols=len(income_symbols),
+        )
+        balancesheet_result = sync_a_stock_balancesheet_data(
+            start_date=income_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            symbols=income_symbols,
+            symbol_scope=income_symbol_scope,
+            tushare_service=self.tushare,
+            analytics_db=self.analytics_db,
+            progress_callback=self.progress_callback,
+        )
+
+        self._progress(
+            "同步A股现金流量表财务数据缓存",
+            86,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=income_end.isoformat(),
+            mode=income_sync_mode,
+            symbol_scope=income_symbol_scope,
+            symbols=len(income_symbols),
+        )
+        cashflow_result = sync_a_stock_cashflow_data(
+            start_date=income_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            symbols=income_symbols,
+            symbol_scope=income_symbol_scope,
+            tushare_service=self.tushare,
+            analytics_db=self.analytics_db,
+            progress_callback=self.progress_callback,
+        )
+
+        self._progress(
+            "同步A股财务指标缓存",
+            88,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=income_end.isoformat(),
+            mode=income_sync_mode,
+            symbol_scope=income_symbol_scope,
+            symbols=len(income_symbols),
+        )
+        fina_indicator_result = sync_a_stock_fina_indicator_data(
+            start_date=income_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            symbols=income_symbols,
+            symbol_scope=income_symbol_scope,
+            tushare_service=self.tushare,
+            analytics_db=self.analytics_db,
+            progress_callback=self.progress_callback,
+        )
+
         report_rc_default_start = DEFAULT_START_DATE
         if explicit_start:
             report_rc_start = explicit_start
@@ -2614,6 +2677,9 @@ class AStockBaseDataSyncService:
         index_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexDaily.__tablename__)
         index_weight_rows = _count_analytics_table_rows(self.analytics_db, AStockIndexWeight.__tablename__)
         income_rows = _count_analytics_table_rows(self.analytics_db, AStockIncome.__tablename__)
+        balancesheet_rows = _count_analytics_table_rows(self.analytics_db, AStockBalanceSheet.__tablename__)
+        cashflow_rows = _count_analytics_table_rows(self.analytics_db, AStockCashFlow.__tablename__)
+        fina_indicator_rows = _count_analytics_table_rows(self.analytics_db, AStockFinaIndicator.__tablename__)
         report_rc_rows = _count_analytics_table_rows(self.analytics_db, AStockReportRc.__tablename__)
         option_basic_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionBasic.__tablename__)
         option_daily_rows = _count_analytics_table_rows(self.analytics_db, AStockOptionDaily.__tablename__)
@@ -2683,6 +2749,9 @@ class AStockBaseDataSyncService:
                 "repo_daily": A_STOCK_REPO_DAILY_WARMUP_DAYS,
                 "chinabond": A_STOCK_CHINABOND_WARMUP_DAYS,
                 "income": INCOME_HISTORY_LOOKBACK_DAYS,
+                "balancesheet": INCOME_HISTORY_LOOKBACK_DAYS,
+                "cashflow": INCOME_HISTORY_LOOKBACK_DAYS,
+                "fina_indicator": INCOME_HISTORY_LOOKBACK_DAYS,
                 "report_rc": SYNC_INCREMENTAL_REPAIR_WINDOW_DAYS,
             },
             "reference_full_refresh": reference_full_refresh,
@@ -2778,6 +2847,27 @@ class AStockBaseDataSyncService:
             "income_total_seconds": income_result.get("total_seconds"),
             "income_avg_fetch_ms": income_result.get("avg_fetch_ms"),
             "income_insert_batches": income_result.get("insert_batches"),
+            "balancesheet_start_date": balancesheet_result.get("start_date"),
+            "balancesheet_end_date": balancesheet_result.get("end_date"),
+            "balancesheet_fetched_rows": balancesheet_result.get("fetched_rows"),
+            "balancesheet_saved_rows": balancesheet_result.get("saved_rows"),
+            "balancesheet_symbols": balancesheet_result.get("symbols"),
+            "balancesheet_skipped_symbols": balancesheet_result.get("skipped_symbols"),
+            "balancesheet_total_seconds": balancesheet_result.get("total_seconds"),
+            "cashflow_start_date": cashflow_result.get("start_date"),
+            "cashflow_end_date": cashflow_result.get("end_date"),
+            "cashflow_fetched_rows": cashflow_result.get("fetched_rows"),
+            "cashflow_saved_rows": cashflow_result.get("saved_rows"),
+            "cashflow_symbols": cashflow_result.get("symbols"),
+            "cashflow_skipped_symbols": cashflow_result.get("skipped_symbols"),
+            "cashflow_total_seconds": cashflow_result.get("total_seconds"),
+            "fina_indicator_start_date": fina_indicator_result.get("start_date"),
+            "fina_indicator_end_date": fina_indicator_result.get("end_date"),
+            "fina_indicator_fetched_rows": fina_indicator_result.get("fetched_rows"),
+            "fina_indicator_saved_rows": fina_indicator_result.get("saved_rows"),
+            "fina_indicator_symbols": fina_indicator_result.get("symbols"),
+            "fina_indicator_skipped_symbols": fina_indicator_result.get("skipped_symbols"),
+            "fina_indicator_total_seconds": fina_indicator_result.get("total_seconds"),
             "report_rc_start_date": report_rc_result.get("start_date"),
             "report_rc_end_date": report_rc_result.get("end_date"),
             "report_rc_chunks": report_rc_result.get("chunks"),
@@ -2803,6 +2893,9 @@ class AStockBaseDataSyncService:
                 AStockFundFlowDaily.__tablename__: fund_flow_rows,
                 AStockAdjFactor.__tablename__: market_adj_factor_rows,
                 AStockIncome.__tablename__: income_rows,
+                AStockBalanceSheet.__tablename__: balancesheet_rows,
+                AStockCashFlow.__tablename__: cashflow_rows,
+                AStockFinaIndicator.__tablename__: fina_indicator_rows,
                 AStockReportRc.__tablename__: report_rc_rows,
                 AStockFundDaily.__tablename__: fund_daily_rows,
                 AStockFundAdjFactor.__tablename__: fund_adj_factor_rows,
@@ -2819,15 +2912,25 @@ class AStockBaseDataSyncService:
         }
 
 
+_INCOME_NUMERIC_COLUMNS = (
+    "rd_exp",
+    "revenue",
+    "n_income_attr_p",
+    "operate_profit",
+    "total_profit",
+    "total_cogs",
+    "basic_eps",
+)
+
+
 def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "id",
         "ts_code",
         "end_date",
         "ann_date",
-        "operate_income",
-        "rd_exp",
         "report_type",
+        *_INCOME_NUMERIC_COLUMNS,
         "created_at",
         "updated_at",
     ]
@@ -2839,9 +2942,9 @@ def _normalize_income_frame(frame: pd.DataFrame) -> pd.DataFrame:
     normalized["ts_code"] = _clean_text_series(frame, "ts_code")
     normalized["end_date"] = _date_series(frame, "end_date")
     normalized["ann_date"] = _date_series(frame, "ann_date")
-    normalized["operate_income"] = _numeric_series(frame, "operate_income", 4)
-    normalized["rd_exp"] = _numeric_series(frame, "rd_exp", 4)
     normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
+    for column in _INCOME_NUMERIC_COLUMNS:
+        normalized[column] = _numeric_series(frame, column, 4)
     normalized = normalized.dropna(subset=["ts_code", "end_date"])
     if normalized.empty:
         return pd.DataFrame(columns=columns)
@@ -2866,23 +2969,237 @@ def _bulk_upsert_income_frame(analytics_db: Session, frame: pd.DataFrame) -> int
     if normalized.empty:
         return 0
 
-    columns = [
-        "id",
-        "ts_code",
-        "end_date",
-        "ann_date",
-        "operate_income",
-        "rd_exp",
-        "report_type",
-        "created_at",
-        "updated_at",
-    ]
+    columns = list(normalized.columns)
     table = AStockIncome.__table__
     analytics_db.commit()
     # Keep this on the same DuckDB bulk path used by market/index daily:
     # register one DataFrame and let DuckDB execute a set-based INSERT OR REPLACE.
     _insert_or_replace_analytics_frame(
         table.name,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+_BALANCESHEET_NUMERIC_COLUMNS = (
+    "total_assets",
+    "total_liab",
+    "total_cur_assets",
+    "total_cur_liab",
+    "total_hldr_eqy_exc_min_int",
+    "money_cap",
+    "accounts_receiv",
+    "inventories",
+    "goodwill",
+    "fix_assets",
+    "lt_borr",
+    "st_borr",
+    "notes_payable",
+    "acct_payable",
+)
+
+
+def _normalize_balancesheet_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "id",
+        "ts_code",
+        "end_date",
+        "ann_date",
+        "report_type",
+        "comp_type",
+        *_BALANCESHEET_NUMERIC_COLUMNS,
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["end_date"] = _date_series(frame, "end_date")
+    normalized["ann_date"] = _date_series(frame, "ann_date")
+    normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
+    normalized["comp_type"] = _clean_text_series(frame, "comp_type")
+    for column in _BALANCESHEET_NUMERIC_COLUMNS:
+        normalized[column] = _numeric_series(frame, column, 4)
+    normalized = normalized.dropna(subset=["ts_code", "end_date"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    key_columns = ["ts_code", "end_date", "ann_date", "report_type"]
+    normalized["id"] = normalized[key_columns].apply(
+        lambda row: hashlib.sha1(
+            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
+        ).hexdigest(),
+        axis=1,
+    )
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_balancesheet_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    normalized = _normalize_balancesheet_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockBalanceSheet.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+_CASHFLOW_NUMERIC_COLUMNS = (
+    "net_profit",
+    "n_cashflow_act",
+    "c_pay_acq_const_fiolta",
+    "free_cashflow",
+    "n_cashflow_inv_act",
+    "n_cash_flows_fnc_act",
+    "c_fr_sale_sg",
+    "end_bal_cash",
+    "n_incr_cash_cash_equ",
+    "c_pay_dist_dpcp_int_exp",
+)
+
+
+def _normalize_cashflow_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "id",
+        "ts_code",
+        "end_date",
+        "ann_date",
+        "report_type",
+        *_CASHFLOW_NUMERIC_COLUMNS,
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["end_date"] = _date_series(frame, "end_date")
+    normalized["ann_date"] = _date_series(frame, "ann_date")
+    normalized["report_type"] = _clean_text_series(frame, "report_type").fillna("")
+    for column in _CASHFLOW_NUMERIC_COLUMNS:
+        normalized[column] = _numeric_series(frame, column, 4)
+    normalized = normalized.dropna(subset=["ts_code", "end_date"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    key_columns = ["ts_code", "end_date", "ann_date", "report_type"]
+    normalized["id"] = normalized[key_columns].apply(
+        lambda row: hashlib.sha1(
+            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
+        ).hexdigest(),
+        axis=1,
+    )
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_cashflow_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    normalized = _normalize_cashflow_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockCashFlow.__tablename__,
+        columns,
+        normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+_FINA_INDICATOR_NUMERIC_COLUMNS = (
+    "eps",
+    "dt_eps",
+    "bps",
+    "ocfps",
+    "roe",
+    "roe_waa",
+    "roe_dt",
+    "roa",
+    "roic",
+    "grossprofit_margin",
+    "netprofit_margin",
+    "debt_to_assets",
+    "current_ratio",
+    "quick_ratio",
+    "profit_dedt",
+    "extra_item",
+    "netprofit_yoy",
+    "dt_netprofit_yoy",
+    "or_yoy",
+    "op_yoy",
+    "ocf_to_or",
+    "ocf_to_debt",
+    "interestdebt",
+)
+
+
+def _normalize_fina_indicator_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "id",
+        "ts_code",
+        "end_date",
+        "ann_date",
+        *_FINA_INDICATOR_NUMERIC_COLUMNS,
+        "created_at",
+        "updated_at",
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["end_date"] = _date_series(frame, "end_date")
+    normalized["ann_date"] = _date_series(frame, "ann_date")
+    for column in _FINA_INDICATOR_NUMERIC_COLUMNS:
+        normalized[column] = _numeric_series(frame, column, 4)
+    normalized = normalized.dropna(subset=["ts_code", "end_date"])
+    if normalized.empty:
+        return pd.DataFrame(columns=columns)
+
+    key_columns = ["ts_code", "end_date", "ann_date"]
+    normalized["id"] = normalized[key_columns].apply(
+        lambda row: hashlib.sha1(
+            "|".join("" if pd.isna(value) else str(value) for value in row).encode("utf-8")
+        ).hexdigest(),
+        axis=1,
+    )
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.drop_duplicates(subset=["id"], keep="last")
+    return normalized.loc[:, columns]
+
+
+def _bulk_upsert_fina_indicator_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    normalized = _normalize_fina_indicator_frame(frame)
+    if normalized.empty:
+        return 0
+    columns = list(normalized.columns)
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockFinaIndicator.__tablename__,
         columns,
         normalized.loc[:, columns],
     )
@@ -3879,6 +4196,505 @@ def sync_a_stock_income_data(
     finally:
         if owns_analytics_db:
             AnalyticsSession.remove()
+
+
+def _statement_ann_date_bounds(analytics_db: Session, table_name: str) -> Tuple[Optional[date], Optional[date]]:
+    row = analytics_db.execute(
+        text(
+            f"""
+            SELECT MIN(ann_date), MAX(ann_date)
+            FROM {_quote_duckdb_identifier(table_name)}
+            WHERE ann_date IS NOT NULL
+            """
+        )
+    ).fetchone()
+    if not row:
+        return None, None
+    return _parse_date(row[0]), _parse_date(row[1])
+
+
+def _statement_ann_date_bounds_by_symbol(
+    analytics_db: Session,
+    table_name: str,
+) -> Dict[str, Tuple[Optional[date], Optional[date]]]:
+    rows = analytics_db.execute(
+        text(
+            f"""
+            SELECT ts_code, MIN(ann_date), MAX(ann_date)
+            FROM {_quote_duckdb_identifier(table_name)}
+            WHERE ts_code IS NOT NULL AND ann_date IS NOT NULL
+            GROUP BY ts_code
+            """
+        )
+    ).fetchall()
+    result = {}
+    for row in rows:
+        symbol = str(row[0] or "").strip().upper()
+        if not symbol:
+            continue
+        result[symbol] = (_parse_date(row[1]), _parse_date(row[2]))
+    return result
+
+
+def _plan_statement_symbol_ranges(
+    symbols: List[str],
+    start_date: Optional[date],
+    end_date: date,
+    *,
+    incremental: bool,
+    symbol_bounds: Dict[str, Tuple[Optional[date], Optional[date]]],
+    symbol_list_dates: Optional[Dict[str, Optional[date]]] = None,
+    lookback_days: int,
+) -> Tuple[List[Tuple[str, date, date, str]], Dict[str, int]]:
+    """通用财务报表增量同步规划，逻辑与 `_plan_income_symbol_ranges` 完全一致，
+    仅将回溯天数参数化以便资产负债表/现金流量表/财务指标复用。"""
+    default_start = DEFAULT_START_DATE - timedelta(days=lookback_days)
+    refresh_cutoff = end_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS)
+    list_dates = symbol_list_dates or {}
+    jobs: List[Tuple[str, date, date, str]] = []
+    stats = {
+        "skipped": 0,
+        "backfill": 0,
+        "incremental": 0,
+        "full": 0,
+    }
+
+    for symbol in symbols:
+        earliest_ann_date, latest_ann_date = symbol_bounds.get(symbol, (None, None))
+        list_date = list_dates.get(symbol)
+        latest_is_fresh = bool(latest_ann_date and latest_ann_date >= refresh_cutoff)
+        symbol_start: Optional[date] = None
+        symbol_end = end_date
+        sync_kind = "incremental"
+
+        if start_date:
+            if earliest_ann_date is None:
+                symbol_start = max(start_date, list_date) if list_date and list_date > start_date else start_date
+                sync_kind = "backfill"
+            elif start_date < earliest_ann_date:
+                if list_date and list_date > start_date:
+                    if latest_is_fresh:
+                        stats["skipped"] += 1
+                        continue
+                    if latest_ann_date:
+                        symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+                        sync_kind = "incremental"
+                    else:
+                        symbol_start = list_date
+                        sync_kind = "backfill"
+                else:
+                    symbol_start = start_date
+                    symbol_end = min(end_date, earliest_ann_date - timedelta(days=1))
+                    sync_kind = "backfill"
+            elif latest_ann_date:
+                if latest_is_fresh:
+                    stats["skipped"] += 1
+                    continue
+                else:
+                    symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+                    sync_kind = "incremental"
+            else:
+                symbol_start = start_date
+                sync_kind = "backfill"
+        elif incremental:
+            if latest_ann_date:
+                if latest_is_fresh:
+                    stats["skipped"] += 1
+                    continue
+                symbol_start = max(default_start, latest_ann_date - timedelta(days=SYNC_REFRESH_OVERLAP_DAYS))
+                sync_kind = "incremental"
+            else:
+                symbol_start = default_start
+                sync_kind = "backfill"
+        else:
+            symbol_start = default_start
+            sync_kind = "full"
+
+        if not symbol_start or symbol_start > symbol_end:
+            stats["skipped"] += 1
+            continue
+
+        jobs.append((symbol, symbol_start, symbol_end, sync_kind))
+        stats[sync_kind] += 1
+
+    return jobs, stats
+
+
+def _sync_statement_data(
+    *,
+    statement_label: str,
+    table_name: str,
+    lookback_days: int,
+    fetch_range_fn: Callable[[TushareService, date, date, str], pd.DataFrame],
+    upsert_fn: Callable[[Session, pd.DataFrame], int],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    symbols: Optional[List[str]] = None,
+    symbol_scope: str = "a_stock_basic",
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    """通用财务报表(资产负债表/现金流量表/财务指标)增量同步引擎。
+
+    控制流与 `sync_a_stock_income_data` 完全一致(逐symbol规划增量/回补范围、
+    多线程抓取、批量落库)，通过 fetch_range_fn/upsert_fn 参数化具体报表接口，
+    避免三张报表各自复制一份近千行的同步逻辑。
+    """
+    end_value = _parse_date(end_date) or date.today()
+    default_start = DEFAULT_START_DATE - timedelta(days=lookback_days)
+    owns_analytics_db = analytics_db is None
+    analytics_session = analytics_db or AnalyticsSession()
+    try:
+        explicit_start = _parse_date(start_date)
+        earliest_ann_date, latest_ann_date = _statement_ann_date_bounds(analytics_session, table_name)
+        symbol_bounds = _statement_ann_date_bounds_by_symbol(analytics_session, table_name)
+        symbol_list_dates = _income_list_dates_by_symbol(analytics_session)
+        analytics_session.commit()
+        start_value = explicit_start or default_start
+
+        def _empty_result(status: str, **extra_stats) -> Dict:
+            base = {
+                "status": status,
+                "start_date": start_value.isoformat(),
+                "end_date": end_value.isoformat(),
+                "fetched_rows": 0,
+                "saved_rows": 0,
+                "chunks": 0,
+                "symbols": 0,
+                "processed_symbols": 0,
+                "symbol_scope": symbol_scope,
+                "empty_symbols": 0,
+                "non_empty_symbols": 0,
+                "fetch_seconds": 0.0,
+                "insert_seconds": 0.0,
+                "total_seconds": 0.0,
+                "avg_fetch_ms": 0.0,
+                "insert_batches": 0,
+                "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
+                "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+                "skipped_symbols": 0,
+                "backfill_symbols": 0,
+                "incremental_symbols": 0,
+                "full_symbols": 0,
+            }
+            base.update(extra_stats)
+            return base
+
+        if start_value > end_value:
+            return _empty_result("up_to_date")
+
+        if symbols is None:
+            statement_symbols = _load_income_symbols(analytics_session)
+        else:
+            statement_symbols = sorted(
+                {
+                    str(symbol or "").strip().upper()
+                    for symbol in symbols
+                    if str(symbol or "").strip()
+                }
+            )
+        if not statement_symbols:
+            return _empty_result("skipped")
+
+        statement_jobs, job_stats = _plan_statement_symbol_ranges(
+            statement_symbols,
+            explicit_start,
+            end_value,
+            incremental=incremental,
+            symbol_bounds=symbol_bounds,
+            symbol_list_dates=symbol_list_dates,
+            lookback_days=lookback_days,
+        )
+        skipped_symbols = job_stats["skipped"]
+        backfill_symbols = job_stats["backfill"]
+        incremental_symbols = job_stats["incremental"]
+        full_symbols = job_stats["full"]
+        if not statement_jobs:
+            return _empty_result(
+                "up_to_date",
+                symbols=len(statement_symbols),
+                skipped_symbols=skipped_symbols,
+                backfill_symbols=backfill_symbols,
+                incremental_symbols=incremental_symbols,
+                full_symbols=full_symbols,
+            )
+
+        tushare = tushare_service or TushareService.getInstance()
+        workers = min(SYNC_WORKERS, len(statement_jobs))
+        sync_started_at = time.perf_counter()
+        fetch_seconds = 0.0
+        insert_seconds = 0.0
+        fetched_rows = 0
+        saved_rows = 0
+        processed_symbols = 0
+        empty_symbols = 0
+        non_empty_symbols = 0
+        insert_batches = 0
+        pending_frames: List[pd.DataFrame] = []
+        pending_rows = 0
+        logger.info(
+            (
+                "Sync A stock %s data base_range=%s~%s symbols=%s fetch_jobs=%s "
+                "skipped=%s backfill=%s incremental_jobs=%s full_jobs=%s "
+                "scope=%s workers=%s incremental=%s ann_date_bounds=%s~%s"
+            ),
+            statement_label,
+            start_value,
+            end_value,
+            len(statement_symbols),
+            len(statement_jobs),
+            skipped_symbols,
+            backfill_symbols,
+            incremental_symbols,
+            full_symbols,
+            symbol_scope,
+            workers,
+            incremental,
+            earliest_ann_date,
+            latest_ann_date,
+        )
+
+        def fetch_symbol(job: Tuple[str, date, date, str]) -> Tuple[str, pd.DataFrame, float, date, date, str]:
+            symbol, symbol_start, symbol_end, sync_kind = job
+            fetch_started_at = time.perf_counter()
+            frame = fetch_range_fn(tushare, symbol_start, symbol_end, symbol)
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                frame = _filter_income_ann_date_range(frame, symbol_start, symbol_end)
+            fetch_elapsed = time.perf_counter() - fetch_started_at
+            return symbol, frame if isinstance(frame, pd.DataFrame) else pd.DataFrame(), fetch_elapsed, symbol_start, symbol_end, sync_kind
+
+        def flush_frames():
+            nonlocal insert_batches, insert_seconds, pending_frames, pending_rows, saved_rows
+            if not pending_frames:
+                return
+            batch_frame = pending_frames[0] if len(pending_frames) == 1 else pd.concat(pending_frames, ignore_index=True)
+            insert_started_at = time.perf_counter()
+            saved_rows += upsert_fn(analytics_session, batch_frame)
+            insert_seconds += time.perf_counter() - insert_started_at
+            insert_batches += 1
+            pending_frames = []
+            pending_rows = 0
+
+        def queue_frame(frame: pd.DataFrame):
+            nonlocal pending_rows
+            pending_frames.append(frame)
+            pending_rows += len(frame)
+            if pending_rows >= INCOME_INSERT_BATCH_ROWS or len(pending_frames) >= INCOME_INSERT_BATCH_FRAMES:
+                flush_frames()
+
+        def report_progress(processed: int, symbol: str):
+            if progress_callback:
+                progress_callback(
+                    {
+                        "message": f"同步A股{statement_label} {symbol}",
+                        "progress": 5 + int((processed + skipped_symbols) / max(len(statement_symbols), 1) * 90),
+                        "processed_symbols": processed,
+                        "total_symbols": len(statement_symbols),
+                        "fetch_jobs": len(statement_jobs),
+                        "skipped_symbols": skipped_symbols,
+                        "backfill_symbols": backfill_symbols,
+                        "incremental_symbols": incremental_symbols,
+                        "full_symbols": full_symbols,
+                        "symbol_scope": symbol_scope,
+                        "fetch_seconds": round(fetch_seconds, 3),
+                        "insert_seconds": round(insert_seconds, 3),
+                        "fetched_rows": fetched_rows,
+                        "saved_rows": saved_rows,
+                        "empty_symbols": empty_symbols,
+                        "non_empty_symbols": non_empty_symbols,
+                        "insert_batches": insert_batches,
+                        "pending_insert_rows": pending_rows,
+                    }
+                )
+
+        if workers <= 1:
+            for job in statement_jobs:
+                symbol, frame, fetch_elapsed, _symbol_start, _symbol_end, _sync_kind = fetch_symbol(job)
+                fetch_seconds += fetch_elapsed
+                processed_symbols += 1
+                fetched_rows += len(frame)
+                if frame.empty:
+                    empty_symbols += 1
+                else:
+                    non_empty_symbols += 1
+                    queue_frame(frame)
+                if processed_symbols == 1 or processed_symbols == len(statement_jobs) or processed_symbols % 50 == 0:
+                    report_progress(processed_symbols, symbol)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(fetch_symbol, job) for job in statement_jobs]
+                for future in as_completed(futures):
+                    symbol, frame, fetch_elapsed, _symbol_start, _symbol_end, _sync_kind = future.result()
+                    fetch_seconds += fetch_elapsed
+                    processed_symbols += 1
+                    fetched_rows += len(frame)
+                    if frame.empty:
+                        empty_symbols += 1
+                    else:
+                        non_empty_symbols += 1
+                        queue_frame(frame)
+                    if processed_symbols == 1 or processed_symbols == len(statement_jobs) or processed_symbols % 50 == 0:
+                        report_progress(processed_symbols, symbol)
+
+        flush_frames()
+        total_seconds = time.perf_counter() - sync_started_at
+        avg_fetch_ms = fetch_seconds / max(processed_symbols, 1) * 1000
+        logger.info(
+            (
+                "A stock %s sync timing: total=%.3fs fetch=%.3fs insert=%.3fs "
+                "avg_fetch=%.1fms symbols=%s fetch_jobs=%s skipped=%s backfill=%s "
+                "incremental_jobs=%s full_jobs=%s empty_symbols=%s non_empty_symbols=%s "
+                "fetched_rows=%s saved_rows=%s insert_batches=%s scope=%s"
+            ),
+            statement_label,
+            total_seconds,
+            fetch_seconds,
+            insert_seconds,
+            avg_fetch_ms,
+            len(statement_symbols),
+            processed_symbols,
+            skipped_symbols,
+            backfill_symbols,
+            incremental_symbols,
+            full_symbols,
+            empty_symbols,
+            non_empty_symbols,
+            fetched_rows,
+            saved_rows,
+            insert_batches,
+            symbol_scope,
+        )
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "message": f"A股{statement_label}同步完成",
+                    "progress": 100,
+                    "processed_symbols": processed_symbols,
+                    "total_symbols": len(statement_symbols),
+                    "fetch_jobs": len(statement_jobs),
+                    "skipped_symbols": skipped_symbols,
+                    "backfill_symbols": backfill_symbols,
+                    "incremental_symbols": incremental_symbols,
+                    "full_symbols": full_symbols,
+                    "symbol_scope": symbol_scope,
+                    "fetch_seconds": round(fetch_seconds, 3),
+                    "insert_seconds": round(insert_seconds, 3),
+                    "total_seconds": round(total_seconds, 3),
+                    "insert_batches": insert_batches,
+                }
+            )
+
+        return {
+            "status": "completed",
+            "start_date": start_value.isoformat(),
+            "end_date": end_value.isoformat(),
+            "fetched_rows": fetched_rows,
+            "saved_rows": saved_rows,
+            "chunks": len(statement_jobs),
+            "symbols": len(statement_symbols),
+            "processed_symbols": processed_symbols,
+            "symbol_scope": symbol_scope,
+            "empty_symbols": empty_symbols,
+            "non_empty_symbols": non_empty_symbols,
+            "fetch_seconds": round(fetch_seconds, 3),
+            "insert_seconds": round(insert_seconds, 3),
+            "total_seconds": round(total_seconds, 3),
+            "avg_fetch_ms": round(avg_fetch_ms, 3),
+            "insert_batches": insert_batches,
+            "earliest_ann_date": earliest_ann_date.isoformat() if earliest_ann_date else None,
+            "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+            "skipped_symbols": skipped_symbols,
+            "backfill_symbols": backfill_symbols,
+            "incremental_symbols": incremental_symbols,
+            "full_symbols": full_symbols,
+        }
+    finally:
+        if owns_analytics_db:
+            AnalyticsSession.remove()
+
+
+def sync_a_stock_balancesheet_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    symbols: Optional[List[str]] = None,
+    symbol_scope: str = "a_stock_basic",
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    return _sync_statement_data(
+        statement_label="资产负债表",
+        table_name=AStockBalanceSheet.__tablename__,
+        lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
+        fetch_range_fn=lambda svc, s, e, symbol: svc.get_a_stock_balancesheet_range_frame(s, e, ts_code=symbol),
+        upsert_fn=_bulk_upsert_balancesheet_frame,
+        start_date=start_date,
+        end_date=end_date,
+        incremental=incremental,
+        symbols=symbols,
+        symbol_scope=symbol_scope,
+        tushare_service=tushare_service,
+        analytics_db=analytics_db,
+        progress_callback=progress_callback,
+    )
+
+
+def sync_a_stock_cashflow_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    symbols: Optional[List[str]] = None,
+    symbol_scope: str = "a_stock_basic",
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    return _sync_statement_data(
+        statement_label="现金流量表",
+        table_name=AStockCashFlow.__tablename__,
+        lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
+        fetch_range_fn=lambda svc, s, e, symbol: svc.get_a_stock_cashflow_range_frame(s, e, ts_code=symbol),
+        upsert_fn=_bulk_upsert_cashflow_frame,
+        start_date=start_date,
+        end_date=end_date,
+        incremental=incremental,
+        symbols=symbols,
+        symbol_scope=symbol_scope,
+        tushare_service=tushare_service,
+        analytics_db=analytics_db,
+        progress_callback=progress_callback,
+    )
+
+
+def sync_a_stock_fina_indicator_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    symbols: Optional[List[str]] = None,
+    symbol_scope: str = "a_stock_basic",
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    return _sync_statement_data(
+        statement_label="财务指标",
+        table_name=AStockFinaIndicator.__tablename__,
+        lookback_days=INCOME_HISTORY_LOOKBACK_DAYS,
+        fetch_range_fn=lambda svc, s, e, symbol: svc.get_a_stock_fina_indicator_range_frame(s, e, ts_code=symbol),
+        upsert_fn=_bulk_upsert_fina_indicator_frame,
+        start_date=start_date,
+        end_date=end_date,
+        incremental=incremental,
+        symbols=symbols,
+        symbol_scope=symbol_scope,
+        tushare_service=tushare_service,
+        analytics_db=analytics_db,
+        progress_callback=progress_callback,
+    )
 
 
 def _count_analytics_table_rows(analytics_db: Session, table_name: str) -> int:

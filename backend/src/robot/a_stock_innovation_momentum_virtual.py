@@ -160,7 +160,7 @@ def _load_symbol_income_history(ts_code: str, fetch_start_iso: str, end_date_iso
     with analytics_engine.connect() as conn:
         rows = conn.execute(
             text("""
-                SELECT end_date, ann_date, operate_income, rd_exp
+                SELECT end_date, ann_date, revenue, rd_exp
                 FROM a_stock_income
                 WHERE ts_code = :ts_code
                   AND ann_date IS NOT NULL
@@ -183,16 +183,16 @@ def _load_symbol_income_history(ts_code: str, fetch_start_iso: str, end_date_iso
     for row in rows:
         end_row_date = _to_date(row[0])
         ann_row_date = _to_date(row[1])
-        operate_income = row[2]
+        revenue = row[2]
         rd_exp = row[3]
-        if not _is_finite_number(operate_income) or float(operate_income) <= 0:
+        if not _is_finite_number(revenue) or float(revenue) <= 0:
             continue
         if not end_row_date or not ann_row_date:
             continue
         records_by_end_date[end_row_date] = {
             "end_date": end_row_date.isoformat() if isinstance(end_row_date, date) else None,
             "ann_date": ann_row_date.isoformat() if isinstance(ann_row_date, date) else None,
-            "operate_income": float(operate_income),
+            "revenue": float(revenue),
             "rd_exp": float(rd_exp) if _is_finite_number(rd_exp) and float(rd_exp) >= 0 else None,
         }
     records = [records_by_end_date[key] for key in sorted(records_by_end_date)]
@@ -222,7 +222,7 @@ def _build_fundamental_snapshot(history: List[Dict], current_date: date) -> Opti
         ),
     )
     latest_end_date = date.fromisoformat(latest["end_date"])
-    latest_income = float(latest.get("operate_income") or 0.0)
+    latest_income = float(latest.get("revenue") or 0.0)
     latest_rd_exp = latest.get("rd_exp")
     rd_exp_ratio_pct = (
         float(latest_rd_exp) / latest_income * 100.0
@@ -244,7 +244,7 @@ def _build_fundamental_snapshot(history: List[Dict], current_date: date) -> Opti
             ),
         )
         base_end_date = date.fromisoformat(base["end_date"])
-        base_income = float(base.get("operate_income") or 0.0)
+        base_income = float(base.get("revenue") or 0.0)
         years = latest_end_date.year - base_end_date.year
         if base_income > 0 and years >= 3 and latest_income > 0:
             revenue_growth_3y_pct = (latest_income / base_income) ** (1.0 / years) - 1.0
@@ -255,7 +255,7 @@ def _build_fundamental_snapshot(history: List[Dict], current_date: date) -> Opti
         "report_ann_date": latest.get("ann_date"),
         "revenue_growth_3y_pct": _round_or_none(revenue_growth_3y_pct, 4),
         "rd_exp_ratio_pct": _round_or_none(rd_exp_ratio_pct, 4),
-        "operate_income": _round_or_none(latest_income, 4),
+        "revenue": _round_or_none(latest_income, 4),
         "rd_exp": _round_or_none(latest_rd_exp, 4),
     }
 

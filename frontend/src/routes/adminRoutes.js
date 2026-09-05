@@ -42,6 +42,11 @@ export const adminRouteDescriptors = [
     props: { initialTab: 'nine-turn-breadth' },
   },
   {
+    path: '/factor-lab/value-investing',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
+    props: { initialTab: 'value-investing' },
+  },
+  {
     path: '/live',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/LiveTrading')),
   },
