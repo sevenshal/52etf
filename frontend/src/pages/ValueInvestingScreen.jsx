@@ -74,6 +74,7 @@ const DEFAULT_FILTERS = {
   minFcfPositiveYears: null,
   maxDebtToAssets: null,
   minAvgRoeFinancial: null,
+  minValueGrowthPct: null,
   riskFreeRatePct: null,
   equityRiskPremiumPct: null,
   terminalGrowthRatePct: null,
@@ -110,6 +111,11 @@ const expandedRowRender = record => {
         { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
       ];
   const crossCheckItems = [
+    {
+      key: 'value_growth',
+      label: '内在价值同比(最新年报 vs 去年年报)',
+      children: <SignedPercent value={record.value_growth_pct} />,
+    },
     { key: 'reversion', label: '交叉验证-估值均值回归', children: <SignedPercent value={record.reversion_return_pct} /> },
     { key: 'earnings_yield', label: '交叉验证-市盈率倒数(E/P)', children: <SignedPercent value={record.earnings_yield_pct} /> },
     { key: 'fcf_yield', label: '交叉验证-FCFF收益率', children: <SignedPercent value={record.fcf_yield_pct} /> },
@@ -285,6 +291,14 @@ const excludedColumns = [
     render: value => formatPercent(value),
   },
   {
+    title: '内在价值同比',
+    dataIndex: 'value_growth_pct',
+    key: 'value_growth_pct',
+    width: 100,
+    align: 'right',
+    render: value => <SignedPercent value={value} />,
+  },
+  {
     title: '未通过原因',
     dataIndex: 'quality_reasons',
     key: 'quality_reasons',
@@ -321,6 +335,9 @@ const ValueInvestingScreen = () => {
       }
       if (filters.minAvgRoeFinancial !== null && filters.minAvgRoeFinancial !== undefined) {
         params.min_avg_roe_financial = filters.minAvgRoeFinancial;
+      }
+      if (filters.minValueGrowthPct !== null && filters.minValueGrowthPct !== undefined) {
+        params.min_value_growth_pct = filters.minValueGrowthPct;
       }
       if (filters.riskFreeRatePct !== null && filters.riskFreeRatePct !== undefined) {
         params.risk_free_rate_pct = filters.riskFreeRatePct;
@@ -402,6 +419,8 @@ const ValueInvestingScreen = () => {
                   onChange={value => setFilters(current => ({ ...current, maxDebtToAssets: value }))} style={{ width: 220 }} />
                 <InputNumber addonBefore="金融类ROE下限(%)" value={filters.minAvgRoeFinancial}
                   onChange={value => setFilters(current => ({ ...current, minAvgRoeFinancial: value }))} style={{ width: 220 }} />
+                <InputNumber addonBefore="内在价值同比增幅下限(%)" step={0.1} value={filters.minValueGrowthPct}
+                  onChange={value => setFilters(current => ({ ...current, minValueGrowthPct: value }))} style={{ width: 260 }} />
                 <InputNumber addonBefore="无风险利率(%)" step={0.1} value={filters.riskFreeRatePct}
                   onChange={value => setFilters(current => ({ ...current, riskFreeRatePct: value }))} style={{ width: 220 }} />
                 <InputNumber addonBefore="股权风险溢价(%)" step={0.1} value={filters.equityRiskPremiumPct}
