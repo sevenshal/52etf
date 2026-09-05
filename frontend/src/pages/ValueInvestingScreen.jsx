@@ -424,6 +424,20 @@ const ValueInvestingScreen = () => {
           <Statistic title="扫描范围" value={result.universe_size} suffix="只" />
           <Statistic title="通过质量闸门" value={result.quality_passed} suffix="只" />
           <Statistic title="通过但估值数据不足" value={result.insufficient_return_data} suffix="只" />
+          <Statistic
+            title={(
+              <Tooltip title={
+                result.assumptions?.risk_free_rate_source === 'chinabond_10y'
+                  ? '取自中债国债收益率曲线10年期利率'
+                  : '国债收益率曲线尚未同步到，使用静态假设兜底'
+              }>
+                无风险利率{result.assumptions?.risk_free_rate_source !== 'chinabond_10y' && '(兜底值)'}
+              </Tooltip>
+            )}
+            value={result.assumptions?.risk_free_rate_pct}
+            precision={2}
+            suffix="%"
+          />
         </Space>
       )}
 

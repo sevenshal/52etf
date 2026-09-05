@@ -31,8 +31,9 @@
    - 估值均值回归、市盈率倒数(E/P)、trailing FCFF收益率仍作为交叉验证字段返回，
      但不再用于计算 return%，避免"跟自己历史比"这种不依赖基本面的逻辑主导结果
 
-无风险利率与股权风险溢价目前是可配置的静态假设(本系统未同步国债收益率曲线，
-只有信用债曲线)，不是实时值；需要更精确的口径可以通过接口参数覆盖。
+无风险利率默认现取中债国债收益率曲线(到期)的10年期利率(同一套已有的chinabond
+爬取基础设施，只是多同步一条曲线定义)；曲线还没同步到时退回静态假设。股权风险
+溢价目前仍是可配置的静态假设(A股没有公开、权威的实时ERP口径)。
 
 本模块只做只读查询，不修改任何数据表。
 """
@@ -44,6 +45,10 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from ...robot.a_stock_base_data_config import (
+    CHINABOND_GOVERNMENT_BOND_CURVE_ID,
+    RISK_FREE_RATE_TERM_YEARS,
+)
 from .duckdb_analytics import connect_analytics_db, duckdb_table_exists, safe_float
 
 VALUATION_HISTORY_YEARS = 5
@@ -55,13 +60,18 @@ MARKET_INDEX_CODE = "000985.SH"  # 中证全指：覆盖面最广的宽基指数
 BETA_LOOKBACK_DAYS = 730
 MIN_BETA_OBSERVATIONS = 200
 DEFAULT_BETA = 1.0
+BETA_CLIP_BOUNDS = (0.2, 3.0)  # 单股票2年日收益率回归的合理范围，防止噪声估计值失真
+BLUME_ADJUSTMENT_WEIGHT = 2.0 / 3.0  # adjusted_beta = w*raw_beta + (1-w)*1.0，业界标准做法
 DEFAULT_RISK_FREE_RATE = 0.025
 DEFAULT_EQUITY_RISK_PREMIUM = 0.06
 DEFAULT_COST_OF_DEBT_PRETAX = 0.045
 DEFAULT_EFFECTIVE_TAX_RATE = 0.25
 DEFAULT_TERMINAL_GROWTH_RATE = 0.03
 DCF_EXPLICIT_YEARS = 5
-MIN_WACC_TERMINAL_SPREAD = 0.01
+# WACC 与永续增长率的利差下限：终值 = 第N年FCFF×(1+g)/(WACC-g)，利差越窄终值
+# 倍数越夸张(利差1pp对应~100倍，3pp对应~34倍，5pp对应~21倍)。1pp 太松，
+# 实际跑数据时出现过 WACC-g 只有2.1pp、终值炸到年FCFF 48倍的案例，改成3pp。
+MIN_WACC_TERMINAL_SPREAD = 0.03
 NEAR_TERM_GROWTH_BOUNDS = (-0.15, 0.30)
 SCENARIO_DISCOUNT_RATE_SPREAD = 0.015
 SCENARIO_GROWTH_MULTIPLIER = (0.5, 1.3)  # (悲观, 乐观) 相对近端增速的倍数
@@ -78,6 +88,33 @@ DEFAULT_QUALITY_THRESHOLDS = {
 
 # tushare comp_type: 1=一般工商业 2=银行 3=保险 4=证券
 FINANCIAL_COMP_TYPES = {"2", "3", "4"}
+
+
+def _latest_risk_free_rate(connection, curve_id: str, term_years: float) -> Optional[float]:
+    """取中债国债收益率曲线最新一个交易日、最接近 term_years 期限的利率(转成小数)。
+
+    曲线还没同步到(或那一天缺这条曲线的数据)时返回 None，调用方应退回静态假设，
+    而不是假装取到了一个精确值。
+    """
+    if not duckdb_table_exists(connection, "a_stock_chinabond_yield_curve_daily"):
+        return None
+    query = """
+        WITH latest_date AS (
+            SELECT MAX(trade_date) AS trade_date
+            FROM a_stock_chinabond_yield_curve_daily
+            WHERE curve_id = ?
+        )
+        SELECT c.term, c.yield_rate
+        FROM a_stock_chinabond_yield_curve_daily AS c, latest_date
+        WHERE c.curve_id = ? AND c.trade_date = latest_date.trade_date AND c.yield_rate IS NOT NULL
+        ORDER BY ABS(c.term - ?)
+        LIMIT 1
+    """
+    row = connection.execute(query, [curve_id, curve_id, term_years]).fetchone()
+    if not row:
+        return None
+    yield_rate_pct = safe_float(row[1])
+    return (yield_rate_pct / 100.0) if yield_rate_pct is not None else None
 
 
 def _annual_rows(connection, table: str, periods: int = ANNUAL_HISTORY_PERIODS) -> pd.DataFrame:
@@ -214,7 +251,13 @@ def _wacc_components(
     if total_capital <= 0:
         return None
 
-    effective_beta = beta if beta is not None and math.isfinite(beta) and beta > 0 else DEFAULT_BETA
+    raw_beta = beta if beta is not None and math.isfinite(beta) and beta > 0 else DEFAULT_BETA
+    raw_beta = _clip(raw_beta, BETA_CLIP_BOUNDS[0], BETA_CLIP_BOUNDS[1])
+    # Blume调整：把单只股票2年日收益率回归出来的beta往1.0收缩，这是业界standard做法
+    # (Bloomberg终端的"adjusted beta"就是这个公式)——单股票回归噪声很大，尤其是
+    # 交易不活跃、流动性差的股票，原始beta经常出现0.3、0.4这种不合理的低值，
+    # 直接拖低股权成本/WACC，进而让DCF终值因为利差过窄而爆炸。
+    effective_beta = BLUME_ADJUSTMENT_WEIGHT * raw_beta + (1.0 - BLUME_ADJUSTMENT_WEIGHT) * 1.0
     cost_of_equity = risk_free_rate + effective_beta * equity_risk_premium
 
     if debt > 0 and interest_expense and interest_expense > 0:
@@ -351,13 +394,15 @@ def screen_value_investing_candidates(
     quality_overrides: Optional[Dict[str, float]] = None,
     top_n: int = 100,
     as_of: Optional[date] = None,
-    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+    risk_free_rate: Optional[float] = None,
     equity_risk_premium: float = DEFAULT_EQUITY_RISK_PREMIUM,
     terminal_growth_rate: float = DEFAULT_TERMINAL_GROWTH_RATE,
 ) -> Dict[str, Any]:
     """跑一次全市场价值投资扫描，返回按 DCF/合理估值测算的潜在 return% 排序的候选列表。
 
     只读查询 DuckDB 分析库；金融类公司(银行/保险/证券)使用单独的质量与估值口径。
+    risk_free_rate 留空(None)时现取中债国债收益率曲线10年期利率，曲线还没同步到
+    时才退回静态假设；显式传值则始终使用调用方指定的值。
     """
     thresholds = dict(DEFAULT_QUALITY_THRESHOLDS)
     if quality_overrides:
@@ -379,6 +424,12 @@ def screen_value_investing_candidates(
         market_latest = _latest_market_row(connection)
         valuation_history = _valuation_history(connection, history_start)
         beta_by_symbol = _beta_by_symbol(connection, beta_lookback_start, MARKET_INDEX_CODE)
+        risk_free_rate_source = "explicit_override"
+        if risk_free_rate is None:
+            risk_free_rate = _latest_risk_free_rate(connection, CHINABOND_GOVERNMENT_BOND_CURVE_ID, RISK_FREE_RATE_TERM_YEARS)
+            risk_free_rate_source = "chinabond_10y" if risk_free_rate is not None else "default_fallback"
+            if risk_free_rate is None:
+                risk_free_rate = DEFAULT_RISK_FREE_RATE
     finally:
         connection.close()
 
@@ -700,6 +751,7 @@ def screen_value_investing_candidates(
         "thresholds": thresholds,
         "assumptions": {
             "risk_free_rate_pct": risk_free_rate * 100.0,
+            "risk_free_rate_source": risk_free_rate_source,
             "equity_risk_premium_pct": equity_risk_premium * 100.0,
             "terminal_growth_rate_pct": terminal_growth_rate * 100.0,
             "market_index_code": MARKET_INDEX_CODE,
