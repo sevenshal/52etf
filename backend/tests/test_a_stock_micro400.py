@@ -409,3 +409,27 @@ class FearGreedBackfillSymbolsParameterTest(TestCase):
         )
         self.assertIsNone(_parse_optional_symbol_list(""))
         self.assertIsNone(_parse_optional_symbol_list(None))
+
+
+class ManualRunDialogTest(TestCase):
+    """手动执行弹窗要能给自算指数选日期，并给贪恐回填临时指定标的。"""
+
+    def test_custom_index_refresh_tasks_support_start_date(self):
+        from src.robot.scheduled_tasks import START_DATE_RUN_TASK_KEYS
+
+        self.assertIn("a_stock_innovation100_rebuild", START_DATE_RUN_TASK_KEYS)
+        self.assertIn("a_stock_micro400_rebuild", START_DATE_RUN_TASK_KEYS)
+
+    def test_serialized_tasks_expose_both_manual_run_capabilities(self):
+        from src.robot.scheduled_tasks import (
+            START_DATE_RUN_TASK_KEYS,
+            SYMBOLS_RUN_TASK_KEYS,
+            ScheduledTaskManager,
+        )
+
+        tasks = {item["task_key"]: item for item in ScheduledTaskManager().list_tasks()}
+        for task_key, task in tasks.items():
+            self.assertEqual(task["supports_start_date"], task_key in START_DATE_RUN_TASK_KEYS, task_key)
+            self.assertEqual(task["supports_symbols"], task_key in SYMBOLS_RUN_TASK_KEYS, task_key)
+        self.assertTrue(tasks["a_stock_micro400_rebuild"]["supports_start_date"])
+        self.assertTrue(tasks["a_stock_etf_fear_greed_backfill"]["supports_symbols"])

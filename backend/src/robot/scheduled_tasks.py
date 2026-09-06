@@ -97,6 +97,27 @@ def _parse_optional_task_date(value: Optional[str], field_name: str) -> Optional
         raise ValueError(f"{field_name} 必须是 YYYY-MM-DD") from exc
 
 
+# 手动执行弹窗里可以临时指定开始日期的任务：不填 = 增量续算，填了 = 从该日期重算。
+START_DATE_RUN_TASK_KEYS = frozenset({
+    "evc_static_info_sync",
+    "cnn_fear_greed_fetch",
+    "a_stock_base_data_sync",
+    "etf_holdings_backfill",
+    "soxx_fear_greed_backfill",
+    "a_stock_etf_fear_greed_backfill",
+    "hk_stock_base_data_sync",
+    "hk_index_fear_greed_backfill",
+    "a_stock_innovation100_rebuild",
+    "a_stock_micro400_rebuild",
+})
+# 手动执行弹窗里可以临时限定标的的任务。这里传的 symbols 只对这一次执行生效，
+# 不会写进任务配置，避免一次性回填之后每天的定时执行也被缩到这几个指数。
+SYMBOLS_RUN_TASK_KEYS = frozenset({
+    "a_stock_etf_fear_greed_backfill",
+    "a_stock_index_valuation_refresh",
+})
+
+
 def _parse_optional_symbol_list(value: Any) -> Optional[List[str]]:
     """任务参数里的标的列表：UI 传的是逗号/空格分隔的字符串，代码里传的是 list。
 
@@ -2534,16 +2555,8 @@ class ScheduledTaskManager:
                 timezone=config.get("timezone"),
             ),
             "sort_order": config["sort_order"],
-            "supports_start_date": config["task_key"] in {
-                "evc_static_info_sync",
-                "cnn_fear_greed_fetch",
-                "a_stock_base_data_sync",
-                "etf_holdings_backfill",
-                "soxx_fear_greed_backfill",
-                "a_stock_etf_fear_greed_backfill",
-                "hk_stock_base_data_sync",
-                "hk_index_fear_greed_backfill",
-            },
+            "supports_start_date": config["task_key"] in START_DATE_RUN_TASK_KEYS,
+            "supports_symbols": config["task_key"] in SYMBOLS_RUN_TASK_KEYS,
             "is_running": is_running,
             "is_queued": is_queued,
             "next_run_at": next_run.isoformat() if next_run else None,
