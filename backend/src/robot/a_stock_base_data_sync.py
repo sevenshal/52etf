@@ -918,6 +918,38 @@ class AStockBaseDataSyncService:
                 if not frame.empty:
                     self._upsert_market_frame(frame)
 
+    def _latest_option_date_by_exchange(self) -> Dict[str, date]:
+        rows = self.analytics_db.execute(
+            text("""
+                SELECT exchange, MAX(trade_date)
+                FROM a_stock_option_daily
+                WHERE exchange IS NOT NULL
+                GROUP BY exchange
+            """)
+        ).fetchall()
+        return {
+            str(row[0]).upper(): parsed
+            for row in rows
+            if row[0] and (parsed := _parse_date(row[1]))
+        }
+
+    def _option_incremental_latest_date(self) -> Optional[date]:
+        """增量同步的期权起点锚日：取各交易所最新日期里最早的那个。
+
+        期权表整体的最大日期不能代表每个交易所都同步到位——新接入一个交易所时
+        （例如加入中金所股指期权），整表最大日期仍是今天，增量窗口只有一周，
+        那个交易所的历史会永远补不上。任何一个已配置的交易所完全没有数据时返回
+        None，让调用方退回默认起点做一次完整回补。
+        """
+        latest_by_exchange = self._latest_option_date_by_exchange()
+        dates = []
+        for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
+            latest = latest_by_exchange.get(str(exchange).upper())
+            if not latest:
+                return None
+            dates.append(latest)
+        return min(dates) if dates else None
+
     def _existing_option_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
         rows = self.analytics_db.execute(
             text("""
@@ -2398,7 +2430,7 @@ class AStockBaseDataSyncService:
             raise ValueError("开始日期不能晚于结束日期")
 
         latest_market_date = _latest_analytics_date(self.analytics_db, AStockMarketDaily, "trade_date")
-        latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
+        latest_option_date = self._option_incremental_latest_date()
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
         latest_report_rc_date = _latest_analytics_date(self.analytics_db, AStockReportRc, "report_date")

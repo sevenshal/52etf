@@ -86,3 +86,33 @@ class OptionVolumePcrScopeTest(TestCase):
             "399986.SZ"
         )._load_option_volume_pcr(TRADE_DATE, TRADE_DATE)
         self.assertTrue(series.empty)
+
+
+class OptionIncrementalAnchorTest(TestCase):
+    """新接入一个期权交易所时，增量同步要能自动回补它的历史。"""
+
+    @staticmethod
+    def _builder(latest_by_exchange):
+        from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
+
+        service = object.__new__(AStockBaseDataSyncService)
+        service._latest_option_date_by_exchange = lambda: latest_by_exchange
+        return service
+
+    def test_anchor_is_none_when_a_configured_exchange_has_no_data(self):
+        """CFFEX 刚加进同步范围、一条数据都没有时必须退回默认起点做完整回补。
+
+        用整表最大日期当锚日会得到「今天」，增量窗口只有 7 天，中金所的历史
+        永远补不上——这正是加 CFFEX 时踩到的坑。
+        """
+        service = self._builder({"SSE": date(2026, 9, 5), "SZSE": date(2026, 9, 5)})
+        self.assertIsNone(service._option_incremental_latest_date())
+
+    def test_anchor_takes_the_earliest_exchange(self):
+        """某个交易所落后时，锚日取最早的那个，让它能追上。"""
+        service = self._builder({
+            "SSE": date(2026, 9, 5),
+            "SZSE": date(2026, 9, 5),
+            "CFFEX": date(2026, 8, 20),
+        })
+        self.assertEqual(service._option_incremental_latest_date(), date(2026, 8, 20))
