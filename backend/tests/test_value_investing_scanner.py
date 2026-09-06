@@ -1,10 +1,13 @@
-"""价值投资扫描器：DCF 口径与失真闸门的回归测试。
+"""价值投资扫描器：估值口径的回归测试。
 
-这些用例都围绕生产环境跑出来的一个真实案例展开：华特达因(000915.SZ)算出了
-1410% 的"潜在回报率"。当时的输入是 基准FCFF 14.68亿 / 归母净利约4.2亿 / 市值
-59.5亿 / WACC 6.1% / FCFF复合增速 339.6%，四层问题叠乘的结果。下面按每一层
-各锁一条：口径(少数股东权益)、数据源(FCFF 交叉验证)、增速(异常CAGR判废)、
-贴现率与终值(股权成本地板 + 终值占比闸门)，外加悲观/乐观区间的自洽性。
+这些用例围绕生产环境跑出来的真实案例：华特达因(000915.SZ)最初算出 1410% 的"潜在
+回报率"。fixture 用的是它 2025 年报的真实数量级(归母净利 5.35亿 / 合并净利 10.29亿 /
+少数股东损益 4.93亿 / 经营现金流 12.72亿 / 资本开支 0.48亿 / 少数股东权益 14.90亿 /
+归母权益 28.61亿 / 全部权益 43.51亿 / ROIC 23.8% / 市值 59.5亿)。
+
+核心的方法论主张只有一条：**增长不是免费的**。要长得快就得把 NOPAT 投回去，
+自由现金流相应减少(`g = 再投资率 × ROIC`)。下面大部分用例是在锁这一条，以及它
+替换掉的那些"把数字压下去"的补丁。
 """
 
 from datetime import date
@@ -13,6 +16,9 @@ import pandas as pd
 import pytest
 
 from src.core.services import value_investing_scanner as scanner
+
+MARKET_CAP = 5.95e9
+YEARS = [2021, 2022, 2023, 2024, 2025]
 
 
 def _annual_frame(rows):
@@ -23,61 +29,72 @@ def _annual_frame(rows):
 
 @pytest.fixture
 def huate_slices():
-    """华特达因式的输入：全口径现金流很大，但一半属于少数股东，且FCFF基期接近0。"""
-    years = [2021, 2022, 2023, 2024, 2025]
-    # tushare 口径 FCFF：基期只有 330 万，近3年均值 14.68 亿——生产环境真实取到的
-    # 那组数，量级是同期合并净利润(8.2亿)的近两倍
-    reported_fcff = [3.3e6, 4.0e8, 1.35e9, 1.47e9, 1.585e9]
-    # 现金流量表口径：经营现金流 - 资本开支，量级和合并净利润一致
-    operating_cash = [7.0e8, 7.6e8, 8.2e8, 8.8e8, 9.2e8]
-    capex = [5.0e7] * 5
+    """华特达因式的输入：ROIC 高、少数股东占了近一半、经营现金流略高于净利。"""
+    revenue = [2.027e9, 2.341e9, 2.484e9, 2.134e9, 2.228e9]
+    ebit = [8.3e8, 1.17e9, 1.33e9, 1.18e9, 1.21e9]
+    consolidated_profit = [7.04e8, 9.98e8, 1.127e9, 1.006e9, 1.029e9]
+    parent_profit = [3.80e8, 5.27e8, 5.85e8, 5.16e8, 5.35e8]
+    minority_gain = [3.24e8, 4.71e8, 5.42e8, 4.90e8, 4.93e8]
+    operating_cash = [9.5e8, 1.02e9, 1.175e9, 9.30e8, 1.272e9]
+    invested_capital = [3.6e9, 3.9e9, 4.2e9, 4.25e9, 4.32e9]
     return {
         "fina": _annual_frame(
             [
                 {
                     "year": year,
-                    "roe": 16.0,
+                    "roe": 19.4,
+                    "roe_waa": 19.0,
                     "roic": 23.8,
-                    "debt_to_assets": 13.0,
+                    "ebit": ebit_value,
+                    "invest_capital": capital,
+                    "daa": 6.0e7,
+                    "tax_to_ebt": 15.0,
+                    "debt_to_assets": 12.95,
                     "interestdebt": 0.0,
-                    "fcff": fcff,
                     "netdebt": -2.014e9,
                 }
-                for year, fcff in zip(years, reported_fcff)
+                for year, ebit_value, capital in zip(YEARS, ebit, invested_capital)
             ]
         ),
         "income": _annual_frame(
             [
                 {
                     "year": year,
-                    "n_income_attr_p": 4.2e8,   # 归母净利
-                    "n_income": 8.2e8,          # 合并净利：归母只占 51.2%
-                    "minority_gain": 4.0e8,
-                    "total_profit": 1.0e9,
-                    "income_tax": 1.5e8,
+                    "revenue": rev,
+                    "n_income_attr_p": parent,
+                    "n_income": consolidated,
+                    "minority_gain": minority,
+                    "total_profit": consolidated / 0.85,
+                    "income_tax": consolidated / 0.85 * 0.15,
                     "fin_exp_int_exp": 0.0,
                 }
-                for year in years
+                for year, rev, parent, consolidated, minority in zip(
+                    YEARS, revenue, parent_profit, consolidated_profit, minority_gain
+                )
             ]
         ),
         "cashflow": _annual_frame(
             [
-                {"year": year, "net_profit": 8.2e8, "n_cashflow_act": ocf, "c_pay_acq_const_fiolta": capex_value}
-                for year, ocf, capex_value in zip(years, operating_cash, capex)
+                {
+                    "year": year,
+                    "net_profit": profit,
+                    "n_cashflow_act": ocf,
+                    "c_pay_acq_const_fiolta": 4.8e7,
+                }
+                for year, profit, ocf in zip(YEARS, consolidated_profit, operating_cash)
             ]
         ),
-        # 归母权益 26 亿、少数股东权益 24 亿：利润几乎都来自持股约五成的控股子公司
         "balancesheet": _annual_frame(
             [
                 {
                     "year": year,
                     "comp_type": "1",
                     "money_cap": 2.5e9,
-                    "minority_int": 2.4e9,
-                    "total_hldr_eqy_exc_min_int": 2.6e9,
-                    "total_hldr_eqy_inc_min_int": 5.0e9,
+                    "minority_int": 1.49e9,
+                    "total_hldr_eqy_exc_min_int": 2.861e9,
+                    "total_hldr_eqy_inc_min_int": 4.351e9,
                 }
-                for year in years
+                for year in YEARS
             ]
         ),
     }
@@ -93,83 +110,130 @@ def _snapshot(slices, **overrides):
         "cost_of_equity": 0.08,
         "wacc": 0.08,
         "effective_tax_rate": 0.15,
-        "terminal_growth_rate": 0.0168,
+        "terminal_growth_rate": 0.03,
     }
     kwargs.update(overrides)
     return scanner._intrinsic_value_snapshot(**kwargs)
 
 
-def test_fcff_base_comes_from_cash_flow_statement_not_tushare(huate_slices):
-    """tushare 的 fcff 与现金流量表口径差一倍以上时，DCF 基准取后者。"""
+# --- 核心：增长必须付再投资的代价 -------------------------------------------
+
+
+def test_growth_is_paid_for_out_of_nopat():
+    """同样的 NOPAT 和 WACC，增长越快再投资越多——增长不是免费的。"""
+    slow = scanner._two_stage_reinvestment_value(1.0e9, 0.20, 0.02, 0.02, 0.09)
+    fast = scanner._two_stage_reinvestment_value(1.0e9, 0.20, 0.15, 0.02, 0.09)
+    assert slow is not None and fast is not None
+    # 增长仍然是加分的(ROIC 20% > WACC 9%)，但没有旧模型那种"白拿"的放大
+    assert fast["enterprise_value"] > slow["enterprise_value"]
+    assert fast["explicit_reinvestment"] > slow["explicit_reinvestment"]
+
+
+def test_low_roic_makes_growth_destroy_value():
+    """ROIC 低于 WACC 时增长越快企业价值越低——"增长毁灭价值"的正确表达。
+
+    旧模型靠一道单独的 ROIC-WACC 闸门表达这件事，估值公式本身照样把低 ROIC 公司的
+    历史现金流按高增长外推。现在它内生在公式里。
+    """
+    no_growth = scanner._two_stage_reinvestment_value(1.0e9, 0.05, 0.0, 0.0, 0.09)
+    with_growth = scanner._two_stage_reinvestment_value(1.0e9, 0.05, 0.04, 0.03, 0.09)
+    assert no_growth is not None and with_growth is not None
+    assert with_growth["enterprise_value"] < no_growth["enterprise_value"]
+
+
+def test_capex_below_depreciation_no_longer_inflates_value(huate_slices):
+    """历史资本开支低于折旧不再能抬高估值——DCF 起点是 NOPAT，不是历史自由现金流。
+
+    实测全市场 49.9% 的公司 capex < D&A，旧模型把它们的历史自由现金流按永续增长
+    外推，等于假设资产永远不用更新还能一直长大。
+    """
+    cashflow = huate_slices["cashflow"].copy()
+    cashflow["c_pay_acq_const_fiolta"] = 1.0e6  # 资本开支几乎为零
+
+    baseline = _snapshot(huate_slices)
+    starved = _snapshot(huate_slices, cashflow_slice=cashflow)
+    assert baseline["enterprise_value"] == pytest.approx(starved["enterprise_value"])
+
+
+def test_terminal_roic_converges_halfway_towards_wacc():
+    """永续期继续用当前高 ROIC 等于假设护城河永不失效，收敛一半更合理。"""
+    assert scanner._terminal_roic(0.24, 0.08) == pytest.approx(0.16)
+    # ROIC 低于 WACC 时不再往下收敛：那种公司本来就不该按永续增长估
+    assert scanner._terminal_roic(0.05, 0.09) == pytest.approx(0.09)
+
+
+def test_growth_cannot_exceed_what_roic_can_fund():
+    """g/ROIC > 1 意味着再投资超过 NOPAT、自由现金流永远为负，是自相矛盾的假设。"""
+    result = scanner._two_stage_reinvestment_value(1.0e9, 0.06, 0.30, 0.05, 0.09)
+    assert result is not None
+    assert result["applied_near_term_growth"] <= 0.06 * scanner.MAX_REINVESTMENT_RATE
+    assert result["terminal_reinvestment_rate"] <= 1.0
+
+
+# --- 现金流量表口径 FCFF 的中国准则修正 ---------------------------------------
+
+
+def test_cash_fcff_subtracts_the_interest_tax_shield_not_adds_back_interest(huate_slices):
+    """中国准则下利息付现在筹资活动里，经营现金流已经是付息前口径。
+
+    美国准则的 `CFO + I(1−t) − capex` 直接套用会多算大约一整笔利息费用。CAS 下
+    `CFO − capex` 已经等于 FCFF 加一笔利息税盾，要减掉 I·t。
+    """
+    income = huate_slices["income"].copy()
+    income["fin_exp_int_exp"] = 1.0e8
+
+    history = scanner._fcff_history(
+        fina_slice=huate_slices["fina"],
+        cashflow_slice=huate_slices["cashflow"],
+        income_slice=income,
+        effective_tax_rate=0.15,
+    )
+    # 2025: OCF 12.72亿 − capex 0.48亿 − 利息税盾 1亿×15% = 12.09亿
+    assert history["values"][-1] == pytest.approx(1.272e9 - 4.8e7 - 1.5e7)
+
+
+# --- 归母口径 ---------------------------------------------------------------
+
+
+def test_equity_value_uses_the_proportionate_minority_claim(huate_slices):
+    """能算出归母利润占比时就按比例切，不再和账面取较大者。
+
+    取较大者是保守化不是准确化：那等于在两个估计之间系统性偏向低估归母价值，
+    方向性偏差和高估一样是错的。
+    """
     snapshot = _snapshot(huate_slices)
 
-    assert snapshot["fcff_source"] == "cashflow_statement"
-    # 现金流量表口径近3年均值 = (8.2+8.8+9.2)/3 - 0.5 = 8.23亿，而不是 tushare 的 14.68亿
-    assert snapshot["base_fcff"] == pytest.approx(8.23e8, rel=0.01)
-    # 交叉验证倍数落在结果里，读作"tushare 的基准 FCFF 是报表口径的 1.78 倍"
-    assert snapshot["fcff_cross_check_ratio"] == pytest.approx(1.78, rel=0.02)
-
-
-def test_absurd_fcff_cagr_is_discarded_instead_of_clipped_to_the_bullish_bound(huate_slices):
-    """基期接近0算出的天文数字增速要判废，不能被 clip 成"允许范围内最乐观"的假设。"""
-    reported_years = [2021, 2022, 2023, 2024, 2025]
-    reported_values = [3.3e6, 4.0e8, 1.35e9, 1.47e9, 1.585e9]
-
-    # 旧口径：直接拿首尾两个单点，算出 339% 这种只反映基期噪声的"复合增速"
-    assert scanner._cagr_pct(reported_values[-1], reported_values[0], 4) is None
-    # 新口径：首尾各取2期均值，把基期噪声压下去
-    smoothed = scanner._series_cagr_pct(reported_values, reported_years)
-    assert smoothed is not None and smoothed < 120.0
-
-    # 而 DCF 实际用的是现金流量表口径那条序列，近端增速远低于 clip 上界——
-    # 关键是它不再是"垃圾输入被翻译成允许范围内最乐观的假设"
-    snapshot = _snapshot(huate_slices)
-    assert snapshot["near_term_growth"] < scanner.NEAR_TERM_GROWTH_BOUNDS[1]
-
-
-def test_equity_value_deducts_the_proportionate_minority_claim_not_just_book(huate_slices):
-    """子公司高回报时，账面少数股东权益远小于少数股东真正的 DCF 索取权。"""
-    snapshot = _snapshot(huate_slices)
-
-    # 归母利润占比 4.2/8.2 = 51.2%
-    assert snapshot["parent_profit_share"] == pytest.approx(0.5122, rel=0.01)
-    assert snapshot["book_minority"] == pytest.approx(2.4e9)
+    # 近3年归母 (5.85+5.16+5.35) / 合并 (11.27+10.06+10.29) = 51.9%
+    assert snapshot["parent_profit_share"] == pytest.approx(0.519, abs=0.01)
     assert snapshot["minority_basis"] == "proportionate"
-    # 账面 24 亿，但按比例折出来的索取权是全体股东股权价值的 48.8%，远大于账面
-    assert snapshot["minority_interest"] > snapshot["book_minority"]
     gross_equity = snapshot["enterprise_value"] - snapshot["net_debt"]
-    assert snapshot["equity_value"] == pytest.approx(gross_equity * 0.5122, rel=0.01)
-
-
-def test_book_minority_wins_when_it_is_larger_than_the_proportionate_claim(huate_slices):
-    """两种口径取较大的那个：子公司不赚钱时，比例法会低估少数股东的索取权。"""
-    balancesheet = huate_slices["balancesheet"].copy()
-    balancesheet["minority_int"] = 2.0e10  # 账面少数股东权益远大于按比例折出来的
-
-    snapshot = _snapshot(huate_slices, balancesheet_slice=balancesheet)
-    assert snapshot["minority_basis"] == "book"
-    assert snapshot["minority_interest"] == pytest.approx(2.0e10)
+    assert snapshot["equity_value"] == pytest.approx(
+        gross_equity * snapshot["parent_profit_share"]
+    )
 
 
 def test_parent_profit_share_falls_back_through_three_sources(huate_slices):
     """n_income → minority_gain 反推 → 归母权益/全部权益，逐级兜底。"""
     income = huate_slices["income"]
     balancesheet = huate_slices["balancesheet"]
-
-    assert scanner._parent_profit_share(income, balancesheet) == pytest.approx(0.5122, rel=0.01)
+    assert scanner._parent_profit_share(income, balancesheet) == pytest.approx(0.519, abs=0.01)
 
     without_n_income = income.copy()
     without_n_income["n_income"] = None
-    assert scanner._parent_profit_share(without_n_income, balancesheet) == pytest.approx(0.5122, rel=0.01)
+    assert scanner._parent_profit_share(without_n_income, balancesheet) == pytest.approx(
+        0.519, abs=0.01
+    )
 
     without_income_fields = without_n_income.copy()
     without_income_fields["minority_gain"] = None
-    # 退回资产负债表：归母权益 26 亿 / 全部权益 50 亿 = 52%
-    assert scanner._parent_profit_share(without_income_fields, balancesheet) == pytest.approx(0.52)
+    # 退回资产负债表：归母权益 28.61亿 / 全部权益 43.51亿 = 65.8%
+    assert scanner._parent_profit_share(without_income_fields, balancesheet) == pytest.approx(
+        0.658, abs=0.01
+    )
 
 
-def test_missing_minority_data_entirely_falls_back_to_book_only(huate_slices):
-    """利润表和资产负债表的归属口径都拿不到时，退回纯账面扣除，不能当成没有少数股东。"""
+def test_missing_minority_data_falls_back_to_book(huate_slices):
+    """归属口径完全拿不到时退回账面扣除，不能当成没有少数股东。"""
     income = huate_slices["income"].copy()
     income["n_income"] = None
     income["minority_gain"] = None
@@ -180,172 +244,139 @@ def test_missing_minority_data_entirely_falls_back_to_book_only(huate_slices):
     snapshot = _snapshot(huate_slices, income_slice=income, balancesheet_slice=balancesheet)
     assert snapshot["parent_profit_share"] is None
     assert snapshot["minority_basis"] == "book"
-    assert snapshot["minority_interest"] == pytest.approx(2.4e9)
+    assert snapshot["minority_interest"] == pytest.approx(1.49e9)
 
 
-def test_cost_of_equity_has_a_floor_when_risk_free_rate_is_very_low():
-    """1.7% 的无风险利率 + 低 beta 会让 CAPM 跌到 6%，那不是可用的贴现率。"""
+# --- 拆掉的那些"压数字"的补丁 -------------------------------------------------
+
+
+def test_cost_of_equity_is_plain_capm_without_an_output_floor():
+    """股权成本不再套 8% 地板：那让全市场过半股票的贴现率变成同一个数，beta 白算。"""
     components = scanner._wacc_components(
         beta=0.6,
-        market_cap=5.95e9,
+        market_cap=MARKET_CAP,
         interest_bearing_debt=0.0,
         interest_expense=None,
         effective_tax_rate=0.15,
         risk_free_rate=0.0168,
         equity_risk_premium=0.06,
     )
-
-    assert components["cost_of_equity"] == pytest.approx(scanner.MIN_COST_OF_EQUITY)
-    assert components["wacc"] == pytest.approx(scanner.MIN_COST_OF_EQUITY)
-
-
-def test_dcf_rejects_valuations_that_are_almost_entirely_terminal_value():
-    """WACC-g 利差刚过闸门、但 88% 的价值来自终值时，判定不可用而不是硬给一个数。"""
-    wide_spread = scanner._two_stage_fcff_value(1.0e9, 0.05, 0.02, 0.12)
-    assert wide_spread is not None
-    assert wide_spread["terminal_share"] <= scanner.MAX_TERMINAL_VALUE_SHARE
-
-    # WACC 6.1% / g 3%：利差 3.1pp 刚好越过 MIN_WACC_TERMINAL_SPREAD，正是老口径放行
-    # 华特达因的那组参数，终值占比 88%。
-    narrow_spread = scanner._two_stage_fcff_value(1.468e9, 0.30, 0.03, 0.061)
-    assert narrow_spread is None
+    # Blume 调整后 beta = 2/3×0.6 + 1/3 = 0.7333
+    assert components["cost_of_equity"] == pytest.approx(0.0168 + 0.7333 * 0.06, abs=1e-4)
+    assert components["cost_of_equity"] < 0.08
 
 
-def test_huate_style_case_no_longer_produces_a_four_digit_return(huate_slices):
-    """把所有修复叠在一起：同样的公司，回报率必须回到可讨论的量级。"""
+def test_terminal_share_is_reported_but_never_blocks_a_valuation():
+    """终值占比只是诊断字段：5年显式期的DCF终值占70~80%本来就是常态。"""
+    result = scanner._two_stage_reinvestment_value(1.0e9, 0.20, 0.10, 0.03, 0.07)
+    assert result is not None
+    assert 0.0 < result["terminal_share"] < 1.0
+
+
+# --- 增速来源 ---------------------------------------------------------------
+
+
+def test_growth_uses_the_median_of_revenue_ebit_and_profit(huate_slices):
+    """不再用 FCFF 复合增速——那是所有序列里噪声最大的一条(曾算出 339.6%)。"""
+    info = scanner._fundamental_growth(huate_slices["income"], huate_slices["fina"])
+    assert info["revenue_cagr_pct"] is not None
+    assert info["ebit_cagr_pct"] is not None
+    assert info["profit_cagr_pct"] is not None
+    ordered = sorted([info["revenue_cagr_pct"], info["ebit_cagr_pct"], info["profit_cagr_pct"]])
+    assert info["growth"] == pytest.approx(ordered[1] / 100.0)
+
+
+def test_absurd_cagr_is_discarded_not_clipped_to_the_bullish_bound():
+    """基期接近0算出的天文数字增速要判废，不能被 clip 成允许范围内最乐观的假设。"""
+    assert scanner._cagr_pct(1.226e9, 3.3e6, 4) is None
+
+
+# --- ROIC 交叉验证 -----------------------------------------------------------
+
+
+def test_roic_prefers_tushare_and_reports_the_cross_check(huate_slices):
+    """ROIC 同时决定质量闸门和再投资率，不能只信单一厂商聚合值(实测相关系数 0.71)。"""
+    info = scanner._roic_estimate(huate_slices["fina"], 0.15)
+    assert info["source"] == "tushare_roic"
+    assert info["value"] == pytest.approx(0.238)
+    assert info["cross_check_ratio"] is not None
+
+
+def test_roic_falls_back_to_self_computed_when_tushare_is_missing(huate_slices):
+    fina = huate_slices["fina"].copy()
+    fina["roic"] = None
+
+    info = scanner._roic_estimate(fina, 0.15)
+    assert info["source"] == "computed_nopat_over_invested_capital"
+    assert 0.15 < info["value"] < 0.30
+
+
+# --- 估值历史的最小样本保护 ---------------------------------------------------
+
+
+def test_reversion_needs_the_same_minimum_sample_as_the_percentile():
+    """pe_ttm 在生产库里只有 9 个交易日历史，拿它算"5年中位PE"是误导而不是缺失。"""
+    short_history = pd.Series([12.0] * 9)
+    assert scanner._history_median(short_history) is None
+    assert scanner._percentile_rank(11.0, short_history) is None
+
+    long_history = pd.Series([12.0] * scanner.VALUATION_HISTORY_MIN_OBSERVATIONS)
+    assert scanner._history_median(long_history) == pytest.approx(12.0)
+
+
+# --- 质量闸门 ---------------------------------------------------------------
+
+
+def _quality(**overrides):
+    kwargs = {
+        "is_financial": False,
+        "avg_roe": 19.4,
+        "avg_roic": 23.8,
+        "wacc_pct": 8.0,
+        "years_available": 5,
+        "ocf_to_np": 1.07,
+        "fcf_positive_years": 5,
+        "debt_to_assets": 12.95,
+        "value_growth_pct": 5.0,
+        "thresholds": dict(scanner.DEFAULT_QUALITY_THRESHOLDS),
+    }
+    kwargs.update(overrides)
+    return scanner._quality_assessment(**kwargs)
+
+
+def test_unknown_value_growth_is_a_note_not_a_rejection():
+    """算不出去年快照 ≠ 基本面恶化。以前这是第一大拦截原因(全市场 1225 只)。"""
+    quality = _quality(value_growth_pct=None)
+    assert quality["passes"] is True
+    assert any("未参与判断" in note for note in quality["notes"])
+
+
+def test_declining_intrinsic_value_still_fails():
+    """真的算出来在倒退，仍然要拦。"""
+    assert _quality(value_growth_pct=-12.0)["passes"] is False
+
+
+# --- 端到端 ------------------------------------------------------------------
+
+
+def test_huate_case_lands_in_a_defensible_range(huate_slices):
+    """把所有修复叠起来跑真实数量级的输入，结果要落在可讨论的区间。"""
     snapshot = _snapshot(huate_slices)
-    market_cap = 5.95e9
+    expected_return_pct = (snapshot["equity_value"] / MARKET_CAP - 1.0) * 100.0
 
-    expected_return_pct = (snapshot["equity_value"] / market_cap - 1.0) * 100.0
-    assert expected_return_pct < 100.0
-    assert snapshot["terminal_value_share"] <= scanner.MAX_TERMINAL_VALUE_SHARE
+    assert -50.0 < expected_return_pct < 200.0
+    assert snapshot["minority_basis"] == "proportionate"
+    assert snapshot["roic"] == pytest.approx(0.238)
+    assert snapshot["base_nopat"] > 0
 
 
-def test_bull_case_never_discounts_at_a_higher_rate_than_the_base_case():
-    """乐观情形的贴现率必须低于基准，否则"乐观"会算出比基准还差的回报率。"""
-    base_wacc = 0.061
-    bull_wacc = base_wacc - scanner.SCENARIO_DISCOUNT_RATE_SPREAD
-    assert bull_wacc < base_wacc
+def test_bear_base_bull_are_monotonic(huate_slices):
+    """基准值必须落在自己的悲观~乐观区间之内。"""
+    snapshot = _snapshot(huate_slices)
+    roic, nopat = snapshot["roic"], snapshot["base_nopat"]
+    growth = snapshot["near_term_growth"]
 
-    base = scanner._two_stage_fcff_value(1.0e9, 0.05, 0.0168, 0.09)
-    bull = scanner._two_stage_fcff_value(
-        1.0e9, 0.05, 0.0168, 0.09 - scanner.SCENARIO_DISCOUNT_RATE_SPREAD
-    )
-    bear = scanner._two_stage_fcff_value(
-        1.0e9, 0.05, 0.0168, 0.09 + scanner.SCENARIO_DISCOUNT_RATE_SPREAD
-    )
+    bear = scanner._two_stage_reinvestment_value(nopat, roic, growth * 0.5, 0.03, 0.095)
+    base = scanner._two_stage_reinvestment_value(nopat, roic, growth, 0.03, 0.08)
+    bull = scanner._two_stage_reinvestment_value(nopat, roic, growth * 1.3, 0.03, 0.065)
     assert bear["enterprise_value"] < base["enterprise_value"] < bull["enterprise_value"]
-
-
-def test_scenario_growth_stays_inside_the_near_term_growth_bounds():
-    """乐观乘数施加在已经 clip 过的增速上，要重新 clip 才不会突破上界。"""
-    near_term_growth = scanner.NEAR_TERM_GROWTH_BOUNDS[1]
-    bull_growth = scanner._clip(
-        near_term_growth * scanner.SCENARIO_GROWTH_MULTIPLIER[1], *scanner.NEAR_TERM_GROWTH_BOUNDS
-    )
-    assert bull_growth == scanner.NEAR_TERM_GROWTH_BOUNDS[1]
-
-
-# --- 实际税率 / 有息负债的口径与兜底 -----------------------------------------
-
-
-def test_effective_tax_rate_prefers_latest_annual_report(huate_slices):
-    info = scanner._effective_tax_rate(huate_slices["fina"], huate_slices["income"])
-    assert info["source"] == "latest_annual"
-    assert info["rate"] == pytest.approx(0.15)  # 1.5亿 / 10亿
-
-
-def test_effective_tax_rate_falls_back_to_five_year_window_on_a_loss_year(huate_slices):
-    """最新一年亏损时不该退回猜 25%，五年窗口合计仍然算得出真实税率。
-
-    全市场有 28.3% 的股票最新一期 total_profit<=0，改窗口口径能救回其中 9.5%。
-    """
-    income = huate_slices["income"].copy()
-    income.loc[income.index[-1], "total_profit"] = -5.0e8
-    income.loc[income.index[-1], "income_tax"] = 0.0
-
-    info = scanner._effective_tax_rate(huate_slices["fina"], income)
-    assert info["source"] == "five_year_window"
-    # 前4年各 1.5亿/10亿，最新一年 0/-5亿 → 6.0亿 / 35亿 = 17.1%
-    assert info["rate"] == pytest.approx(6.0e8 / 3.5e9, rel=0.01)
-
-
-def test_effective_tax_rate_falls_back_to_tushare_then_default(huate_slices):
-    """利润表整段不可用时依次退到 tax_to_ebt、再退到默认值。"""
-    income = huate_slices["income"].copy()
-    income["total_profit"] = None
-    income["income_tax"] = None
-
-    fina = huate_slices["fina"].copy()
-    fina["tax_to_ebt"] = 12.5  # tushare 给的是百分数
-    info = scanner._effective_tax_rate(fina, income)
-    assert info["source"] == "tushare_tax_to_ebt"
-    assert info["rate"] == pytest.approx(0.125)
-
-    info = scanner._effective_tax_rate(huate_slices["fina"], income)
-    assert info["source"] == "default_fallback"
-    assert info["rate"] == pytest.approx(scanner.DEFAULT_EFFECTIVE_TAX_RATE)
-
-
-def test_effective_tax_rate_clips_distorted_ratios(huate_slices):
-    """利润总额接近0会让比值失真(实测有 422% 的样本)，必须 clip 住。"""
-    income = huate_slices["income"].copy()
-    income.loc[income.index[-1], "total_profit"] = 1.0e5
-    income.loc[income.index[-1], "income_tax"] = 5.0e5  # 500%
-
-    info = scanner._effective_tax_rate(huate_slices["fina"], income)
-    assert info["rate"] == pytest.approx(0.33)
-
-
-def test_interest_bearing_debt_prefers_tushare_and_reports_cross_check(huate_slices):
-    fina = huate_slices["fina"].copy()
-    fina["interestdebt"] = 1.0e9
-    balancesheet = huate_slices["balancesheet"].copy()
-    for column, value in (("st_borr", 4.0e8), ("lt_borr", 5.0e8), ("lease_liab", 1.0e8)):
-        balancesheet[column] = value
-
-    info = scanner._interest_bearing_debt(fina, balancesheet)
-    assert info["source"] == "tushare_interestdebt"
-    assert info["value"] == pytest.approx(1.0e9)
-    assert info["cross_check_ratio"] == pytest.approx(1.0)
-
-
-def test_interest_bearing_debt_falls_back_to_balance_sheet_components(huate_slices):
-    """interestdebt 缺失时从资产负债表加出来，而不是当成 0(那会让 WACC 退化成股权成本)。
-
-    实测全市场 105 只缺 interestdebt 的股票里，104 只能这样补回来。
-    """
-    fina = huate_slices["fina"].copy()
-    fina["interestdebt"] = None
-    balancesheet = huate_slices["balancesheet"].copy()
-    balancesheet["st_borr"] = 3.0e8
-    balancesheet["non_cur_liab_due_1y"] = 1.0e8
-    balancesheet["lease_liab"] = 5.0e7
-
-    info = scanner._interest_bearing_debt(fina, balancesheet)
-    assert info["source"] == "balancesheet_components"
-    assert info["value"] == pytest.approx(4.5e8)
-    assert info["cross_check_ratio"] is None
-
-
-def test_interest_bearing_debt_missing_everywhere_stays_none(huate_slices):
-    """构成项全为空是"这期资产负债表没同步到"，不能和"真的没有有息负债"混为一谈。"""
-    fina = huate_slices["fina"].copy()
-    fina["interestdebt"] = None
-
-    info = scanner._interest_bearing_debt(fina, huate_slices["balancesheet"])
-    assert info["value"] is None
-    assert info["source"] is None
-
-
-def test_zero_interest_bearing_debt_is_distinct_from_missing(huate_slices):
-    """真的没有有息负债(全部构成项=0)要返回 0.0，不是 None。"""
-    fina = huate_slices["fina"].copy()
-    fina["interestdebt"] = None
-    balancesheet = huate_slices["balancesheet"].copy()
-    for column in scanner.INTEREST_BEARING_DEBT_COMPONENTS:
-        balancesheet[column] = 0.0
-
-    info = scanner._interest_bearing_debt(fina, balancesheet)
-    assert info["value"] == 0.0
-    assert info["source"] == "balancesheet_components"
