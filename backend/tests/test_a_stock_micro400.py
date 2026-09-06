@@ -384,3 +384,28 @@ class Micro400FearGreedSourceTest(TestCase):
         for timestamp in index:
             self.assertEqual([item["symbol"] for item in holdings[timestamp]], ["MID.SZ"])
             self.assertEqual(as_of[timestamp], date(2026, 2, 2))
+
+
+class FearGreedBackfillSymbolsParameterTest(TestCase):
+    """「A股指数贪恐回跑入库」要能在前端按指数筛选，且字符串参数不能被按字符遍历。"""
+
+    def test_symbols_parameter_is_exposed_on_the_backfill_task(self):
+        from src.robot.scheduled_tasks import ScheduledTaskManager
+
+        task = ScheduledTaskManager().task_definitions["a_stock_etf_fear_greed_backfill"]
+        keys = {item.key for item in task.parameter_schema}
+        self.assertIn("symbols", keys)
+
+    def test_comma_separated_string_is_parsed_into_symbols(self):
+        from src.robot.scheduled_tasks import _parse_optional_symbol_list
+
+        self.assertEqual(
+            _parse_optional_symbol_list("MICRO400.CN, inno100.cn"),
+            ["MICRO400.CN", "INNO100.CN"],
+        )
+        self.assertEqual(
+            _parse_optional_symbol_list(["micro400.cn", "MICRO400.CN"]),
+            ["MICRO400.CN"],
+        )
+        self.assertIsNone(_parse_optional_symbol_list(""))
+        self.assertIsNone(_parse_optional_symbol_list(None))

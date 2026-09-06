@@ -97,11 +97,19 @@ def _parse_optional_task_date(value: Optional[str], field_name: str) -> Optional
         raise ValueError(f"{field_name} 必须是 YYYY-MM-DD") from exc
 
 
-def _parse_optional_symbol_list(value: Optional[str]) -> Optional[List[str]]:
-    text = str(value or "").strip()
-    if not text:
+def _parse_optional_symbol_list(value: Any) -> Optional[List[str]]:
+    """任务参数里的标的列表：UI 传的是逗号/空格分隔的字符串，代码里传的是 list。
+
+    string 类型的任务参数会原样以 str 送到 runner，直接 `for symbol in symbols`
+    会按字符遍历，所以两种形态都要在这里归一。
+    """
+    if value is None:
         return None
-    symbols = [item.strip().upper() for item in re.split(r"[\s,;]+", text) if item.strip()]
+    if isinstance(value, str):
+        items = re.split(r"[\s,;]+", value.strip())
+    else:
+        items = list(value)
+    symbols = [str(item).strip().upper() for item in items if str(item).strip()]
     return list(dict.fromkeys(symbols)) or None
 
 
@@ -635,7 +643,7 @@ def _run_a_stock_etf_fear_greed_backfill(
     history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
     score_window: int = A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
     min_periods: int = A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS,
-    symbols: Optional[List[str]] = None,
+    symbols: Optional[Any] = None,
 ):
     from ..core.services.a_stock_fear_greed_clone_service import (
         A_STOCK_FEAR_GREED_TARGETS,
@@ -649,11 +657,7 @@ def _run_a_stock_etf_fear_greed_backfill(
         output_start_date = end_value - timedelta(days=recent_days)
 
     calculation_start_date = output_start_date - timedelta(days=history_days)
-    requested_symbols = {
-        str(symbol or "").strip().upper()
-        for symbol in (symbols or [])
-        if str(symbol or "").strip()
-    }
+    requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
     targets = [
         target
         for target in A_STOCK_FEAR_GREED_TARGETS
@@ -698,15 +702,11 @@ def _run_a_stock_etf_fear_greed_backfill(
     )
 
 
-def _run_a_stock_index_valuation_refresh(symbols: Optional[List[str]] = None):
+def _run_a_stock_index_valuation_refresh(symbols: Optional[Any] = None):
     from ..core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGETS
     from ..core.services.a_stock_index_valuation import refresh_a_stock_index_valuations
 
-    requested_symbols = {
-        str(symbol or "").strip().upper()
-        for symbol in (symbols or [])
-        if str(symbol or "").strip()
-    }
+    requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
     target_symbols = [
         target["symbol"]
         for target in A_STOCK_FEAR_GREED_TARGETS
@@ -810,7 +810,7 @@ def _run_hk_index_fear_greed_backfill(
 
 
 def _run_a_stock_fear_greed_intraday(
-    symbols: Optional[List[str]] = None,
+    symbols: Optional[Any] = None,
     history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
     score_window: int = A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW,
     min_periods: int = A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS,
@@ -824,11 +824,7 @@ def _run_a_stock_fear_greed_intraday(
     if not _is_china_trading_day(today_shanghai):
         return f"跳过A股盘中贪恐快照: {today_shanghai} 不是A股交易日"
 
-    requested_symbols = {
-        str(symbol or "").strip().upper()
-        for symbol in (symbols or [])
-        if str(symbol or "").strip()
-    }
+    requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
     all_symbols = sorted(A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL)
     # 无实时指数源且无场内代理ETF的标的（创新100/微盘400自算指数、北证50）不做盘中计算。
     intraday_unsupported_symbols = {"INNO100.CN", "MICRO400.CN", "899050.BJ"}
@@ -1507,6 +1503,13 @@ class ScheduledTaskManager:
                         step=1,
                         suffix="天",
                         description="未填写输出开始日期时，回写最近多少个自然日。",
+                    ),
+                    TaskParameterDefinition(
+                        key="symbols",
+                        label="指数列表",
+                        value_type="string",
+                        default="",
+                        description="可选，逗号/空格分隔，例如 MICRO400.CN,INNO100.CN；为空时计算全部A股指数。",
                     ),
                 ),
             ),

@@ -211,6 +211,7 @@ class XueqiuTokenMonitorTest(TestCase):
                 "start_date",
                 "end_date",
                 "recent_days",
+                "symbols",
             },
             "a_stock_index_valuation_refresh": set(),
             "a_stock_fear_greed_intraday": {"symbols"},
