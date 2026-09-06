@@ -187,8 +187,14 @@ def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
         assert symbol in pools
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
-        # 两条指数都没有自己的ETF期权，借中证500/创业板ETF期权做风险偏好代理。
-        assert target["option_underlyings"] == ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"]
+
+    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，只能借代理。
+    assert targets_by_symbol["000852.SH"]["option_underlyings"] == ["OP000852.SH"]
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
+        "OP510500.SH",
+        "OP159922.SZ",
+        "OP159915.SZ",
+    ]
 
 
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
@@ -246,3 +252,12 @@ def test_additional_industry_targets_are_complete_and_unique():
     for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS:
         assert item["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[item["proxy_etf"]]
+
+
+def test_option_sync_covers_cffex_index_options():
+    """中金所股指期权（IO/MO/HO）的 opt_code 与 ETF 期权同形，同步范围要带上 CFFEX。"""
+    from src.core.services.tushare import OPTION_SUPPORTED_EXCHANGES
+    from src.robot.a_stock_base_data_sync import A_STOCK_OPTION_DAILY_SYNC_EXCHANGES
+
+    assert "CFFEX" in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES
+    assert set(A_STOCK_OPTION_DAILY_SYNC_EXCHANGES) <= OPTION_SUPPORTED_EXCHANGES

@@ -64,9 +64,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证1000",
         "label": "中证1000",
         "index_name": "中证1000指数",
-        # 中证1000只有中金所股指期权(MO)，我们只同步沪深两市的ETF期权，
-        # 所以和微盘400一样借中证500/创业板ETF期权的PCR当风险偏好代理。
-        "option_underlyings": ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        # 中金所中证1000股指期权(MO)，2022-07-22 上市，是这条指数自己的期权。
+        "option_underlyings": ["OP000852.SH"],
         "proxy_etf": "512100.SH",
     },
     {
@@ -74,6 +73,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证2000",
         "label": "中证2000",
         "index_name": "中证2000指数",
+        # 中证2000没有任何自己的期权，借中证500/创业板ETF期权的PCR当风险偏好代理。
         "option_underlyings": ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
         "proxy_etf": "563300.SH",
     },
