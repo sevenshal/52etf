@@ -40,6 +40,8 @@ export const CN_GENERAL_GROUPS = [
       cnOption('399006.SZ', '创业板指', '宽基'),
       cnOption('000015.SH', '上证红利', '风格'),
       cnOption('H30269.CSI', '红利低波', '风格'),
+      // 自算指数，没有场内产品也没有实时点位源，不做盘中刷新。
+      cnOption('MICRO400.CN', '微盘400', '微盘股', { realtime: false }),
     ],
   },
 ];

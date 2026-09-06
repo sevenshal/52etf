@@ -264,6 +264,59 @@ class AStockInnovation100Constituent(Base):
     action = Column(String(16), index=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 
+class AStockMicro400Level(Base):
+    """A股微盘400指数每日点位。"""
+    __tablename__ = "a_stock_micro400_levels"
+
+    index_code = Column(String(32), primary_key=True)
+    date = Column(Date, primary_key=True)
+    level = Column(Float, nullable=False)
+    daily_return_pct = Column(Float)
+    drawdown_pct = Column(Float)
+    constituent_count = Column(Integer)
+    total_mv = Column(Float)
+    total_circ_mv = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class AStockMicro400Rebalance(Base):
+    """A股微盘400月度调样记录。"""
+    __tablename__ = "a_stock_micro400_rebalances"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    index_code = Column(String(32), index=True, nullable=False)
+    rebalance_date = Column(Date, index=True, nullable=False)
+    effective_date = Column(Date, index=True)
+    rebalance_type = Column(String(32), index=True, nullable=False)
+    constituent_count = Column(Integer)
+    turnover_pct = Column(Float)
+    total_mv = Column(Float)
+    total_circ_mv = Column(Float)
+    additions = Column(JSON)
+    removals = Column(JSON)
+    rule_snapshot = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+class AStockMicro400Constituent(Base):
+    """A股微盘400每次调样后的成分股权重。"""
+    __tablename__ = "a_stock_micro400_constituents"
+
+    index_code = Column(String(32), primary_key=True)
+    rebalance_id = Column(Integer, ForeignKey("a_stock_micro400_rebalances.id"), primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    rebalance_date = Column(Date, index=True, nullable=False)
+    effective_date = Column(Date, index=True)
+    name = Column(String(64))
+    industry = Column(String(64), index=True)
+    rank = Column(Integer)
+    raw_weight_pct = Column(Float)
+    weight_pct = Column(Float)
+    total_mv = Column(Float)
+    circ_mv = Column(Float)
+    avg_amount_60d = Column(Float)
+    action = Column(String(16), index=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
 class InvalidSymbolCache(Base):
     """持久化缓存外部行情源返回的无效标的。"""
     __tablename__ = 'invalid_symbol_cache'

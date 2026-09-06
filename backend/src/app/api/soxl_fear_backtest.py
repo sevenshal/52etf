@@ -73,13 +73,11 @@ def _a_stock_fear_label(target: Dict[str, Any]) -> str:
 
 
 def _build_a_stock_fear_sources() -> Dict[str, Dict[str, Any]]:
-    inno100_target = {
-        "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
-        "ticker": "A创100",
-        "label": "A创100",
-    }
+    # 自算指数（A创100、微盘400）和公开指数统一从贪恐目标清单来，新增指数不用再改这里。
+    from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGETS
+
     sources: Dict[str, Dict[str, Any]] = {}
-    for target in [inno100_target, *A_STOCK_INDEX_FEAR_GREED_TARGETS]:
+    for target in A_STOCK_FEAR_GREED_TARGETS:
         symbol = _normalize_symbol(target["symbol"])
         sources[_fear_source_key_for_symbol(symbol)] = {
             "label": _a_stock_fear_label(target),

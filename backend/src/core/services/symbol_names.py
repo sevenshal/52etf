@@ -14,6 +14,7 @@ ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analyti
 
 SYMBOL_NAME_FALLBACKS = {
     "INNO100.CN": "A股创新100",
+    "MICRO400.CN": "A股微盘400",
     "CNN*.US": "CNN Fear & Greed",
     "SPY.US": "标普500ETF",
     "QQQ.US": "纳斯达克100ETF",

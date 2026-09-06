@@ -118,8 +118,12 @@ def _fear_source_label(fear_source: str) -> str:
     for target in A_STOCK_INDEX_FEAR_GREED_TARGETS:
         if str(target["symbol"]).upper() == symbol:
             return f"{target.get('ticker') or target.get('label') or symbol} 指数贪恐"
-    if symbol == A_STOCK_INNO100_FEAR_SYMBOL:
-        return "A创100 指数贪恐"
+    custom_index_labels = {
+        A_STOCK_INNO100_FEAR_SYMBOL: "A创100 指数贪恐",
+        "MICRO400.CN": "微盘400 指数贪恐",
+    }
+    if symbol in custom_index_labels:
+        return custom_index_labels[symbol]
     return f"{symbol} 贪恐"
 
 
