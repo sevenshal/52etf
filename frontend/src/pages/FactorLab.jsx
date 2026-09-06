@@ -39,6 +39,7 @@ import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
 import AStockInnovation100 from './AStockInnovation100';
+import AStockMicro400 from './AStockMicro400';
 import AStockFundFlow from './AStockFundFlow';
 import ValuationSimulation from './ValuationSimulation';
 import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
@@ -56,6 +57,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'backtest', label: '因子回测' },
   { key: 'valuation-sim', label: '估值模拟盘' },
   { key: 'innovation100', label: 'A创100' },
+  { key: 'micro400', label: '微盘400' },
   { key: 'fund-flow', label: '资金流向' },
   { key: 'xueqiu-holdings', label: '雪球持仓' },
   { key: 'eastmoney-holdings', label: '东方财富' },
@@ -3088,6 +3090,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const isLiveTab = activeTab === 'live';
   const isValuationSimTab = activeTab === 'valuation-sim';
   const isInnovationTab = activeTab === 'innovation100';
+  const isMicro400Tab = activeTab === 'micro400';
   const isFundFlowTab = activeTab === 'fund-flow';
   const isXueqiuHoldingsTab = activeTab === 'xueqiu-holdings';
   const isEastmoneyHoldingsTab = activeTab === 'eastmoney-holdings';
@@ -3214,7 +3217,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               <h1>研究</h1>
               <Tag color="blue">{activeTabLabel}</Tag>
             </div>
-            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && (
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && (
               <Space className="factor-lab-actions">
                 <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3223,6 +3226,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               </Space>
             )}
             {isInnovationTab && <div id="factor-lab-innovation100-actions" className="factor-lab-innovation-actions" />}
+            {isMicro400Tab && <div id="factor-lab-micro400-actions" className="factor-lab-innovation-actions" />}
           </div>
 
           <div className="factor-lab-tab-strip">
@@ -3252,6 +3256,8 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       {activeTab === 'db' && <DatabaseManager />}
 
       {activeTab === 'innovation100' && <AStockInnovation100 embedded />}
+
+      {activeTab === 'micro400' && <AStockMicro400 embedded />}
 
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
 

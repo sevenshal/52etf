@@ -18,6 +18,9 @@ from ..database import (
     AStockInnovation100Constituent,
     AStockInnovation100Level,
     AStockInnovation100Rebalance,
+    AStockMicro400Constituent,
+    AStockMicro400Level,
+    AStockMicro400Rebalance,
     ETFFearGreedCloneHistory,
     Session,
 )
@@ -40,9 +43,45 @@ A_STOCK_INNO100_TARGET = {
     "label": "A创100",
     "index_name": "A股创新100",
     "option_underlyings": list(A_STOCK_INNO100_OPTION_UNDERLYINGS),
-    "custom_inno100": True,
 }
-A_STOCK_FEAR_GREED_TARGETS = [A_STOCK_INNO100_TARGET, *A_STOCK_INDEX_FEAR_GREED_TARGETS]
+
+A_STOCK_MICRO400_FEAR_SYMBOL = "MICRO400.CN"
+# 微盘股没有自己的场内期权，借中证500/创业板 ETF 期权的 PCR 当风险偏好代理，和 A创100 同样处理。
+A_STOCK_MICRO400_OPTION_UNDERLYINGS = (
+    "OP510500.SH",
+    "OP159922.SZ",
+    "OP159915.SZ",
+)
+A_STOCK_MICRO400_TARGET = {
+    "symbol": A_STOCK_MICRO400_FEAR_SYMBOL,
+    "ticker": "微盘400",
+    "label": "微盘400",
+    "index_name": "A股微盘400",
+    "option_underlyings": list(A_STOCK_MICRO400_OPTION_UNDERLYINGS),
+}
+
+# 自算指数：点位和成分快照落在主库自己的表里，而不是 DuckDB 的 a_stock_index_daily /
+# a_stock_index_weight。新增自算指数时在这里登记三张表即可。
+CUSTOM_INDEX_SOURCES: Dict[str, Dict[str, Any]] = {
+    A_STOCK_INNO100_FEAR_SYMBOL: {
+        "level": AStockInnovation100Level,
+        "rebalance": AStockInnovation100Rebalance,
+        "constituent": AStockInnovation100Constituent,
+        "refresh_task": "A股创新100指数刷新",
+    },
+    A_STOCK_MICRO400_FEAR_SYMBOL: {
+        "level": AStockMicro400Level,
+        "rebalance": AStockMicro400Rebalance,
+        "constituent": AStockMicro400Constituent,
+        "refresh_task": "A股微盘400指数刷新",
+    },
+}
+
+A_STOCK_FEAR_GREED_TARGETS = [
+    A_STOCK_INNO100_TARGET,
+    A_STOCK_MICRO400_TARGET,
+    *A_STOCK_INDEX_FEAR_GREED_TARGETS,
+]
 A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL = {
     str(item["symbol"]).upper(): item
     for item in A_STOCK_FEAR_GREED_TARGETS
@@ -121,7 +160,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         if option_underlyings is None:
             option_underlyings = A_STOCK_INNO100_OPTION_UNDERLYINGS
         self.option_underlyings = tuple(option_underlyings)
-        self.custom_inno100 = bool(self.target.get("custom_inno100"))
+        self.custom_index_source = CUSTOM_INDEX_SOURCES.get(self.index_code)
 
     def calculate_history(
         self,
@@ -371,7 +410,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             now_value = now_value.astimezone(shanghai)
         today = now_value.date()
 
-        if self.custom_inno100:
+        if self.custom_index_source:
             raise FearGreedCloneError(f"{self.label} 无实时指数源，暂不支持盘中计算")
 
         end_value = today
@@ -638,19 +677,20 @@ class AStockInnovation100FearGreedCloneCalculator:
         return market_frames
 
     def _load_levels(self, start_date: date, end_date: date) -> pd.DataFrame:
-        if not self.custom_inno100:
+        if not self.custom_index_source:
             return self._load_duckdb_index_levels(start_date, end_date)
 
+        level_model = self.custom_index_source["level"]
         db = Session()
         try:
             rows = (
-                db.query(AStockInnovation100Level)
+                db.query(level_model)
                 .filter(
-                    AStockInnovation100Level.index_code == A_STOCK_INNO100_INDEX_CODE,
-                    AStockInnovation100Level.date >= start_date,
-                    AStockInnovation100Level.date <= end_date,
+                    level_model.index_code == self.index_code,
+                    level_model.date >= start_date,
+                    level_model.date <= end_date,
                 )
-                .order_by(AStockInnovation100Level.date.asc())
+                .order_by(level_model.date.asc())
                 .all()
             )
         finally:
@@ -713,30 +753,48 @@ class AStockInnovation100FearGreedCloneCalculator:
         if index.empty:
             return {}, {}
 
-        if not self.custom_inno100:
+        if not self.custom_index_source:
             return self._build_duckdb_index_weight_holdings_by_date(index)
 
+        rebalance_model = self.custom_index_source["rebalance"]
+        constituent_model = self.custom_index_source["constituent"]
+        window_start = index.min().date()
+        window_end = index.max().date()
         db = Session()
         try:
-            rebalances = (
-                db.query(AStockInnovation100Rebalance)
+            # 只取覆盖本次计算窗口的快照：窗口开始时已生效的那一期，加上窗口内的全部调仓。
+            # 日/月频调仓的自算指数成分表会长到几十万行，不能无下界地全表读进内存。
+            active_at_start = (
+                db.query(rebalance_model.effective_date)
                 .filter(
-                    AStockInnovation100Rebalance.index_code == A_STOCK_INNO100_INDEX_CODE,
-                    AStockInnovation100Rebalance.rebalance_date <= index.max().date(),
+                    rebalance_model.index_code == self.index_code,
+                    rebalance_model.effective_date <= window_start,
                 )
+                .order_by(rebalance_model.effective_date.desc())
+                .first()
+            )
+            filters = [
+                rebalance_model.index_code == self.index_code,
+                rebalance_model.rebalance_date <= window_end,
+            ]
+            if active_at_start and active_at_start[0]:
+                filters.append(rebalance_model.effective_date >= active_at_start[0])
+            rebalances = (
+                db.query(rebalance_model)
+                .filter(*filters)
                 .order_by(
-                    AStockInnovation100Rebalance.effective_date.asc(),
-                    AStockInnovation100Rebalance.rebalance_date.asc(),
-                    AStockInnovation100Rebalance.id.asc(),
+                    rebalance_model.effective_date.asc(),
+                    rebalance_model.rebalance_date.asc(),
+                    rebalance_model.id.asc(),
                 )
                 .all()
             )
             rebalance_ids = [row.id for row in rebalances]
             constituent_rows = (
-                db.query(AStockInnovation100Constituent)
+                db.query(constituent_model)
                 .filter(
-                    AStockInnovation100Constituent.index_code == A_STOCK_INNO100_INDEX_CODE,
-                    AStockInnovation100Constituent.rebalance_id.in_(rebalance_ids),
+                    constituent_model.index_code == self.index_code,
+                    constituent_model.rebalance_id.in_(rebalance_ids),
                 )
                 .all()
                 if rebalance_ids
@@ -782,7 +840,10 @@ class AStockInnovation100FearGreedCloneCalculator:
                 holdings_as_of_by_date[timestamp] = current_as_of
 
         if not holdings_by_date:
-            raise FearGreedCloneError(f"{self.label} constituent snapshots are empty; run A股创新100指数刷新 first")
+            refresh_task = self.custom_index_source.get("refresh_task") or f"{self.label}指数刷新"
+            raise FearGreedCloneError(
+                f"{self.label} constituent snapshots are empty; run {refresh_task} first"
+            )
         return holdings_by_date, holdings_as_of_by_date
 
     def _build_duckdb_index_weight_holdings_by_date(

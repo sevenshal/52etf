@@ -605,6 +605,29 @@ def _run_a_stock_innovation100_rebuild(
     )
 
 
+def _run_a_stock_micro400_rebuild(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    full_rebuild: bool = False,
+):
+    from ..app.api.a_stock_micro400 import rebuild_a_stock_micro400_for_scheduler
+
+    result = rebuild_a_stock_micro400_for_scheduler(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        full_rebuild=full_rebuild,
+    )
+    logging.getLogger("ScheduledTaskManager").info(
+        "A stock micro400 refreshed: mode=%s, status=%s, latest_date=%s, latest_level=%s, levels_saved=%s, rebalances_saved=%s",
+        result.get("mode"),
+        result.get("status"),
+        result.get("latest_date"),
+        result.get("latest_level"),
+        result.get("levels_saved"),
+        result.get("rebalances_saved"),
+    )
+
+
 def _run_a_stock_etf_fear_greed_backfill(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -807,8 +830,8 @@ def _run_a_stock_fear_greed_intraday(
         if str(symbol or "").strip()
     }
     all_symbols = sorted(A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL)
-    # 无实时指数源且无场内代理ETF的标的（创新100自定义指数、北证50）不做盘中计算。
-    intraday_unsupported_symbols = {"INNO100.CN", "899050.BJ"}
+    # 无实时指数源且无场内代理ETF的标的（创新100/微盘400自算指数、北证50）不做盘中计算。
+    intraday_unsupported_symbols = {"INNO100.CN", "MICRO400.CN", "899050.BJ"}
     target_symbols = [
         symbol
         for symbol in all_symbols
@@ -1416,6 +1439,38 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=False,
                         description="开启后清理并重建创新100结果；默认只增量刷新。",
+                    ),
+                ),
+            ),
+            "a_stock_micro400_rebuild": TaskDefinition(
+                task_key="a_stock_micro400_rebuild",
+                name="A股微盘400指数刷新",
+                description="刷新自算微盘400指数（对齐万得微盘股指数868008.WI口径）的点位、成分股权重和月度调样记录。",
+                default_time="18:35",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_a_stock_micro400_rebuild,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；填写后执行全量重建并从该日期输出。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时刷新到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="full_rebuild",
+                        label="全量重建",
+                        value_type="boolean",
+                        default=False,
+                        description="开启后清理并重建微盘400结果；默认只增量刷新。",
                     ),
                 ),
             ),
