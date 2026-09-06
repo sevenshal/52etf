@@ -86,12 +86,25 @@ const expandedRowRender = record => {
         { key: 'roe', label: '近5年平均ROE', children: formatPercent(record.avg_roe_pct) },
         { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
         { key: 'beta', label: 'Beta', children: formatNumber(record.beta) },
+        { key: 'roe_used', label: '采用ROE(加权平均)', children: formatPercent(record.financial_roe_pct) },
         { key: 'justified_pb', label: '合理市净率 fair P/B', children: formatNumber(record.justified_pb) },
         { key: 'pb', label: '当前PB', children: formatNumber(record.pb) },
         {
+          key: 'implied_roe',
+          label: '市场隐含可持续ROE',
+          children: formatPercent(record.implied_sustainable_roe_pct),
+        },
+        {
+          key: 'roe_gap',
+          label: '财报ROE − 市场隐含ROE',
+          children: <SignedPercent value={record.roe_vs_implied_gap_pct} />,
+        },
+        {
           key: 'method',
           label: '估值方法',
-          children: 'fair P/B = (ROE−永续增长率)/(股权成本−永续增长率)，银行/保险/证券的FCFF不适用DCF',
+          children: `剩余收益模型 P/B = 1 + Σ(ROE_t − 股权成本)×(1+g)^(t-1)/(1+r)^t，ROE 在 ${
+            record.excess_return_fade_years ?? 10
+          } 年内线性衰减到股权成本。金融机构的FCFF不适用DCF；该框架捕捉不到市场对资产质量的定价，「财报ROE − 市场隐含ROE」的差距就是需要人工判断的部分，结果不可直接采信。`,
         },
       ]
     : [

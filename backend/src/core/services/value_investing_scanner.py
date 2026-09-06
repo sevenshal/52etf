@@ -112,6 +112,8 @@ VALUATION_HISTORY_MIN_OBSERVATIONS = 20
 # 这时该判定"这个增速不可用"，而不是 clip 到 NEAR_TERM_GROWTH_BOUNDS 的上界——
 # 后者等于把一个明显的垃圾值直接翻译成"允许范围内最乐观的增长假设"。
 MAX_PLAUSIBLE_CAGR_PCT = 100.0
+# 金融股剩余收益模型里 ROE 向股权成本衰减的年数(超额回报的竞争存续期)。
+FINANCIAL_EXCESS_RETURN_FADE_YEARS = 10
 # ROIC 交叉验证：tushare 的 roic 与自算 EBIT×(1-税率)/全部投入资本，实测相关系数
 # 只有 0.710(中位 5.30% vs 5.16%)。质量闸门和再投资口径都建立在 ROIC 上，两者分歧
 # 过大时把倍数输出到结果里供人工判断。
@@ -656,17 +658,80 @@ def _two_stage_reinvestment_value(
     }
 
 
-def _justified_pb(avg_roe_frac: Optional[float], cost_of_equity: Optional[float], terminal_growth: float) -> Optional[float]:
-    """银行/保险/证券的"合理市净率"模型：fair P/B = (ROE-g)/(r-g)。
+def _excess_return_discount_factor(cost_of_equity: float, growth: float, years: int) -> float:
+    """Σ_{t=1..N} (1+g)^(t-1) / (1+r)^t —— 剩余收益的折现因子之和。
 
-    FCFF DCF 对金融类公司不适用(存贷款不是资本开支/营运资金变动)，
-    这是分析师覆盖银行/险资时的标准替代框架，直接用 ROE 和股权成本算合理估值。
+    账面价值按 g 增长，超额收益按 r 折现。抽出来是因为它同时被"算合理市净率"和
+    "从当前股价反推市场隐含ROE"两个方向用到，必须是同一个数。
     """
-    if avg_roe_frac is None or cost_of_equity is None:
+    factor = 0.0
+    for step in range(1, years + 1):
+        factor += ((1.0 + growth) ** (step - 1)) / ((1.0 + cost_of_equity) ** step)
+    return factor
+
+
+def _residual_income_pb(
+    roe_frac: Optional[float],
+    cost_of_equity: Optional[float],
+    growth: float,
+    fade_years: int = FINANCIAL_EXCESS_RETURN_FADE_YEARS,
+) -> Optional[float]:
+    """金融类公司的合理市净率：剩余收益(超额收益)模型。
+
+        P/B = 1 + Σ_{t=1..N} (ROE_t − r) × (1+g)^(t-1) / (1+r)^t
+
+    **为什么不再用 `fair P/B = (ROE−g)/(r−g)`**：那个 Gordon 形式本身没错，错在它对
+    银行完全没有分辨力。实测银行 beta 低，CAPM 股权成本只有 5~7%，配 3% 的永续增长，
+    分母 `r−g` 只剩 1.4~2.4 个百分点——r 或 g 差 50bp，合理市净率就动 25%。用一个
+    对输入如此敏感的公式给全市场银行排序，输出的精度是假的(实测算出 3~4 倍市净率，
+    而中国银行股长期在 0.6 倍交易，一度让三只银行占据扫描榜前列)。
+
+    剩余收益模型锚定在账面价值上：`P/B = 1 + 超额收益的现值`。ROE 等于股权成本时
+    P/B 正好是 1，不存在会爆炸的分母，对输入的敏感度是线性而非双曲的。
+
+    ROE 在 `fade_years` 年内从当前水平**线性衰减到股权成本**：竞争会侵蚀超额回报，
+    假设一家银行永远赚 r 以上是没有依据的。衰减完成后超额收益为零，所以没有终值项
+    ——这也是这个模型比 Gordon 形式稳健的地方，价值不依赖于对第 N 年之后的假设。
+    """
+    if roe_frac is None or cost_of_equity is None or fade_years <= 0:
         return None
-    if cost_of_equity - terminal_growth < MIN_WACC_TERMINAL_SPREAD:
+    if cost_of_equity <= 0:
         return None
-    return (avg_roe_frac - terminal_growth) / (cost_of_equity - terminal_growth)
+
+    book_value = 1.0
+    present_value = 0.0
+    for step in range(1, fade_years + 1):
+        # 第 step 年的 ROE：从当前水平线性衰减到股权成本
+        weight = step / fade_years
+        roe_t = roe_frac + (cost_of_equity - roe_frac) * weight
+        present_value += (roe_t - cost_of_equity) * book_value / ((1.0 + cost_of_equity) ** step)
+        book_value *= (1.0 + growth)
+    return 1.0 + present_value
+
+
+def _implied_sustainable_roe(
+    current_pb: Optional[float],
+    cost_of_equity: Optional[float],
+    growth: float,
+    fade_years: int = FINANCIAL_EXCESS_RETURN_FADE_YEARS,
+) -> Optional[float]:
+    """从当前市净率反推市场隐含的可持续 ROE(小数)。
+
+    把剩余收益公式倒过来解(假设 ROE 在整个窗口内保持不变)：
+        P/B = 1 + (ROE − r) × Σ(1+g)^(t-1)/(1+r)^t   ⟹   ROE = r + (P/B − 1) / Σ
+
+    这是这一版对金融股最有用的输出。模型和市场分歧巨大时，与其硬给一个"合理市净率
+    是账面的 3 倍"的结论，不如告诉使用者**市场到底在假设什么**：中国银行股在 0.6 倍
+    市净率交易，隐含的可持续 ROE 往往只有个位数甚至更低，远低于财报上报出来的十几个
+    点。差距就是市场对资产质量/隐性风险的定价——那部分是纯 CAPM+ROE 框架看不见的，
+    需要人工判断，而不是让模型假装它不存在。
+    """
+    if current_pb is None or current_pb <= 0 or cost_of_equity is None or cost_of_equity <= 0:
+        return None
+    factor = _excess_return_discount_factor(cost_of_equity, growth, fade_years)
+    if factor <= 0:
+        return None
+    return cost_of_equity + (current_pb - 1.0) / factor
 
 
 def _annual_values_by_year(frame: Optional[pd.DataFrame], column: str) -> Dict[int, float]:
@@ -954,6 +1019,7 @@ def _intrinsic_value_snapshot(
         "terminal_roic": None,
         "terminal_reinvestment_rate": None,
         "justified_pb": None,
+        "financial_roe": None,
         "base_nopat": None,
         "roic": None,
         "roic_source": None,
@@ -979,7 +1045,10 @@ def _intrinsic_value_snapshot(
                 avg_roe = sum(values.values()) / len(values)
                 break
         avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
-        result["justified_pb"] = _justified_pb(avg_roe_frac, cost_of_equity, terminal_growth_rate)
+        result["financial_roe"] = avg_roe_frac
+        result["justified_pb"] = _residual_income_pb(
+            avg_roe_frac, cost_of_equity, terminal_growth_rate
+        )
         if result["justified_pb"] is None:
             result["unavailable_reason"] = "股权成本或ROE数据不足，无法估算合理市净率"
         return result
@@ -1431,6 +1500,13 @@ def screen_value_investing_candidates(
         expected_return_pct = None
         expected_return_pct_bear = None
         expected_return_pct_bull = None
+        # 从当前市净率反推市场隐含的可持续 ROE：模型和市场分歧大时，这个数比"合理
+        # 市净率是账面的几倍"有用得多——它直接说出市场在假设什么。
+        implied_roe = (
+            _implied_sustainable_roe(pb, cost_of_equity, effective_terminal_growth)
+            if is_financial
+            else None
+        )
         dcf_unavailable_reason = current_snapshot["unavailable_reason"]
         justified_pb = current_snapshot["justified_pb"]
         dcf_enterprise_value = current_snapshot["enterprise_value"]
@@ -1442,14 +1518,14 @@ def screen_value_investing_candidates(
         fcf_yield_pct = None
 
         if is_financial:
-            avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
+            avg_roe_frac = current_snapshot["financial_roe"]
             if justified_pb is not None and pb and pb > 0:
                 expected_return_pct = (justified_pb / pb - 1.0) * 100.0
                 if cost_of_equity is not None:
-                    bear_pb = _justified_pb(
+                    bear_pb = _residual_income_pb(
                         avg_roe_frac, cost_of_equity + SCENARIO_DISCOUNT_RATE_SPREAD, effective_terminal_growth
                     )
-                    bull_pb = _justified_pb(
+                    bull_pb = _residual_income_pb(
                         avg_roe_frac, cost_of_equity - SCENARIO_DISCOUNT_RATE_SPREAD, effective_terminal_growth
                     )
                     expected_return_pct_bear = (bear_pb / pb - 1.0) * 100.0 if bear_pb is not None else None
@@ -1596,6 +1672,20 @@ def screen_value_investing_candidates(
                 ),
                 "dcf_equity_value_yi": safe_float(dcf_equity_value / 1e8, 2) if dcf_equity_value else None,
                 "justified_pb": safe_float(justified_pb, 2),
+                "financial_roe_pct": (
+                    safe_float(current_snapshot["financial_roe"] * 100.0, 2)
+                    if current_snapshot["financial_roe"] is not None
+                    else None
+                ),
+                "implied_sustainable_roe_pct": (
+                    safe_float(implied_roe * 100.0, 2) if implied_roe is not None else None
+                ),
+                "roe_vs_implied_gap_pct": (
+                    safe_float((current_snapshot["financial_roe"] - implied_roe) * 100.0, 2)
+                    if implied_roe is not None and current_snapshot["financial_roe"] is not None
+                    else None
+                ),
+                "excess_return_fade_years": FINANCIAL_EXCESS_RETURN_FADE_YEARS if is_financial else None,
                 "market_cap_yi": safe_float(market_cap_yuan / 1e8, 2) if market_cap_yuan else None,
                 "dcf_unavailable_reason": dcf_unavailable_reason,
                 "expected_return_pct": safe_float(expected_return_pct, 1),

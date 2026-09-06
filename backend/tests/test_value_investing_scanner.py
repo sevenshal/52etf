@@ -380,3 +380,60 @@ def test_bear_base_bull_are_monotonic(huate_slices):
     base = scanner._two_stage_reinvestment_value(nopat, roic, growth, 0.03, 0.08)
     bull = scanner._two_stage_reinvestment_value(nopat, roic, growth * 1.3, 0.03, 0.065)
     assert bear["enterprise_value"] < base["enterprise_value"] < bull["enterprise_value"]
+
+
+# --- 金融股：剩余收益模型 -----------------------------------------------------
+
+
+def test_residual_income_pb_is_exactly_one_when_roe_equals_cost_of_equity():
+    """不赚超额收益的公司就值账面价值——模型必须在这一点上精确。"""
+    assert scanner._residual_income_pb(0.066, 0.066, 0.03) == pytest.approx(1.0)
+
+
+def test_residual_income_pb_is_far_less_sensitive_than_the_gordon_form():
+    """换模型的理由就是这个：Gordon 形式对银行没有分辨力。
+
+    银行 beta 低导致股权成本只有 5~7%，配 3% 永续增长，`(ROE−g)/(r−g)` 的分母只剩
+    1.4~2.4 个百分点，r 差 50bp 结果就动 25%——输出的精度是假的。
+    """
+    def gordon(roe, r, g):
+        return (roe - g) / (r - g)
+
+    roe, g = 0.135, 0.03
+    gordon_swing = abs(gordon(roe, 0.071, g) / gordon(roe, 0.061, g) - 1)
+    residual_swing = abs(
+        scanner._residual_income_pb(roe, 0.071, g) / scanner._residual_income_pb(roe, 0.061, g) - 1
+    )
+    assert gordon_swing > 0.20
+    assert residual_swing < 0.06
+
+
+def test_residual_income_pb_rises_with_roe_but_stays_bounded():
+    """ROE 越高市净率越高，但不会像 Gordon 形式那样冲到 3~4 倍。"""
+    low = scanner._residual_income_pb(0.08, 0.066, 0.03)
+    high = scanner._residual_income_pb(0.16, 0.066, 0.03)
+    assert low < high < 2.0
+
+
+def test_roe_below_cost_of_equity_gives_pb_under_one():
+    """赚不回股权成本的银行应该低于账面价值。"""
+    assert scanner._residual_income_pb(0.04, 0.066, 0.03) < 1.0
+
+
+def test_implied_roe_inverts_the_residual_income_formula():
+    """从市净率反推的隐含ROE，代回公式要能还原出同一个市净率。"""
+    implied = scanner._implied_sustainable_roe(0.6, 0.066, 0.03)
+    assert implied is not None
+    # 反推假设 ROE 在窗口内保持不变，所以代回时不能走衰减路径，直接用折现因子还原
+    factor = scanner._excess_return_discount_factor(0.066, 0.03, scanner.FINANCIAL_EXCESS_RETURN_FADE_YEARS)
+    assert 1.0 + (implied - 0.066) * factor == pytest.approx(0.6)
+
+
+def test_implied_roe_exposes_how_much_the_market_disbelieves_reported_roe():
+    """中国银行股 0.6 倍市净率隐含的可持续ROE只有个位数，远低于财报上的十几个点。
+
+    这个差距就是市场对资产质量/隐性风险的定价——纯 CAPM+ROE 框架看不见的部分。
+    与其硬给一个"合理市净率是账面3倍"的结论，不如把市场的假设摆出来。
+    """
+    implied = scanner._implied_sustainable_roe(0.6, 0.066, 0.03)
+    assert implied < 0.05
