@@ -298,16 +298,6 @@ def _market_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     return valuation_rows / row_count < 0.7
 
 
-def _option_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
-    if not day_stats:
-        return True
-    row_count = int(day_stats.get("row_count") or 0)
-    if row_count <= 0:
-        return True
-    exchange_count = int(day_stats.get("exchange_count") or 0)
-    return exchange_count < len(A_STOCK_OPTION_DAILY_SYNC_EXCHANGES)
-
-
 def _repo_day_needs_refresh(day_stats: Optional[Dict]) -> bool:
     if not day_stats:
         return True
@@ -918,12 +908,13 @@ class AStockBaseDataSyncService:
                 if not frame.empty:
                     self._upsert_market_frame(frame)
 
-    def _latest_option_date_by_exchange(self) -> Dict[str, date]:
+    def _option_first_listing_by_exchange(self) -> Dict[str, date]:
+        """各交易所最早的期权挂牌日，来自 a_stock_option_basic（每次同步都会先刷新）。"""
         rows = self.analytics_db.execute(
             text("""
-                SELECT exchange, MAX(trade_date)
-                FROM a_stock_option_daily
-                WHERE exchange IS NOT NULL
+                SELECT exchange, MIN(list_date)
+                FROM a_stock_option_basic
+                WHERE exchange IS NOT NULL AND list_date IS NOT NULL
                 GROUP BY exchange
             """)
         ).fetchall()
@@ -933,22 +924,23 @@ class AStockBaseDataSyncService:
             if row[0] and (parsed := _parse_date(row[1]))
         }
 
-    def _option_incremental_latest_date(self) -> Optional[date]:
-        """增量同步的期权起点锚日：取各交易所最新日期里最早的那个。
-
-        期权表整体的最大日期不能代表每个交易所都同步到位——新接入一个交易所时
-        （例如加入中金所股指期权），整表最大日期仍是今天，增量窗口只有一周，
-        那个交易所的历史会永远补不上。任何一个已配置的交易所完全没有数据时返回
-        None，让调用方退回默认起点做一次完整回补。
-        """
-        latest_by_exchange = self._latest_option_date_by_exchange()
-        dates = []
-        for exchange in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES:
-            latest = latest_by_exchange.get(str(exchange).upper())
-            if not latest:
-                return None
-            dates.append(latest)
-        return min(dates) if dates else None
+    def _existing_option_day_exchanges(self, start_date: date, end_date: date) -> Dict[date, set]:
+        rows = self.analytics_db.execute(
+            text("""
+                SELECT trade_date, exchange
+                FROM a_stock_option_daily
+                WHERE trade_date >= :start_date AND trade_date <= :end_date
+                  AND exchange IS NOT NULL
+                GROUP BY trade_date, exchange
+            """),
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        ).fetchall()
+        by_date: Dict[date, set] = {}
+        for row in rows:
+            parsed = _parse_date(row[0])
+            if parsed and row[1]:
+                by_date.setdefault(parsed, set()).add(str(row[1]).upper())
+        return by_date
 
     def _existing_option_day_stats(self, start_date: date, end_date: date) -> Dict[date, Dict]:
         rows = self.analytics_db.execute(
@@ -1890,7 +1882,7 @@ class AStockBaseDataSyncService:
         start_date: date,
         end_date: date,
         repo_start_date: Optional[date] = None,
-        force_option_refresh: bool = False,
+        option_force_start: Optional[date] = None,
         force_repo_refresh: bool = False,
     ) -> Dict:
         option_start_value = _parse_date(start_date)
@@ -1934,10 +1926,14 @@ class AStockBaseDataSyncService:
         option_trading_dates = [item for item in trading_dates if option_start_value <= item <= end_value]
         repo_trading_dates = [item for item in trading_dates if repo_start_value <= item <= end_value]
 
-        option_refresh_dates = (
-            option_trading_dates
-            if force_option_refresh
-            else self._option_daily_dates_needing_refresh(option_trading_dates)
+        # 覆盖不全的交易日（新接入交易所时会命中它上市以来的全部历史）
+        # 再并上强制重刷区间（增量是最近几天，全量回刷是整个区间）。
+        forced_option_dates = {
+            item for item in option_trading_dates
+            if option_force_start and item >= option_force_start
+        }
+        option_refresh_dates = sorted(
+            set(self._option_daily_dates_needing_refresh(option_trading_dates)) | forced_option_dates
         )
         repo_refresh_dates = (
             repo_trading_dates
@@ -2001,10 +1997,28 @@ class AStockBaseDataSyncService:
         }
 
     def _option_daily_dates_needing_refresh(self, trading_dates: List[date]) -> List[date]:
+        """覆盖不全的交易日。
+
+        判定标准是「当天已经有挂牌合约的交易所，在当天的日行情里都出现了」，而不是
+        简单比较交易所个数——中金所 2019-12 才有第一只股指期权，更早的交易日本来
+        就只该有沪深两市，用个数比会把它们永远判成缺数据。反过来，新接入一个交易所
+        之后，它上市以来的每一个交易日都会被判成缺，从而自动回补历史。
+        """
         if not trading_dates:
             return []
-        stats_by_date = self._existing_option_day_stats(min(trading_dates), max(trading_dates))
-        return [item for item in trading_dates if _option_day_needs_refresh(stats_by_date.get(item))]
+        first_listing = self._option_first_listing_by_exchange()
+        exchanges = [str(item).upper() for item in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES]
+        exchanges_by_date = self._existing_option_day_exchanges(min(trading_dates), max(trading_dates))
+        pending = []
+        for trade_date in trading_dates:
+            expected = {
+                exchange
+                for exchange in exchanges
+                if (listed := first_listing.get(exchange)) and listed <= trade_date
+            }
+            if expected and not expected <= exchanges_by_date.get(trade_date, set()):
+                pending.append(trade_date)
+        return pending
 
     def _repo_daily_dates_needing_refresh(self, trading_dates: List[date]) -> List[date]:
         if not trading_dates:
@@ -2430,7 +2444,7 @@ class AStockBaseDataSyncService:
             raise ValueError("开始日期不能晚于结束日期")
 
         latest_market_date = _latest_analytics_date(self.analytics_db, AStockMarketDaily, "trade_date")
-        latest_option_date = self._option_incremental_latest_date()
+        latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
         latest_report_rc_date = _latest_analytics_date(self.analytics_db, AStockReportRc, "report_date")
@@ -2529,14 +2543,18 @@ class AStockBaseDataSyncService:
 
         option_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
         repo_default_start = _warmup_start(DEFAULT_START_DATE, A_STOCK_REPO_DAILY_WARMUP_DAYS)
+        # 期权的扫描范围始终是完整区间：只查一次覆盖情况（两条聚合 SQL），补齐后不会
+        # 重复拉取。增量模式下额外强制重刷最近几天，用来修正尾部数据。若只按最新日期
+        # 往前取修复窗口，新接入的交易所（如中金所）历史会永远补不上。
+        option_start = option_default_start
         if explicit_start:
-            option_start = _warmup_start(explicit_start, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
+            option_force_start = _warmup_start(explicit_start, A_STOCK_OPTION_DAILY_WARMUP_DAYS)
             repo_start = _warmup_start(explicit_start, A_STOCK_REPO_DAILY_WARMUP_DAYS)
         elif incremental:
-            option_start = _repair_window_start(option_default_start, latest_option_date)
+            option_force_start = _repair_window_start(option_default_start, latest_option_date)
             repo_start = _repair_window_start(repo_default_start, latest_repo_date)
         else:
-            option_start = option_default_start
+            option_force_start = option_default_start
             repo_start = repo_default_start
 
         self._progress("同步A股期权合约基础信息", 68)
@@ -2553,7 +2571,7 @@ class AStockBaseDataSyncService:
             option_start,
             end_value,
             repo_start_date=repo_start,
-            force_option_refresh=incremental and latest_option_date is not None,
+            option_force_start=option_force_start,
             force_repo_refresh=incremental and latest_repo_date is not None,
         )
 

@@ -88,31 +88,54 @@ class OptionVolumePcrScopeTest(TestCase):
         self.assertTrue(series.empty)
 
 
-class OptionIncrementalAnchorTest(TestCase):
-    """新接入一个期权交易所时，增量同步要能自动回补它的历史。"""
+class OptionDailyCoverageTest(TestCase):
+    """期权日行情的覆盖判定：缺哪个交易所补哪天，不缺就一天都不重拉。"""
 
     @staticmethod
-    def _builder(latest_by_exchange):
+    def _service(first_listing, exchanges_by_date):
         from src.robot.a_stock_base_data_sync import AStockBaseDataSyncService
 
         service = object.__new__(AStockBaseDataSyncService)
-        service._latest_option_date_by_exchange = lambda: latest_by_exchange
+        service._option_first_listing_by_exchange = lambda: first_listing
+        service._existing_option_day_exchanges = lambda start, end: exchanges_by_date
         return service
 
-    def test_anchor_is_none_when_a_configured_exchange_has_no_data(self):
-        """CFFEX 刚加进同步范围、一条数据都没有时必须退回默认起点做完整回补。
+    # 中金所第一只股指期权 2019-12-23 上市，在那之前只该有沪深两市。
+    FIRST_LISTING = {
+        "SSE": date(2015, 7, 23),
+        "SZSE": date(2019, 12, 23),
+        "CFFEX": date(2019, 12, 23),
+    }
+    DATES = [date(2019, 6, 20), date(2022, 3, 10), date(2026, 9, 4)]
 
-        用整表最大日期当锚日会得到「今天」，增量窗口只有 7 天，中金所的历史
-        永远补不上——这正是加 CFFEX 时踩到的坑。
-        """
-        service = self._builder({"SSE": date(2026, 9, 5), "SZSE": date(2026, 9, 5)})
-        self.assertIsNone(service._option_incremental_latest_date())
-
-    def test_anchor_takes_the_earliest_exchange(self):
-        """某个交易所落后时，锚日取最早的那个，让它能追上。"""
-        service = self._builder({
-            "SSE": date(2026, 9, 5),
-            "SZSE": date(2026, 9, 5),
-            "CFFEX": date(2026, 8, 20),
+    def test_days_before_an_exchange_listed_are_not_treated_as_missing(self):
+        """2019-06 只有上交所有期权，不能因为凑不齐三个交易所就每次都重拉。"""
+        service = self._service(self.FIRST_LISTING, {
+            date(2019, 6, 20): {"SSE"},
+            date(2022, 3, 10): {"SSE", "SZSE", "CFFEX"},
+            date(2026, 9, 4): {"SSE", "SZSE", "CFFEX"},
         })
-        self.assertEqual(service._option_incremental_latest_date(), date(2026, 8, 20))
+        self.assertEqual(service._option_daily_dates_needing_refresh(self.DATES), [])
+
+    def test_newly_added_exchange_backfills_its_whole_history(self):
+        """刚接入中金所、只拉到最近几天时，它上市以来的历史都要判成待补。
+
+        这正是生产上踩到的状态：CFFEX 已进同步范围但只有尾部几天数据，
+        用「各交易所最新日期」判断会算出最新是今天，历史永远补不上。
+        """
+        service = self._service(self.FIRST_LISTING, {
+            date(2019, 6, 20): {"SSE"},
+            date(2022, 3, 10): {"SSE", "SZSE"},          # 缺 CFFEX
+            date(2026, 9, 4): {"SSE", "SZSE", "CFFEX"},  # 尾部已经补上
+        })
+        self.assertEqual(
+            service._option_daily_dates_needing_refresh(self.DATES),
+            [date(2022, 3, 10)],
+        )
+
+    def test_day_with_no_data_at_all_needs_refresh(self):
+        service = self._service(self.FIRST_LISTING, {})
+        self.assertEqual(
+            service._option_daily_dates_needing_refresh(self.DATES),
+            self.DATES,
+        )
