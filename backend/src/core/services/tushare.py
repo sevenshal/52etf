@@ -30,6 +30,10 @@ from .quote import QuoteObserver, QuoteProvider
 from .tushare_account import get_tushare_token_for_runtime
 
 
+# opt_basic / opt_daily 支持的交易所：沪深两市是 ETF 期权，中金所是股指期权
+# （IO 沪深300、MO 中证1000、HO 上证50），后者的 opt_code 形状与 ETF 期权一致。
+OPTION_SUPPORTED_EXCHANGES = frozenset({"SSE", "SZSE", "CFFEX"})
+
 TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
@@ -1569,9 +1573,9 @@ class TushareService(QuoteProvider):
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
     def get_option_basic_frame(self, exchange: str) -> pd.DataFrame:
-        """获取交易所 ETF 期权合约基础信息。"""
+        """获取交易所期权合约基础信息（沪深 ETF 期权 + 中金所股指期权）。"""
         exchange_value = str(exchange or "").strip().upper()
-        if exchange_value not in {"SSE", "SZSE"}:
+        if exchange_value not in OPTION_SUPPORTED_EXCHANGES:
             return pd.DataFrame()
         fields = (
             "ts_code,exchange,name,per_unit,opt_code,opt_type,call_put,exercise_type,"
@@ -1588,10 +1592,10 @@ class TushareService(QuoteProvider):
         return frame.copy().drop_duplicates(subset=["ts_code"], keep="last")
 
     def get_option_daily_frame(self, trade_date: date, exchange: str) -> pd.DataFrame:
-        """获取某交易所某交易日 ETF 期权行情。"""
+        """获取某交易所某交易日期权行情。"""
         trade_value = self._to_date(trade_date)
         exchange_value = str(exchange or "").strip().upper()
-        if not trade_value or exchange_value not in {"SSE", "SZSE"}:
+        if not trade_value or exchange_value not in OPTION_SUPPORTED_EXCHANGES:
             return pd.DataFrame()
         return self.get_option_daily_range_frame(trade_value, trade_value, exchange_value)
 
@@ -1603,11 +1607,16 @@ class TushareService(QuoteProvider):
         limit: int = 15000,
         raise_on_error: bool = False,
     ) -> pd.DataFrame:
-        """批量获取某交易所 ETF 期权日线行情。"""
+        """批量获取某交易所期权日线行情。"""
         start_value = self._to_date(start_date)
         end_value = self._to_date(end_date)
         exchange_value = str(exchange or "").strip().upper()
-        if not start_value or not end_value or start_value > end_value or exchange_value not in {"SSE", "SZSE"}:
+        if (
+            not start_value
+            or not end_value
+            or start_value > end_value
+            or exchange_value not in OPTION_SUPPORTED_EXCHANGES
+        ):
             return pd.DataFrame()
         fields = (
             "ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,"

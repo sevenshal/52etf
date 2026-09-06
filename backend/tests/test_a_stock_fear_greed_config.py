@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.core.services.a_stock_fear_greed_clone_service import ALL_A_STOCK_OPTIONS
 from src.robot.a_stock_base_data_config import (
     ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS,
     A_STOCK_ETF_DAILY_NAMES,
@@ -24,13 +25,8 @@ def test_a_stock_fear_greed_targets_include_csi_all_share():
     assert target["ticker"] == "中证全指"
     assert target["index_name"] == "中证全指"
     assert "000985.SH" in pools
-    assert target["option_underlyings"] == [
-        "OP510300.SH",
-        "OP159919.SZ",
-        "OP510500.SH",
-        "OP159922.SZ",
-        "OP159915.SZ",
-    ]
+    # 中证全指走全市场口径，不列举标的
+    assert target["option_underlyings"] == ["*"]
 
 
 def test_a_stock_fear_greed_targets_include_hs300_and_semiconductor_segments():
@@ -187,8 +183,71 @@ def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
         assert symbol in pools
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
-        # 两条指数都没有自己的ETF期权，借中证500/创业板ETF期权做风险偏好代理。
-        assert target["option_underlyings"] == ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"]
+
+    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，只能借代理。
+    assert targets_by_symbol["000852.SH"]["option_underlyings"] == ["OP000852.SH"]
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
+        "OP510500.SH",
+        "OP159922.SZ",
+        "OP159915.SZ",
+    ]
+
+
+def test_indexes_with_their_own_options_use_them():
+    """有自己期权的指数必须用自己的期权，不能再借别的标的当代理。
+
+    全市场 12 个期权标的里只有 5 条指数有自己的期权：上证50、沪深300、中证500、
+    科创50、创业板指、中证1000。其余指数（中证A500、中证全指、科创100/200、
+    北证50、中证2000、微盘400 和各行业指数）确实没有，只能继续借代理。
+    """
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    own_options = {
+        # 中金所股指期权 + 对应的场内 ETF 期权
+        "000016.SH": ["OP000016.SH", "OP510050.SH"],
+        "000300.SH": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
+        "000852.SH": ["OP000852.SH"],
+        # 只有 ETF 期权的
+        "000905.SH": ["OP510500.SH", "OP159922.SZ"],
+        "000688.SH": ["OP588000.SH", "OP588080.SH"],
+        "399006.SZ": ["OP159915.SZ"],
+    }
+    for symbol, expected in own_options.items():
+        assert targets_by_symbol[symbol]["option_underlyings"] == expected, symbol
+
+
+def test_borrowed_option_proxies_match_the_index_style():
+    """没有自己期权的指数，借来的代理必须和它的风格对得上，否则宁可留空。
+
+    put_call_options 只是 7 个分项之一，缺一个仍能出值（A_STOCK_MIN_COMPONENT_COUNT=6），
+    所以「借一个不相干的标的」比「留空」更糟——那是往分项里灌噪音。
+    """
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    # 大盘宽基借沪深300口径
+    assert targets_by_symbol["000510.SH"]["option_underlyings"] == [
+        "OP000300.SH",
+        "OP510300.SH",
+        "OP159919.SZ",
+    ]
+    # 中证全指是全部A股，用全市场所有期权按成交量加总，不需要挑标的
+    assert targets_by_symbol["000985.SH"]["option_underlyings"] == [ALL_A_STOCK_OPTIONS]
+    # 同板块借科创50ETF期权
+    for symbol in ("000698.SH", "000699.SH"):
+        assert targets_by_symbol[symbol]["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]
+    # 小盘借中证500/创业板
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
+        "OP510500.SH",
+        "OP159922.SZ",
+        "OP159915.SZ",
+    ]
+    # 低波大盘价值风格找不到对得上的期权，留空
+    for symbol in ("399998.SZ", "000015.SH", "H30269.CSI"):
+        assert targets_by_symbol[symbol]["option_underlyings"] == [], symbol
 
 
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
@@ -202,6 +261,7 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     assert proxy_symbols == [proxy for _, proxy in target_proxy_pairs]
     assert target_proxy_pairs == [
         ("000300.SH", "510300.SH"),
+        ("000016.SH", "510050.SH"),
         ("000510.SH", "563360.SH"),
         ("000905.SH", "510500.SH"),
         ("000852.SH", "512100.SH"),
@@ -246,3 +306,12 @@ def test_additional_industry_targets_are_complete_and_unique():
     for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS:
         assert item["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[item["proxy_etf"]]
+
+
+def test_option_sync_covers_cffex_index_options():
+    """中金所股指期权（IO/MO/HO）的 opt_code 与 ETF 期权同形，同步范围要带上 CFFEX。"""
+    from src.core.services.tushare import OPTION_SUPPORTED_EXCHANGES
+    from src.robot.a_stock_base_data_sync import A_STOCK_OPTION_DAILY_SYNC_EXCHANGES
+
+    assert "CFFEX" in A_STOCK_OPTION_DAILY_SYNC_EXCHANGES
+    assert set(A_STOCK_OPTION_DAILY_SYNC_EXCHANGES) <= OPTION_SUPPORTED_EXCHANGES
