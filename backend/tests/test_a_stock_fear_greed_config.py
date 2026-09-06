@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.core.services.a_stock_fear_greed_clone_service import ALL_A_STOCK_OPTIONS
 from src.robot.a_stock_base_data_config import (
     ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS,
     A_STOCK_ETF_DAILY_NAMES,
@@ -24,13 +25,8 @@ def test_a_stock_fear_greed_targets_include_csi_all_share():
     assert target["ticker"] == "中证全指"
     assert target["index_name"] == "中证全指"
     assert "000985.SH" in pools
-    assert target["option_underlyings"] == [
-        "OP510300.SH",
-        "OP159919.SZ",
-        "OP510500.SH",
-        "OP159922.SZ",
-        "OP159915.SZ",
-    ]
+    # 中证全指走全市场口径，不列举标的
+    assert target["option_underlyings"] == ["*"]
 
 
 def test_a_stock_fear_greed_targets_include_hs300_and_semiconductor_segments():
@@ -238,14 +234,8 @@ def test_borrowed_option_proxies_match_the_index_style():
         "OP510300.SH",
         "OP159919.SZ",
     ]
-    # 覆盖大中小盘的全市场指数借三档
-    assert targets_by_symbol["000985.SH"]["option_underlyings"] == [
-        "OP510300.SH",
-        "OP159919.SZ",
-        "OP510500.SH",
-        "OP159922.SZ",
-        "OP159915.SZ",
-    ]
+    # 中证全指是全部A股，用全市场所有期权按成交量加总，不需要挑标的
+    assert targets_by_symbol["000985.SH"]["option_underlyings"] == [ALL_A_STOCK_OPTIONS]
     # 同板块借科创50ETF期权
     for symbol in ("000698.SH", "000699.SH"):
         assert targets_by_symbol[symbol]["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]

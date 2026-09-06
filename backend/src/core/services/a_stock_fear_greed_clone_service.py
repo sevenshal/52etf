@@ -27,6 +27,11 @@ from ..database import (
 from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
 
 
+# option_underlyings 里放这个哨兵，表示「不限标的，用全市场所有期权」。
+# CNN 原版的 put/call 分项用的就是 CBOE 全市场股票期权总量，并不按指数成分调权重；
+# 中证全指这种覆盖全部A股的指数对应的正是这个口径，而且新上市的期权品种会自动纳入。
+ALL_A_STOCK_OPTIONS = "*"
+
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_FEAR_SYMBOL
 A_STOCK_INNO100_SAFE_HAVEN_INDEX = "H11006.CSI"
@@ -1038,11 +1043,17 @@ class AStockInnovation100FearGreedCloneCalculator:
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         }
-        placeholders = []
-        for idx, opt_code in enumerate(self.option_underlyings):
-            key = f"opt_code_{idx}"
-            placeholders.append(f":{key}")
-            params[key] = opt_code
+        # 全市场口径：期权库里本来就只有沪深两市的 ETF 期权和中金所的股指期权，
+        # 去掉 opt_code 过滤即为「全部A股期权」。
+        use_all_options = ALL_A_STOCK_OPTIONS in self.option_underlyings
+        opt_code_filter = ""
+        if not use_all_options:
+            placeholders = []
+            for idx, opt_code in enumerate(self.option_underlyings):
+                key = f"opt_code_{idx}"
+                placeholders.append(f":{key}")
+                params[key] = opt_code
+            opt_code_filter = f"AND b.opt_code IN ({', '.join(placeholders)})"
         analytics_db = AnalyticsSession()
         try:
             rows = analytics_db.execute(
@@ -1056,7 +1067,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                     JOIN a_stock_option_basic b ON b.ts_code = d.ts_code
                     WHERE d.trade_date >= :start_date
                       AND d.trade_date <= :end_date
-                      AND b.opt_code IN ({", ".join(placeholders)})
+                      {opt_code_filter}
                       AND b.call_put IN ('C', 'P')
                     GROUP BY d.trade_date, b.call_put
                     ORDER BY d.trade_date
@@ -1252,7 +1263,10 @@ class AStockInnovation100FearGreedCloneCalculator:
 
     def _warnings(self) -> List[str]:
         option_warning = (
-            f"The option component uses related A-share ETF option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}."
+            "The option component uses the whole A-share option market's volume put/call ratio from Tushare "
+            "(all SSE/SZSE ETF options plus CFFEX index options), aggregated by volume."
+            if ALL_A_STOCK_OPTIONS in self.option_underlyings
+            else f"The option component uses related A-share option volume put/call ratios from Tushare: {', '.join(self.option_underlyings)}."
             if self.option_underlyings
             else "No related ETF option underlyings are configured; the option component is omitted when unavailable."
         )

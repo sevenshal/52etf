@@ -94,7 +94,10 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证全指",
         "label": "中证全指",
         "index_name": "中证全指",
-        "option_underlyings": ["OP510300.SH", "OP159919.SZ", "OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        # 中证全指覆盖全部A股，put/call 直接用全市场所有期权按成交量加总，
+        # 和 CNN 原版用 CBOE 全市场股票期权总量是同一个口径。"*" 见
+        # a_stock_fear_greed_clone_service.ALL_A_STOCK_OPTIONS，新上市的期权自动纳入。
+        "option_underlyings": ["*"],
         "proxy_etf": "510300.SH",
     },
     {
