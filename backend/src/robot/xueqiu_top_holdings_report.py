@@ -1464,6 +1464,25 @@ async def fetch_cube_current(
         return CubeCurrentResult(cube=cube, holdings=[], error=repr(last_error))
 
 
+def cached_activity_is_stale(result: CubeCurrentResult) -> bool:
+    """缓存的主理人调仓是否已经落后于本次现取的最新调仓。
+
+    current.json 每次运行都会实时拿到该组合的 last_rb（最近一次调仓，含非主理人
+    调仓），不额外花请求。只要它比缓存里的主理人调仓时间更新，就说明缓存写入之后
+    组合又动过，必须回源 show_origin 确认，否则 24 小时 TTL 会让报告展示过期的
+    「主理人调仓」时间。
+    """
+    if not result.activity_cache_hit or result.activity_error:
+        return False
+    latest_at = as_china_datetime(result.latest_rebalance_at)
+    if latest_at is None:
+        return False
+    cached_at = as_china_datetime(result.active_rebalance_at)
+    if cached_at is None:
+        return True
+    return latest_at > cached_at
+
+
 def apply_activity_to_current_result(
     result: CubeCurrentResult,
     activity: CubeActivityResult,
@@ -1566,15 +1585,21 @@ async def fetch_all_cube_current(
                 jitter_seconds=XUEQIU_ACTIVITY_REQUEST_JITTER_SECONDS,
             )
             logger.info(
-                "Fetching Xueqiu manager activity: missing=%s cached=%s workers=%s",
+                "Fetching Xueqiu manager activity: missing=%s stale=%s cached=%s workers=%s",
                 len([result for result in results if not result.error and not result.activity_cache_hit]),
+                len([
+                    result
+                    for result in results
+                    if not result.error and cached_activity_is_stale(result)
+                ]),
                 len([result for result in results if result.activity_cache_hit]),
                 activity_workers,
             )
             activity_targets = [
                 (index, result)
                 for index, result in enumerate(results)
-                if not result.error and not result.activity_cache_hit
+                if not result.error
+                and (not result.activity_cache_hit or cached_activity_is_stale(result))
             ]
             activity_results: List[CubeActivityResult] = []
             if activity_workers == 1:

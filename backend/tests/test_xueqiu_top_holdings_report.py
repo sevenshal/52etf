@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import date, datetime
 import os
 import tempfile
@@ -15,7 +16,9 @@ from src.core.duckdb_utils import connect_duckdb
 from src.robot.xueqiu_top_holdings_report import (
     CubeInfo,
     CubeActivityResult,
+    CHINA_TZ,
     CubeCurrentResult,
+    cached_activity_is_stale,
     CubeFetchResult,
     ACTIVE_REBALANCE_ACTIVITY_TYPE,
     XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE,
@@ -757,6 +760,25 @@ class XueqiuTopHoldingsReportTest(TestCase):
         self.assertFalse(activity.cache_hit)
         self.assertEqual(12345, activity.latest_rebalance_id)
         self.assertEqual(previous_activity.latest_rebalance_at, activity.latest_rebalance_at)
+
+    def test_cached_activity_is_stale_when_last_rb_newer_than_cache(self):
+        cube = CubeInfo(year_rank=1, symbol="ZH3328327")
+        cached = CubeCurrentResult(
+            cube=cube,
+            holdings=[],
+            latest_rebalance_at=datetime(2026, 9, 4, 10, 50, 11, tzinfo=CHINA_TZ),
+            active_rebalance_at=datetime(2026, 9, 1, 9, 54, 44, tzinfo=CHINA_TZ),
+            activity_cache_hit=True,
+        )
+        self.assertTrue(cached_activity_is_stale(cached))
+
+        fresh = replace(
+            cached,
+            latest_rebalance_at=datetime(2026, 9, 1, 9, 54, 44, tzinfo=CHINA_TZ),
+        )
+        self.assertFalse(cached_activity_is_stale(fresh))
+
+        self.assertFalse(cached_activity_is_stale(replace(cached, activity_cache_hit=False)))
 
     def test_latest_manager_rebalance_uses_user_rebalancing_updated_at(self):
         events = [
