@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .account import valid_admin_account
-from ...robot.scheduled_tasks import scheduled_task_manager
+from ...robot.scheduled_tasks import (
+    START_DATE_RUN_TASK_KEYS,
+    SYMBOLS_RUN_TASK_KEYS,
+    scheduled_task_manager,
+)
 
 router = APIRouter(prefix="/api/scheduled-tasks", tags=["scheduled-tasks"])
 
@@ -37,6 +41,7 @@ class ScheduledTaskResponse(BaseModel):
     first_daily_trigger_minutes: Optional[int] = None
     sort_order: int
     supports_start_date: bool = False
+    supports_symbols: bool = False
     is_running: bool
     next_run_at: Optional[str] = None
     last_trigger_source: Optional[str] = None
@@ -87,29 +92,13 @@ def run_scheduled_task_now(
 ):
     try:
         runner_kwargs = {}
-        if task_key in {
-            "evc_static_info_sync",
-            "cnn_fear_greed_fetch",
-            "a_stock_base_data_sync",
-            "etf_holdings_backfill",
-            "soxx_fear_greed_backfill",
-            "a_stock_etf_fear_greed_backfill",
-            "hk_stock_base_data_sync",
-            "hk_index_fear_greed_backfill",
-        } and payload and payload.start_date:
+        if task_key in START_DATE_RUN_TASK_KEYS and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
         if task_key == "chan_minute_sync":
             # Manual execution is the explicit 128-trading-day repair action;
             # the scheduled runner keeps its default incremental behavior.
             runner_kwargs.update(full=True, trading_days=128)
-        if (
-            task_key in {
-                "a_stock_etf_fear_greed_backfill",
-                "a_stock_index_valuation_refresh",
-            }
-            and payload
-            and payload.symbols
-        ):
+        if task_key in SYMBOLS_RUN_TASK_KEYS and payload and payload.symbols:
             runner_kwargs["symbols"] = payload.symbols
         scheduled_task_manager.trigger_task(
             task_key=task_key,

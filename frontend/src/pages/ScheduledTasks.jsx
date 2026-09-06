@@ -32,6 +32,10 @@ const RESULT_PREVIEW_LENGTH = 96;
 const RUN_MODE_AUTO = 'auto';
 const RUN_MODE_BACKFILL = 'backfill';
 const getDefaultManualRunStartDate = () => dayjs().subtract(7, 'day');
+const parseSymbolInput = value => String(value || '')
+  .split(/[\s,;]+/)
+  .map(item => item.trim().toUpperCase())
+  .filter(Boolean);
 const timezoneOptions = [
   { value: 'Asia/Shanghai', label: '上海时间' },
   { value: 'America/New_York', label: '美东时间' },
@@ -69,6 +73,14 @@ const getRunStartDateHint = (taskKey) => {
       backfillLabel: '按日期全量回刷',
       autoDetail: '不传开始日期，只抓取各 ETF 发行商当前最新持仓快照，并按返回的持仓日期覆盖入库。',
       backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期覆盖写入数据库。'
+    };
+  }
+  if (taskKey === 'a_stock_innovation100_rebuild' || taskKey === 'a_stock_micro400_rebuild') {
+    return {
+      autoLabel: '增量续算',
+      backfillLabel: '按日期全量重建',
+      autoDetail: '不传开始日期，从最新点位往后续算，并按需补上区间内漏掉的调样。',
+      backfillDetail: '传入开始日期后，清空该指数已有的点位、成分和调样记录，从所选日期整段重建。'
     };
   }
   if (taskKey === 'soxx_fear_greed_backfill' || taskKey === 'a_stock_etf_fear_greed_backfill' || taskKey === 'hk_index_fear_greed_backfill') {
@@ -269,6 +281,7 @@ const ScheduledTasks = () => {
   const [runModalTask, setRunModalTask] = useState(null);
   const [runMode, setRunMode] = useState(RUN_MODE_AUTO);
   const [runStartDate, setRunStartDate] = useState(getDefaultManualRunStartDate());
+  const [runSymbols, setRunSymbols] = useState('');
 
   const fetchTasks = async (showLoading = true) => {
     if (showLoading) {
@@ -353,10 +366,11 @@ const ScheduledTasks = () => {
   };
 
   const handleRunButtonClick = (task) => {
-    if (task.supports_start_date) {
+    if (task.supports_start_date || task.supports_symbols) {
       setRunModalTask(task);
       setRunMode(RUN_MODE_AUTO);
       setRunStartDate(getDefaultManualRunStartDate());
+      setRunSymbols('');
       return;
     }
     handleRunNow(task);
@@ -371,10 +385,15 @@ const ScheduledTasks = () => {
     if (currentTask.supports_start_date && runMode === RUN_MODE_BACKFILL && runStartDate) {
       payload.start_date = runStartDate.format('YYYY-MM-DD');
     }
+    const symbols = parseSymbolInput(runSymbols);
+    if (currentTask.supports_symbols && symbols.length) {
+      payload.symbols = symbols;
+    }
     setRunModalTask(null);
     await handleRunNow(currentTask, payload);
     setRunMode(RUN_MODE_AUTO);
     setRunStartDate(getDefaultManualRunStartDate());
+    setRunSymbols('');
   };
 
   const sortedTasks = useMemo(() => {
@@ -677,6 +696,19 @@ const ScheduledTasks = () => {
                 </>
               );
             })()
+          ) : null}
+          {runModalTask?.supports_symbols ? (
+            <>
+              <Input
+                value={runSymbols}
+                onChange={(event) => setRunSymbols(event.target.value)}
+                placeholder="指数列表，逗号分隔，例如 MICRO400.CN,INNO100.CN"
+                allowClear
+              />
+              <Text type="secondary">
+                只对本次执行生效，不会写进任务配置；留空则计算全部指数。
+              </Text>
+            </>
           ) : null}
         </Space>
       </Modal>
