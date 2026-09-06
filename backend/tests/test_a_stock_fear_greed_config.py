@@ -222,6 +222,44 @@ def test_indexes_with_their_own_options_use_them():
         assert targets_by_symbol[symbol]["option_underlyings"] == expected, symbol
 
 
+def test_borrowed_option_proxies_match_the_index_style():
+    """没有自己期权的指数，借来的代理必须和它的风格对得上，否则宁可留空。
+
+    put_call_options 只是 7 个分项之一，缺一个仍能出值（A_STOCK_MIN_COMPONENT_COUNT=6），
+    所以「借一个不相干的标的」比「留空」更糟——那是往分项里灌噪音。
+    """
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    # 大盘宽基借沪深300口径
+    assert targets_by_symbol["000510.SH"]["option_underlyings"] == [
+        "OP000300.SH",
+        "OP510300.SH",
+        "OP159919.SZ",
+    ]
+    # 覆盖大中小盘的全市场指数借三档
+    assert targets_by_symbol["000985.SH"]["option_underlyings"] == [
+        "OP510300.SH",
+        "OP159919.SZ",
+        "OP510500.SH",
+        "OP159922.SZ",
+        "OP159915.SZ",
+    ]
+    # 同板块借科创50ETF期权
+    for symbol in ("000698.SH", "000699.SH"):
+        assert targets_by_symbol[symbol]["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]
+    # 小盘借中证500/创业板
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
+        "OP510500.SH",
+        "OP159922.SZ",
+        "OP159915.SZ",
+    ]
+    # 低波大盘价值风格找不到对得上的期权，留空
+    for symbol in ("399998.SZ", "000015.SH", "H30269.CSI"):
+        assert targets_by_symbol[symbol]["option_underlyings"] == [], symbol
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [

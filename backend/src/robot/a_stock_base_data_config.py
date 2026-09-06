@@ -59,7 +59,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证A500",
         "label": "中证A500",
         "index_name": "中证A500",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        # A500 没有自己的期权，作为大盘宽基借沪深300口径（中金所IO + 沪深两市300ETF期权）。
+        "option_underlyings": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
         "proxy_etf": "563360.SH",
     },
     {
@@ -244,7 +245,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证煤炭",
         "label": "煤炭",
         "index_name": "中证煤炭",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
+        "option_underlyings": [],
         "proxy_etf": "515220.SH",
     },
     {
@@ -252,7 +254,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "上证红利",
         "label": "红利",
         "index_name": "上证红利",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
+        "option_underlyings": [],
         "proxy_etf": "510880.SH",
     },
     {
@@ -260,7 +263,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "红利低波",
         "label": "红利低波",
         "index_name": "中证红利低波动指数",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH", "OP159915.SZ", "OP510500.SH", "OP159922.SZ"],
+        # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
+        "option_underlyings": [],
         "proxy_etf": "512890.SH",
     },
 ]
