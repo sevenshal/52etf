@@ -190,8 +190,7 @@ def test_cost_of_equity_has_a_floor_when_risk_free_rate_is_very_low():
         market_cap=5.95e9,
         interest_bearing_debt=0.0,
         interest_expense=None,
-        income_tax=1.5e8,
-        total_profit=1.0e9,
+        effective_tax_rate=0.15,
         risk_free_rate=0.0168,
         equity_risk_premium=0.06,
     )
@@ -245,3 +244,108 @@ def test_scenario_growth_stays_inside_the_near_term_growth_bounds():
         near_term_growth * scanner.SCENARIO_GROWTH_MULTIPLIER[1], *scanner.NEAR_TERM_GROWTH_BOUNDS
     )
     assert bull_growth == scanner.NEAR_TERM_GROWTH_BOUNDS[1]
+
+
+# --- 实际税率 / 有息负债的口径与兜底 -----------------------------------------
+
+
+def test_effective_tax_rate_prefers_latest_annual_report(huate_slices):
+    info = scanner._effective_tax_rate(huate_slices["fina"], huate_slices["income"])
+    assert info["source"] == "latest_annual"
+    assert info["rate"] == pytest.approx(0.15)  # 1.5亿 / 10亿
+
+
+def test_effective_tax_rate_falls_back_to_five_year_window_on_a_loss_year(huate_slices):
+    """最新一年亏损时不该退回猜 25%，五年窗口合计仍然算得出真实税率。
+
+    全市场有 28.3% 的股票最新一期 total_profit<=0，改窗口口径能救回其中 9.5%。
+    """
+    income = huate_slices["income"].copy()
+    income.loc[income.index[-1], "total_profit"] = -5.0e8
+    income.loc[income.index[-1], "income_tax"] = 0.0
+
+    info = scanner._effective_tax_rate(huate_slices["fina"], income)
+    assert info["source"] == "five_year_window"
+    # 前4年各 1.5亿/10亿，最新一年 0/-5亿 → 6.0亿 / 35亿 = 17.1%
+    assert info["rate"] == pytest.approx(6.0e8 / 3.5e9, rel=0.01)
+
+
+def test_effective_tax_rate_falls_back_to_tushare_then_default(huate_slices):
+    """利润表整段不可用时依次退到 tax_to_ebt、再退到默认值。"""
+    income = huate_slices["income"].copy()
+    income["total_profit"] = None
+    income["income_tax"] = None
+
+    fina = huate_slices["fina"].copy()
+    fina["tax_to_ebt"] = 12.5  # tushare 给的是百分数
+    info = scanner._effective_tax_rate(fina, income)
+    assert info["source"] == "tushare_tax_to_ebt"
+    assert info["rate"] == pytest.approx(0.125)
+
+    info = scanner._effective_tax_rate(huate_slices["fina"], income)
+    assert info["source"] == "default_fallback"
+    assert info["rate"] == pytest.approx(scanner.DEFAULT_EFFECTIVE_TAX_RATE)
+
+
+def test_effective_tax_rate_clips_distorted_ratios(huate_slices):
+    """利润总额接近0会让比值失真(实测有 422% 的样本)，必须 clip 住。"""
+    income = huate_slices["income"].copy()
+    income.loc[income.index[-1], "total_profit"] = 1.0e5
+    income.loc[income.index[-1], "income_tax"] = 5.0e5  # 500%
+
+    info = scanner._effective_tax_rate(huate_slices["fina"], income)
+    assert info["rate"] == pytest.approx(0.33)
+
+
+def test_interest_bearing_debt_prefers_tushare_and_reports_cross_check(huate_slices):
+    fina = huate_slices["fina"].copy()
+    fina["interestdebt"] = 1.0e9
+    balancesheet = huate_slices["balancesheet"].copy()
+    for column, value in (("st_borr", 4.0e8), ("lt_borr", 5.0e8), ("lease_liab", 1.0e8)):
+        balancesheet[column] = value
+
+    info = scanner._interest_bearing_debt(fina, balancesheet)
+    assert info["source"] == "tushare_interestdebt"
+    assert info["value"] == pytest.approx(1.0e9)
+    assert info["cross_check_ratio"] == pytest.approx(1.0)
+
+
+def test_interest_bearing_debt_falls_back_to_balance_sheet_components(huate_slices):
+    """interestdebt 缺失时从资产负债表加出来，而不是当成 0(那会让 WACC 退化成股权成本)。
+
+    实测全市场 105 只缺 interestdebt 的股票里，104 只能这样补回来。
+    """
+    fina = huate_slices["fina"].copy()
+    fina["interestdebt"] = None
+    balancesheet = huate_slices["balancesheet"].copy()
+    balancesheet["st_borr"] = 3.0e8
+    balancesheet["non_cur_liab_due_1y"] = 1.0e8
+    balancesheet["lease_liab"] = 5.0e7
+
+    info = scanner._interest_bearing_debt(fina, balancesheet)
+    assert info["source"] == "balancesheet_components"
+    assert info["value"] == pytest.approx(4.5e8)
+    assert info["cross_check_ratio"] is None
+
+
+def test_interest_bearing_debt_missing_everywhere_stays_none(huate_slices):
+    """构成项全为空是"这期资产负债表没同步到"，不能和"真的没有有息负债"混为一谈。"""
+    fina = huate_slices["fina"].copy()
+    fina["interestdebt"] = None
+
+    info = scanner._interest_bearing_debt(fina, huate_slices["balancesheet"])
+    assert info["value"] is None
+    assert info["source"] is None
+
+
+def test_zero_interest_bearing_debt_is_distinct_from_missing(huate_slices):
+    """真的没有有息负债(全部构成项=0)要返回 0.0，不是 None。"""
+    fina = huate_slices["fina"].copy()
+    fina["interestdebt"] = None
+    balancesheet = huate_slices["balancesheet"].copy()
+    for column in scanner.INTEREST_BEARING_DEBT_COMPONENTS:
+        balancesheet[column] = 0.0
+
+    info = scanner._interest_bearing_debt(fina, balancesheet)
+    assert info["value"] == 0.0
+    assert info["source"] == "balancesheet_components"
