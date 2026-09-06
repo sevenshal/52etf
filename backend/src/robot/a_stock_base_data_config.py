@@ -8,6 +8,7 @@ BENCHMARK_INDEXES = [
 ]
 A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000300.SH", "name": "沪深300"},
+    {"index_code": "000016.SH", "name": "上证50"},
     {"index_code": "000510.SH", "name": "中证A500"},
     {"index_code": "000905.SH", "name": "中证500"},
     {"index_code": "000852.SH", "name": "中证1000"},
@@ -40,8 +41,18 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "沪深300",
         "label": "沪深300",
         "index_name": "沪深300指数",
-        "option_underlyings": ["OP510300.SH", "OP159919.SZ"],
+        # 中金所沪深300股指期权(IO) + 沪深两市的300ETF期权，都是这条指数自己的期权。
+        "option_underlyings": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
         "proxy_etf": "510300.SH",
+    },
+    {
+        "symbol": "000016.SH",
+        "ticker": "上证50",
+        "label": "上证50",
+        "index_name": "上证50指数",
+        # 中金所上证50股指期权(HO) + 全市场最老的50ETF期权。
+        "option_underlyings": ["OP000016.SH", "OP510050.SH"],
+        "proxy_etf": "510050.SH",
     },
     {
         "symbol": "000510.SH",
@@ -306,6 +317,7 @@ A_STOCK_FACTOR_INDEX_POOLS.extend(
 
 A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "510300.SH",
+    "510050.SH",
     "563360.SH",
     "510500.SH",
     "512100.SH",
@@ -370,6 +382,7 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
 )
 A_STOCK_ETF_DAILY_NAMES = {
     "563360.SH": "A500ETF",
+    "510050.SH": "上证50ETF",
     "510500.SH": "中证500ETF",
     "512100.SH": "中证1000ETF",
     "563300.SH": "中证2000ETF",

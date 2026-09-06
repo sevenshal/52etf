@@ -197,6 +197,31 @@ def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
     ]
 
 
+def test_indexes_with_their_own_options_use_them():
+    """有自己期权的指数必须用自己的期权，不能再借别的标的当代理。
+
+    全市场 12 个期权标的里只有 5 条指数有自己的期权：上证50、沪深300、中证500、
+    科创50、创业板指、中证1000。其余指数（中证A500、中证全指、科创100/200、
+    北证50、中证2000、微盘400 和各行业指数）确实没有，只能继续借代理。
+    """
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    own_options = {
+        # 中金所股指期权 + 对应的场内 ETF 期权
+        "000016.SH": ["OP000016.SH", "OP510050.SH"],
+        "000300.SH": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
+        "000852.SH": ["OP000852.SH"],
+        # 只有 ETF 期权的
+        "000905.SH": ["OP510500.SH", "OP159922.SZ"],
+        "000688.SH": ["OP588000.SH", "OP588080.SH"],
+        "399006.SZ": ["OP159915.SZ"],
+    }
+    for symbol, expected in own_options.items():
+        assert targets_by_symbol[symbol]["option_underlyings"] == expected, symbol
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [
@@ -208,6 +233,7 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     assert proxy_symbols == [proxy for _, proxy in target_proxy_pairs]
     assert target_proxy_pairs == [
         ("000300.SH", "510300.SH"),
+        ("000016.SH", "510050.SH"),
         ("000510.SH", "563360.SH"),
         ("000905.SH", "510500.SH"),
         ("000852.SH", "512100.SH"),

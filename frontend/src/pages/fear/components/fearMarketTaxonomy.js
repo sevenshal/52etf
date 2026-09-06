@@ -27,14 +27,17 @@ export const CN_GENERAL_GROUPS = [
     key: 'broad-and-style',
     title: '宽基及风格指数',
     options: [
-      cnOption('000300.SH', '沪深300', '宽基'),
       cnOption('000985.SH', '中证全指', '宽基'),
-      cnOption('899050.BJ', '北证50', '宽基'),
-      cnOption('INNO100.CN', 'A创100', '创新100'),
+      cnOption('000016.SH', '上证50', '宽基'),
+      cnOption('000300.SH', '沪深300', '宽基'),
       cnOption('000510.SH', '中证A500', '宽基'),
       cnOption('000905.SH', '中证500', '宽基'),
       cnOption('000852.SH', '中证1000', '宽基'),
       cnOption('932000.CSI', '中证2000', '宽基'),
+      // 自算指数，没有场内产品也没有实时点位源，不做盘中刷新。
+      cnOption('MICRO400.CN', '微盘400', '微盘股', { realtime: false }),
+      cnOption('899050.BJ', '北证50', '宽基'),
+      cnOption('INNO100.CN', 'A创100', '创新100'),
       cnOption('000680.SH', '科创综指', '宽基'),
       cnOption('000688.SH', '科创50', '宽基'),
       cnOption('000698.SH', '科创100', '宽基'),
@@ -42,8 +45,6 @@ export const CN_GENERAL_GROUPS = [
       cnOption('399006.SZ', '创业板指', '宽基'),
       cnOption('000015.SH', '上证红利', '风格'),
       cnOption('H30269.CSI', '红利低波', '风格'),
-      // 自算指数，没有场内产品也没有实时点位源，不做盘中刷新。
-      cnOption('MICRO400.CN', '微盘400', '微盘股', { realtime: false }),
     ],
   },
 ];
