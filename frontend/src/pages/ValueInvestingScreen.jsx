@@ -101,6 +101,37 @@ const expandedRowRender = record => {
         { key: 'beta', label: 'Beta', children: formatNumber(record.beta) },
         { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
         { key: 'cod', label: '税后债权成本', children: formatPercent(record.cost_of_debt_after_tax_pct) },
+        {
+          key: 'tax_rate',
+          label: '实际税率',
+          children:
+            record.effective_tax_rate_pct == null
+              ? '-'
+              : `${formatPercent(record.effective_tax_rate_pct)}（${
+                  {
+                    latest_annual: '最新年报',
+                    five_year_window: '五年窗口合计',
+                    tushare_tax_to_ebt: 'tushare指标',
+                    default_fallback: '默认假设',
+                  }[record.effective_tax_rate_source] || '—'
+                }）`,
+        },
+        {
+          key: 'interest_debt',
+          label: '有息负债(亿)',
+          children:
+            record.interest_bearing_debt_yi == null
+              ? '-'
+              : `${formatNumber(record.interest_bearing_debt_yi)}（${
+                  record.interest_bearing_debt_source === 'balancesheet_components'
+                    ? '资产负债表加总'
+                    : 'tushare指标'
+                }${
+                  record.interest_bearing_debt_cross_check_ratio == null
+                    ? ''
+                    : `，报表/指标 ${formatNumber(record.interest_bearing_debt_cross_check_ratio)}倍`
+                }）`,
+        },
         { key: 'base_fcff', label: '基准FCFF(近3年均值,亿)', children: formatNumber(record.dcf_base_fcff_yi) },
         {
           key: 'base_fcff_source',

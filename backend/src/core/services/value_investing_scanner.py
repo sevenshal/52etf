@@ -142,6 +142,24 @@ BALANCESHEET_SCAN_COLUMNS = (
     "minority_int",                 # 少数股东权益：把全口径股权价值折回归母口径
     "total_hldr_eqy_exc_min_int",   # 归母权益
     "total_hldr_eqy_inc_min_int",   # 全部权益(minority_int 缺失时相减兜底)
+    # 有息负债的构成项：fina_indicator.interestdebt 缺失时自己加出来(见 _interest_bearing_debt)
+    "st_borr",                      # 短期借款
+    "non_cur_liab_due_1y",          # 一年内到期的非流动负债
+    "lt_borr",                      # 长期借款
+    "bond_payable",                 # 应付债券
+    "st_bonds_payable",             # 应付短期债券
+    "lease_liab",                   # 租赁负债(IFRS16 口径按债务处理)
+)
+
+# 有息负债的资产负债表构成项。不含"向中央银行借款"(cb_borr，银行专用，金融股走
+# 另一套估值口径)和"质押借款"(pledge_borr，是短期借款的其中项，加进来会重复计算)。
+INTEREST_BEARING_DEBT_COMPONENTS = (
+    "st_borr",
+    "non_cur_liab_due_1y",
+    "lt_borr",
+    "bond_payable",
+    "st_bonds_payable",
+    "lease_liab",
 )
 CASHFLOW_SCAN_COLUMNS = (
     "net_profit",              # 合并净利润：算经营现金流/净利润
@@ -349,14 +367,112 @@ def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _effective_tax_rate(
+    fina_slice: Optional[pd.DataFrame],
+    income_slice: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    """实际税率(小数)，附带它是从哪个口径来的。
+
+    实际税率同时进入两个地方：WACC 的税后债权成本，和现金流量表口径 FCFF 的税后
+    利息加回。以前只看最新一期年报的 `income_tax / total_profit`，`total_profit<=0`
+    (亏损年)就退回 `DEFAULT_EFFECTIVE_TAX_RATE` 猜 25%——全市场有 28.3% 的股票最新
+    一期正好踩在这个条件上，等于四分之一以上的样本用的是拍脑袋的税率。
+
+    改成三档兜底：
+
+    1. **最新年报单年**：口径最贴近当前，优先用；
+    2. **五年窗口合计**(`sum(income_tax)/sum(total_profit)`)：单个亏损年不至于让整
+       家公司退回默认值，实测能救回 9.5% 的股票；
+    3. **`fina_indicator.tax_to_ebt`**：注意这一项**几乎没有增量信息**——实测它和
+       `income_tax/total_profit` 在 99.09% 的行上数值完全相同(差<0.001)，只在 227 行
+       上是"只有它有值"。留着是因为不要白不要，但别指望它解决覆盖率问题。
+
+    三档都拿不到才用 DEFAULT_EFFECTIVE_TAX_RATE。结果 clip 到 [5%, 33%]：A股法定
+    税率 25%，高新技术企业 15%，加计扣除后还能更低，但负税率或超过 33% 一定是
+    利润总额接近 0 导致的比值失真(实测有 tax_to_ebt 高达 422% 的样本)。
+    """
+    def _window_sum(frame: Optional[pd.DataFrame], column: str) -> Optional[float]:
+        values = _annual_values_by_year(frame, column)
+        return sum(values.values()) if values else None
+
+    latest_income = (
+        income_slice.iloc[-1] if income_slice is not None and not income_slice.empty else None
+    )
+    if latest_income is not None:
+        tax = safe_float(latest_income.get("income_tax"))
+        profit = safe_float(latest_income.get("total_profit"))
+        if tax is not None and profit is not None and profit > 0:
+            return {"rate": _clip(tax / profit, 0.05, 0.33), "source": "latest_annual"}
+
+    tax_sum = _window_sum(income_slice, "income_tax")
+    profit_sum = _window_sum(income_slice, "total_profit")
+    if tax_sum is not None and profit_sum is not None and profit_sum > 0:
+        return {"rate": _clip(tax_sum / profit_sum, 0.05, 0.33), "source": "five_year_window"}
+
+    reported = _annual_values_by_year(fina_slice, "tax_to_ebt")
+    usable = sorted(value / 100.0 for value in reported.values() if 0.0 < value < 100.0)
+    if usable:
+        return {"rate": _clip(usable[len(usable) // 2], 0.05, 0.33), "source": "tushare_tax_to_ebt"}
+
+    return {"rate": DEFAULT_EFFECTIVE_TAX_RATE, "source": "default_fallback"}
+
+
+def _interest_bearing_debt(
+    fina_slice: Optional[pd.DataFrame],
+    balancesheet_slice: Optional[pd.DataFrame],
+) -> Dict[str, Any]:
+    """有息负债(元)，附带口径和与资产负债表加总的交叉验证倍数。
+
+    有息负债决定 WACC 里债权的权重。以前只读 `fina_indicator.interestdebt`，缺失就
+    当 0——而 debt=0 意味着 **WACC 直接退化成股权成本**，是个悄无声息就让贴现率失真
+    的口径错误。
+
+    实测 `interestdebt` 的覆盖率是 98.3%，缺失的 105 只股票里有 104 只能从资产负债表
+    把构成项加出来，所以这里加一层兜底。两者同时有值时算一个 `cross_check_ratio`
+    (报表加总 / tushare 聚合值)放进结果：实测 97.7% 的公司落在 0.9~1.1，只有 0.5%
+    分歧超过 2 倍——聚合值总体可信，但那 0.5% 值得人工看一眼。
+    """
+    latest_fina = fina_slice.iloc[-1] if fina_slice is not None and not fina_slice.empty else None
+    latest_bs = (
+        balancesheet_slice.iloc[-1]
+        if balancesheet_slice is not None and not balancesheet_slice.empty
+        else None
+    )
+
+    reported = safe_float(latest_fina.get("interestdebt")) if latest_fina is not None else None
+
+    components: List[float] = []
+    if latest_bs is not None:
+        for column in INTEREST_BEARING_DEBT_COMPONENTS:
+            value = safe_float(latest_bs.get(column))
+            if value is not None:
+                components.append(value)
+    # 构成项全为空说明这一期的资产负债表没同步到，而不是"真的没有有息负债"，
+    # 所以要区分 0.0 和 None。
+    balance_sheet_sum = sum(components) if components else None
+
+    cross_check_ratio = None
+    if reported is not None and reported > 0 and balance_sheet_sum is not None:
+        cross_check_ratio = balance_sheet_sum / reported
+
+    if reported is not None:
+        return {
+            "value": reported,
+            "source": "tushare_interestdebt",
+            "cross_check_ratio": cross_check_ratio,
+        }
+    if balance_sheet_sum is not None:
+        return {"value": balance_sheet_sum, "source": "balancesheet_components", "cross_check_ratio": None}
+    return {"value": None, "source": None, "cross_check_ratio": None}
+
+
 def _wacc_components(
     *,
     beta: Optional[float],
     market_cap: Optional[float],
     interest_bearing_debt: Optional[float],
     interest_expense: Optional[float],
-    income_tax: Optional[float],
-    total_profit: Optional[float],
+    effective_tax_rate: float,
     risk_free_rate: float,
     equity_risk_premium: float,
 ) -> Optional[Dict[str, float]]:
@@ -386,11 +502,6 @@ def _wacc_components(
         cost_of_debt_pretax = _clip(interest_expense / debt, 0.005, 0.15)
     else:
         cost_of_debt_pretax = DEFAULT_COST_OF_DEBT_PRETAX
-
-    if income_tax is not None and total_profit and total_profit > 0:
-        effective_tax_rate = _clip(income_tax / total_profit, 0.05, 0.33)
-    else:
-        effective_tax_rate = DEFAULT_EFFECTIVE_TAX_RATE
 
     cost_of_debt_after_tax = cost_of_debt_pretax * (1.0 - effective_tax_rate)
     equity_weight = equity / total_capital
@@ -983,21 +1094,23 @@ def screen_value_investing_candidates(
         income_history = income_by_symbol.get(ts_code)
         income_latest_row = income_history.iloc[-1].to_dict() if income_history is not None and not income_history.empty else {}
         beta = beta_by_symbol.get(ts_code)
+        # 实际税率和有息负债都先独立算好再喂给 WACC：这两个量在 WACC 之外还要被
+        # FCFF 的税后利息加回用到，绑在 _wacc_components 里就会出现"市值缺失导致
+        # WACC 算不出来、连带税率也退回默认值"这种没道理的连锁。
+        tax_info = _effective_tax_rate(fina_history, income_history)
+        effective_tax_rate = tax_info["rate"]
+        debt_info = _interest_bearing_debt(fina_history, balancesheet_history)
         wacc_info = _wacc_components(
             beta=beta,
             market_cap=market_cap_yuan,
-            interest_bearing_debt=safe_float(fina_latest_row.get("interestdebt")),
+            interest_bearing_debt=debt_info["value"],
             interest_expense=safe_float(income_latest_row.get("fin_exp_int_exp")),
-            income_tax=safe_float(income_latest_row.get("income_tax")),
-            total_profit=safe_float(income_latest_row.get("total_profit")),
+            effective_tax_rate=effective_tax_rate,
             risk_free_rate=risk_free_rate,
             equity_risk_premium=equity_risk_premium,
         )
         wacc_pct = safe_float(wacc_info["wacc"] * 100.0) if wacc_info else None
         cost_of_equity = wacc_info["cost_of_equity"] if wacc_info else None
-        effective_tax_rate = (
-            wacc_info["effective_tax_rate"] if wacc_info else DEFAULT_EFFECTIVE_TAX_RATE
-        )
 
         # --- 内在价值：分别用"截止最新年报"和"截止去年年报(去掉最新一期)"两个
         # 切片走同一套公式各算一次，差值就是基本面本身是在变好还是变差，不依赖
@@ -1189,6 +1302,13 @@ def screen_value_investing_candidates(
                     safe_float(wacc_info["cost_of_debt_after_tax"] * 100.0, 2) if wacc_info else None
                 ),
                 "wacc_pct": safe_float(wacc_pct, 2),
+                "effective_tax_rate_pct": safe_float(effective_tax_rate * 100.0, 2),
+                "effective_tax_rate_source": tax_info["source"],
+                "interest_bearing_debt_yi": (
+                    safe_float(debt_info["value"] / 1e8, 2) if debt_info["value"] is not None else None
+                ),
+                "interest_bearing_debt_source": debt_info["source"],
+                "interest_bearing_debt_cross_check_ratio": safe_float(debt_info["cross_check_ratio"], 2),
                 "roic_wacc_spread_pct": (
                     safe_float(avg_roic - wacc_pct, 2) if avg_roic is not None and wacc_pct is not None else None
                 ),
