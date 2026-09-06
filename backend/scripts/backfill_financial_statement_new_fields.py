@@ -24,18 +24,72 @@
 import argparse
 import json
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.core import duckdb_utils  # noqa: E402
 from src.core.analytics_database import AnalyticsSession  # noqa: E402
+from src.robot import a_stock_base_data_sync as sync_module  # noqa: E402
 from src.robot.a_stock_base_data_sync import (  # noqa: E402
     _load_income_symbols,
     sync_a_stock_balancesheet_data,
     sync_a_stock_cashflow_data,
     sync_a_stock_fina_indicator_data,
     sync_a_stock_income_data,
+)
+
+# --- DuckDB 写锁重试 ---------------------------------------------------------
+# DuckDB 是单写者。生产后端的定时任务网格很密(整点/:15/:30/:45 各有任务，
+# evc_static_info_sync、soxx_fear_greed_backfill 这类要跑 4~6 分钟)，而一张表的
+# 回填要 13 分钟，必然会撞上。撞上时 `_insert_or_replace_analytics_frame()` 打开
+# 写连接会直接抛 IOException，把整轮回填打断——实测两轮都死在这里。
+#
+# 正确的修法是在 `duckdb_utils.connect_duckdb()` 里加有界退避重试，但那是全应用
+# 分析库写入的公共路径，改动影响面大，需要单独评估。这个脚本是一次性运维工具、
+# 不进 pyz 打包产物，所以在这里就地把它包一层：只对"拿不到锁"这一种错误重试，
+# 其它异常照常抛出。等公共路径那版修好之后，这段可以直接删掉。
+LOCK_RETRY_ATTEMPTS = 60
+LOCK_RETRY_SLEEP_SECONDS = 10
+_original_connect_duckdb = duckdb_utils.connect_duckdb
+
+
+def _connect_duckdb_waiting_for_lock(*args, **kwargs):
+    for attempt in range(1, LOCK_RETRY_ATTEMPTS + 1):
+        try:
+            return _original_connect_duckdb(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if "Could not set lock" not in str(exc):
+                raise
+            if attempt == 1 or attempt % 6 == 0:
+                print(
+                    f"    [锁等待] 第{attempt}次: 写锁被后端定时任务占用，"
+                    f"{LOCK_RETRY_SLEEP_SECONDS}秒后重试",
+                    flush=True,
+                )
+            if attempt >= LOCK_RETRY_ATTEMPTS:
+                raise
+            time.sleep(LOCK_RETRY_SLEEP_SECONDS)
+
+
+# 同步模块 import 时就把名字绑走了(`from ..core.duckdb_utils import connect_duckdb`)，
+# 所以两个位置都要换。
+duckdb_utils.connect_duckdb = _connect_duckdb_waiting_for_lock
+sync_module.connect_duckdb = _connect_duckdb_waiting_for_lock
+
+
+# 表级重试是上面那层锁等待之外的兜底：锁等满 10 分钟仍拿不到(比如撞上手动触发的
+# a_stock_base_data_sync，那个能跑 40 多分钟)时，整张表重来一次。
+TABLE_RETRIES = 4
+RETRY_SLEEP_SECONDS = 300
+
+SYNC_FUNCTIONS = (
+    ("income", sync_a_stock_income_data),
+    ("balancesheet", sync_a_stock_balancesheet_data),
+    ("cashflow", sync_a_stock_cashflow_data),
+    ("fina_indicator", sync_a_stock_fina_indicator_data),
 )
 
 
@@ -46,7 +100,25 @@ def main():
         default=None,
         help="逗号分隔的ts_code列表，仅回填这些股票(先在少量股票上验证再跑全量时用)",
     )
+    parser.add_argument(
+        "--tables",
+        default=None,
+        help=(
+            "逗号分隔的表名，只回填这几张(可选: "
+            + ",".join(label for label, _ in SYNC_FUNCTIONS)
+            + ")。中途失败后续跑剩下的表时用，避免把已经跑完的表再跑一遍"
+        ),
+    )
     args = parser.parse_args()
+
+    selected = (
+        {item.strip() for item in args.tables.split(",") if item.strip()}
+        if args.tables
+        else {label for label, _ in SYNC_FUNCTIONS}
+    )
+    unknown = selected - {label for label, _ in SYNC_FUNCTIONS}
+    if unknown:
+        parser.error(f"未知的表名: {', '.join(sorted(unknown))}")
 
     analytics_db = AnalyticsSession()
     try:
@@ -57,20 +129,27 @@ def main():
         )
         print(f"回填股票数: {len(symbols)}", flush=True)
 
-        for label, fn in (
-            ("income", sync_a_stock_income_data),
-            ("balancesheet", sync_a_stock_balancesheet_data),
-            ("cashflow", sync_a_stock_cashflow_data),
-            ("fina_indicator", sync_a_stock_fina_indicator_data),
-        ):
-            print(f"=== 开始回填 {label} ===", flush=True)
-            result = fn(
-                end_date=date.today(),
-                incremental=True,
-                symbols=symbols,
-                force_full_refresh=True,
-                analytics_db=analytics_db,
-            )
+        for label, fn in SYNC_FUNCTIONS:
+            if label not in selected:
+                continue
+            result = None
+            for attempt in range(1, TABLE_RETRIES + 1):
+                print(f"=== 开始回填 {label} (第{attempt}次) ===", flush=True)
+                try:
+                    result = fn(
+                        end_date=date.today(),
+                        incremental=True,
+                        symbols=symbols,
+                        force_full_refresh=True,
+                        analytics_db=analytics_db,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"!!! {label} 第{attempt}次失败: {exc}", flush=True)
+                    if attempt >= TABLE_RETRIES:
+                        raise
+                    print(f"    {RETRY_SLEEP_SECONDS}秒后重试", flush=True)
+                    time.sleep(RETRY_SLEEP_SECONDS)
             print(
                 json.dumps(
                     {
