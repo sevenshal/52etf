@@ -86,12 +86,25 @@ const expandedRowRender = record => {
         { key: 'roe', label: '近5年平均ROE', children: formatPercent(record.avg_roe_pct) },
         { key: 'coe', label: '股权成本(CAPM)', children: formatPercent(record.cost_of_equity_pct) },
         { key: 'beta', label: 'Beta', children: formatNumber(record.beta) },
+        { key: 'roe_used', label: '采用ROE(加权平均)', children: formatPercent(record.financial_roe_pct) },
         { key: 'justified_pb', label: '合理市净率 fair P/B', children: formatNumber(record.justified_pb) },
         { key: 'pb', label: '当前PB', children: formatNumber(record.pb) },
         {
+          key: 'implied_roe',
+          label: '市场隐含可持续ROE',
+          children: formatPercent(record.implied_sustainable_roe_pct),
+        },
+        {
+          key: 'roe_gap',
+          label: '财报ROE − 市场隐含ROE',
+          children: <SignedPercent value={record.roe_vs_implied_gap_pct} />,
+        },
+        {
           key: 'method',
           label: '估值方法',
-          children: 'fair P/B = (ROE−永续增长率)/(股权成本−永续增长率)，银行/保险/证券的FCFF不适用DCF',
+          children: `剩余收益模型 P/B = 1 + Σ(ROE_t − 股权成本)×(1+g)^(t-1)/(1+r)^t，ROE 在 ${
+            record.excess_return_fade_years ?? 10
+          } 年内线性衰减到股权成本。金融机构的FCFF不适用DCF；该框架捕捉不到市场对资产质量的定价，「财报ROE − 市场隐含ROE」的差距就是需要人工判断的部分，结果不可直接采信。`,
         },
       ]
     : [
@@ -132,25 +145,34 @@ const expandedRowRender = record => {
                     : `，报表/指标 ${formatNumber(record.interest_bearing_debt_cross_check_ratio)}倍`
                 }）`,
         },
-        { key: 'base_fcff', label: '基准FCFF(近3年均值,亿)', children: formatNumber(record.dcf_base_fcff_yi) },
+        { key: 'base_nopat', label: '基准NOPAT(近3年均值,亿)', children: formatNumber(record.dcf_base_nopat_yi) },
         {
-          key: 'base_fcff_source',
-          label: 'FCFF口径',
+          key: 'roic_dcf',
+          label: 'ROIC(决定增长成本)',
           children:
-            record.dcf_base_fcff_source === 'cashflow_statement'
-              ? '现金流量表(经营现金流−资本开支+税后利息)'
-              : record.dcf_base_fcff_source === 'tushare_fina_indicator'
-                ? 'tushare财务指标(未经报表交叉验证)'
-                : '—',
+            record.dcf_roic_pct == null
+              ? '-'
+              : `${formatPercent(record.dcf_roic_pct)}（${
+                  record.dcf_roic_source === 'computed_nopat_over_invested_capital' ? '自算' : 'tushare'
+                }${
+                  record.roic_cross_check_ratio == null
+                    ? ''
+                    : `，自算/tushare ${formatNumber(record.roic_cross_check_ratio)}倍`
+                }）`,
         },
-        {
-          key: 'fcff_cross_check',
-          label: 'FCFF交叉验证(tushare/报表口径)',
-          children: record.fcff_cross_check_ratio == null ? '—' : `${formatNumber(record.fcff_cross_check_ratio)}倍`,
-        },
-        { key: 'fcff_cagr', label: 'FCFF复合增速', children: <SignedPercent value={record.fcff_cagr_pct} /> },
         { key: 'near_term_growth', label: '近端增速(DCF采用)', children: <SignedPercent value={record.near_term_growth_pct} /> },
+        {
+          key: 'growth_sources',
+          label: '增速来源(营收/EBIT/净利)',
+          children: `${formatPercent(record.revenue_cagr_pct)} / ${formatPercent(record.ebit_cagr_pct)} / ${formatPercent(record.profit_cagr_pct)}`,
+        },
         { key: 'terminal_growth', label: '永续增长率', children: formatPercent(record.terminal_growth_pct) },
+        { key: 'terminal_roic', label: '终值期ROIC(向WACC收敛一半)', children: formatPercent(record.dcf_terminal_roic_pct) },
+        {
+          key: 'terminal_reinvest',
+          label: '终值期再投资率(g/ROIC)',
+          children: formatPercent(record.dcf_terminal_reinvestment_rate_pct),
+        },
         { key: 'ev', label: '企业价值(DCF,亿)', children: formatNumber(record.dcf_enterprise_value_yi) },
         { key: 'terminal_share', label: '终值占企业价值', children: formatPercent(record.dcf_terminal_value_share_pct) },
         { key: 'net_debt', label: '净债务(亿)', children: formatNumber(record.dcf_net_debt_yi) },
@@ -167,6 +189,18 @@ const expandedRowRender = record => {
         },
         { key: 'equity_value', label: '归母股权价值(DCF,亿)', children: formatNumber(record.dcf_equity_value_yi) },
         { key: 'market_cap', label: '当前市值(亿)', children: formatNumber(record.market_cap_yi) },
+        {
+          key: 'cash_fcff',
+          label: '交叉验证-报表口径FCFF(亿)',
+          children:
+            record.cash_fcff_yi == null
+              ? '-'
+              : `${formatNumber(record.cash_fcff_yi)}${
+                  record.fcff_cross_check_ratio == null
+                    ? ''
+                    : `（tushare/报表 ${formatNumber(record.fcff_cross_check_ratio)}倍）`
+                }`,
+        },
         { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
       ];
   const crossCheckItems = [
@@ -429,10 +463,11 @@ const ValueInvestingScreen = () => {
         <div>
           <Title level={3}>价值投资扫描</Title>
           <Paragraph type="secondary" className="value-investing-intro">
-            质量闸门(ROIC能否持续跑赢WACC + 现金流验证利润) → 两阶段FCFF DCF算内在价值(银行/保险/证券改用合理市净率)
-            → 潜在回报率 = 内在价值 vs 当前价格，并给出WACC±150bp的悲观/乐观区间。仅做研究提示，不构成投资建议。
-            FCFF 取现金流量表口径(经营现金流−资本开支+税后利息)；股权价值按归母利润占比折算成归母口径
-            (与账面少数股东权益取较大的扣除额)后再与归母市值比较。
+            质量闸门(ROIC能否持续跑赢WACC + 现金流验证利润) → 两阶段再投资口径FCFF DCF算内在价值
+            (银行/保险/证券改用合理市净率) → 潜在回报率 = 内在价值 vs 当前价格，并给出WACC±150bp的悲观/乐观区间。
+            仅做研究提示，不构成投资建议。
+            估值起点是 NOPAT 而非历史自由现金流，增长按 g = 再投资率 × ROIC 扣除相应再投资——增长不是免费的；
+            股权价值按归母利润占比折算成归母口径后再与归母市值比较。
           </Paragraph>
         </div>
         <Space wrap align="start" className="value-investing-toolbar__controls">

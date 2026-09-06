@@ -87,23 +87,38 @@ DEFAULT_COST_OF_DEBT_PRETAX = 0.045
 DEFAULT_EFFECTIVE_TAX_RATE = 0.25
 DEFAULT_TERMINAL_GROWTH_RATE = 0.03
 DCF_EXPLICIT_YEARS = 5
-# 股权成本(CAPM)下限：无风险利率现取中债国债10年期(当前只有1.7%左右)，低beta股票
-# 算出来的股权成本会低到6%上下——那不是"这家公司风险低"，而是"A股投资者不可能只要
-# 6%的年化回报还承担股票风险"。贴现率一低，终值倍数立刻膨胀，DCF 结果就失真了。
-MIN_COST_OF_EQUITY = 0.08
-# 终值(永续增长模型)在企业价值里的占比上限。利差闸门只卡住了 WACC-g 这一个入口，
-# 但真正的失真信号是"这个估值几乎全部来自第6年以后的假设"。占比越界时宁可判定
-# DCF 不可用，也不要输出一个 85% 以上都建立在永续假设上的精确数字。
-MAX_TERMINAL_VALUE_SHARE = 0.85
-# WACC 与永续增长率的利差下限：终值 = 第N年FCFF×(1+g)/(WACC-g)，利差越窄终值
-# 倍数越夸张(利差1pp对应~100倍，3pp对应~34倍，5pp对应~21倍)。1pp 太松，
-# 实际跑数据时出现过 WACC-g 只有2.1pp、终值炸到年FCFF 48倍的案例，改成3pp。
-MIN_WACC_TERMINAL_SPREAD = 0.03
+# Gordon 永续增长模型在 g 趋近 WACC 时会发散，必须留一道数值下限。这是**数值稳定性
+# 要求**，不是用来把估值压低的旋钮：真正约束增长假设合理性的是下面的再投资口径
+# (g 越高，为支撑它而必须投回去的资本越多，自由现金流越少)，而不是这个阈值。
+MIN_WACC_TERMINAL_SPREAD = 0.015
+# 永续增长率的经济上限：一家公司不可能永远比整个经济体长得快。用长期名义GDP增速
+# 做上限，而不是用无风险利率——中国当前的10年期国债利率(1.7%)是政策压低的结果，
+# 拿它当全市场的长期名义增长率会系统性低估。
+MAX_TERMINAL_GROWTH_RATE = 0.05
 NEAR_TERM_GROWTH_BOUNDS = (-0.15, 0.30)
+# 终值期的 ROIC：竞争会侵蚀超额回报，永续期继续用公司当前的高 ROIC 等于假设护城河
+# 永不失效。按"当前 ROIC 向 WACC 收敛一半"处理，并且不低于 WACC(否则永续期每投一
+# 块钱都在毁灭价值，那种公司也不该按永续增长估)。
+TERMINAL_ROIC_CONVERGENCE = 0.5
+# 再投资率上限：g/ROIC 超过 1 意味着再投资超过 NOPAT、自由现金流永远为负，属于
+# 增长假设和回报率假设互相矛盾，此时把增长率压到 ROIC 允许的范围内。
+MAX_REINVESTMENT_RATE = 0.9
+# 估值分位/均值回归的最小观测数。a_stock_market_daily 的 pe_ttm/pb 是后加的列、
+# 日线同步只写新的一天从未回填，实测全表最早只到 2026-08-25——9 个交易日。没有这道
+# 保护时 reversion_return_pct 会拿 9 天算出所谓"5年中位PE"照常输出，是个会误导人的
+# 数字，比缺失更糟。
+VALUATION_HISTORY_MIN_OBSERVATIONS = 20
 # 复合增速的可信上限(百分点)。超过这个值说明序列基期接近0、首尾比值失真，
 # 这时该判定"这个增速不可用"，而不是 clip 到 NEAR_TERM_GROWTH_BOUNDS 的上界——
 # 后者等于把一个明显的垃圾值直接翻译成"允许范围内最乐观的增长假设"。
 MAX_PLAUSIBLE_CAGR_PCT = 100.0
+# 金融股剩余收益模型里 ROE 向股权成本衰减的年数(超额回报的竞争存续期)。
+FINANCIAL_EXCESS_RETURN_FADE_YEARS = 10
+# ROIC 交叉验证：tushare 的 roic 与自算 EBIT×(1-税率)/全部投入资本，实测相关系数
+# 只有 0.710(中位 5.30% vs 5.16%)。质量闸门和再投资口径都建立在 ROIC 上，两者分歧
+# 过大时把倍数输出到结果里供人工判断。
+ROIC_CROSS_CHECK_MAX_RATIO = 2.0
+ROIC_BOUNDS = (0.01, 0.60)  # 投入资本接近0时比值会失真，夹住
 SCENARIO_DISCOUNT_RATE_SPREAD = 0.015
 SCENARIO_GROWTH_MULTIPLIER = (0.5, 1.3)  # (悲观, 乐观) 相对近端增速的倍数
 
@@ -127,6 +142,7 @@ FINANCIAL_COMP_TYPES = {"2", "3", "4"}
 # 4 张财务报表按 tushare 官方字段全集建表(97~170列)，扫描器只需要下面这十几列。
 # `_annual_rows` 必须显式点名，否则 SELECT * 会把全市场×5期年报的所有列拉进内存。
 INCOME_SCAN_COLUMNS = (
+    "revenue",           # 营业收入：增长率的首选来源(比FCFF/利润稳定得多)
     "n_income_attr_p",   # 归母净利润：算利润复合增速(和市值同为归母口径)
     "n_income",          # 净利润(含少数股东损益)：和上一项相除得归母利润占比
     "minority_gain",     # 少数股东损益：n_income 缺失时反推归母利润占比
@@ -168,7 +184,12 @@ CASHFLOW_SCAN_COLUMNS = (
 )
 FINA_INDICATOR_SCAN_COLUMNS = (
     "roe",
+    "roe_waa",        # 加权平均ROE：金融股合理市净率用它比期末ROE合适
     "roic",
+    "ebit",           # 息税前利润：NOPAT = EBIT×(1-实际税率)
+    "invest_capital", # 全部投入资本：自算ROIC做交叉验证
+    "daa",            # 折旧摊销：判断资本开支是否覆盖资产损耗
+    "tax_to_ebt",
     "debt_to_assets",
     "interestdebt",   # 有息负债
     "fcff",           # tushare 口径 FCFF：只做交叉验证，不再直接当 DCF 基准
@@ -305,9 +326,26 @@ def _percentile_rank(current: Optional[float], history: pd.Series) -> Optional[f
         return None
     values = history.dropna()
     values = values[values > 0]
-    if len(values) < 20:
+    if len(values) < VALUATION_HISTORY_MIN_OBSERVATIONS:
         return None
     return float((values <= current).mean() * 100.0)
+
+
+def _history_median(history: Optional[pd.Series]) -> Optional[float]:
+    """历史序列的中位数，样本不足 VALUATION_HISTORY_MIN_OBSERVATIONS 时返回 None。
+
+    这道保护以前只加在分位数上，没加在均值回归上，后果是：`a_stock_market_daily` 的
+    pe_ttm/pb 是后加的列、日线同步只写新的一天从未回填，实测全表最早只到 2026-08-25
+    (9个交易日)——分位数因为样本不足全市场恒为 null，而均值回归照样拿这 9 天算出一个
+    "5年中位PE"输出到页面上。缺失只是没信息，输出一个假的"5年"才是误导。
+    """
+    if history is None:
+        return None
+    values = history.dropna()
+    values = values[values > 0]
+    if len(values) < VALUATION_HISTORY_MIN_OBSERVATIONS:
+        return None
+    return safe_float(values.median())
 
 
 def _cagr_pct(latest: Optional[float], base: Optional[float], years: float) -> Optional[float]:
@@ -494,9 +532,12 @@ def _wacc_components(
     # 交易不活跃、流动性差的股票，原始beta经常出现0.3、0.4这种不合理的低值，
     # 直接拖低股权成本/WACC，进而让DCF终值因为利差过窄而爆炸。
     effective_beta = BLUME_ADJUSTMENT_WEIGHT * raw_beta + (1.0 - BLUME_ADJUSTMENT_WEIGHT) * 1.0
-    # CAPM 算出来的股权成本再套一个绝对下限：无风险利率处在1.7%这种历史低位时，
-    # 低beta股票的 CAPM 结果会跌到6%上下，那个数字当贴现率用会直接把 DCF 终值吹爆。
-    cost_of_equity = max(MIN_COST_OF_EQUITY, risk_free_rate + effective_beta * equity_risk_premium)
+    # 纯 CAPM，不加输出端的地板。曾经加过 8% 的股权成本下限来压住 DCF 终值，实测的
+    # 后果是全市场超过一半的股票股权成本被压成同一个 8.00%(中位数和P25都等于地板)，
+    # beta 白算了、截面信息全丢——那是在压数字而不是算准。终值失真的真正原因是增长
+    # 不需要再投资(见 _two_stage_reinvestment_value)，在那里修才是对的。
+    # 如果结果整体偏乐观，该调的是 equity_risk_premium 这个真实的经济假设。
+    cost_of_equity = risk_free_rate + effective_beta * equity_risk_premium
 
     if debt > 0 and interest_expense and interest_expense > 0:
         cost_of_debt_pretax = _clip(interest_expense / debt, 0.005, 0.15)
@@ -520,62 +561,177 @@ def _wacc_components(
     }
 
 
-def _two_stage_fcff_value(
-    base_fcff: Optional[float],
+def _terminal_roic(roic: Optional[float], wacc: float) -> Optional[float]:
+    """终值期的投入资本回报率：当前 ROIC 向 WACC 收敛一半。
+
+    永续期继续套用公司当前的高 ROIC，等于假设护城河永不失效、竞争永远进不来。反过来
+    直接用 WACC(完全竞争)又抹掉了确实存在的护城河。取中间：收敛一半，并且不低于
+    WACC——ROIC<WACC 时每多投一块钱都在毁灭价值，那种公司本来也不该按永续增长估。
+    """
+    if roic is None or not math.isfinite(roic):
+        return None
+    converged = roic + (wacc - roic) * TERMINAL_ROIC_CONVERGENCE
+    return max(converged, wacc)
+
+
+def _two_stage_reinvestment_value(
+    base_nopat: Optional[float],
+    roic: Optional[float],
     near_term_growth: float,
     terminal_growth: float,
     wacc: Optional[float],
     years: int = DCF_EXPLICIT_YEARS,
 ) -> Optional[Dict[str, float]]:
-    """两阶段 FCFF 折现，返回 {企业价值, 显式期现值, 终值现值, 终值占比}(单位:元)。
+    """再投资口径的两阶段 FCFF 折现，返回企业价值(元)及构成明细。
 
-    显式预测期内增长率从 near_term_growth 线性衰减到 terminal_growth，
-    终值用永续增长模型。两道可用性闸门，任一不过直接返回 None 而不是返回一个
-    虚假的精确数字：
+    **和旧版的本质区别**：旧版拿历史 FCFF 直接按 g 增长，等于假设增长是免费的。
+    实测全市场有 49.9% 的公司资本开支低于折旧摊销——把它们的历史自由现金流按永续
+    增长外推，等于假设资产永远不用更新还能一直长大。这是估值被系统性高估的主因，
+    也是之前不得不靠股权成本地板、终值占比闸门去硬压结果的原因。
 
-    1. WACC 与永续增长率利差 < MIN_WACC_TERMINAL_SPREAD —— 终值倍数会爆炸；
-    2. 终值现值占企业价值 > MAX_TERMINAL_VALUE_SHARE —— 估值几乎全部来自第6年
-       以后的永续假设，利差闸门放行了也不代表这个数字可信。
+    这一版走 Damodaran 的基本关系 `g = 再投资率 × ROIC`：想长得快就得把更多 NOPAT
+    投回去，自由现金流相应减少。
+
+        NOPAT_t     = NOPAT_{t-1} × (1 + g_t)
+        再投资_t    = NOPAT_t × (g_{t+1} / ROIC)     # 本年投入支撑下一年的增长
+        FCFF_t      = NOPAT_t − 再投资_t
+        终值        = NOPAT_N × (1+g∞) × (1 − g∞/ROIC∞) / (WACC − g∞)
+
+    这样一来 ROIC 低的公司想增长会付出极高的代价(博汇纸业 ROIC 5.4%，长 3% 就要把
+    56% 的 NOPAT 投回去)，而 ROIC 高的公司增长几乎不花钱——这正是"ROIC 与 WACC 的
+    价差决定增长是否创造价值"这句话在估值公式里的体现，不再需要额外的闸门去表达。
     """
-    if base_fcff is None or base_fcff <= 0 or wacc is None:
+    if base_nopat is None or base_nopat <= 0 or wacc is None or roic is None:
+        return None
+    if roic <= 0:
         return None
     if wacc - terminal_growth < MIN_WACC_TERMINAL_SPREAD:
         return None
 
+    terminal_roic = _terminal_roic(roic, wacc)
+    if terminal_roic is None or terminal_roic <= 0:
+        return None
+
+    # 增长率和 ROIC 必须自洽：再投资率 g/ROIC 不能超过 1(那意味着自由现金流永远为负)。
+    near_term_growth = min(near_term_growth, roic * MAX_REINVESTMENT_RATE)
+    terminal_growth = min(terminal_growth, terminal_roic * MAX_REINVESTMENT_RATE)
+    if wacc - terminal_growth < MIN_WACC_TERMINAL_SPREAD:
+        return None
+
+    def _growth_at(step: int) -> float:
+        """显式预测期内增长率从近端线性衰减到永续增长率。"""
+        weight = (step - 1) / (years - 1) if years > 1 else 1.0
+        return near_term_growth + (terminal_growth - near_term_growth) * weight
+
     pv_explicit = 0.0
-    fcff_t = base_fcff
+    nopat_t = base_nopat
+    total_reinvestment = 0.0
     for t in range(1, years + 1):
-        weight = (t - 1) / (years - 1) if years > 1 else 1.0
-        g_t = near_term_growth + (terminal_growth - near_term_growth) * weight
-        fcff_t = fcff_t * (1.0 + g_t)
+        nopat_t = nopat_t * (1.0 + _growth_at(t))
+        # 本年的再投资要支撑的是下一年的增长；最后一年之后进入永续期。
+        next_growth = _growth_at(t + 1) if t < years else terminal_growth
+        reinvestment_rate = _clip(next_growth / (roic if t < years else terminal_roic), 0.0, 1.0)
+        fcff_t = nopat_t * (1.0 - reinvestment_rate)
+        total_reinvestment += nopat_t * reinvestment_rate
         pv_explicit += fcff_t / ((1.0 + wacc) ** t)
-    terminal_value = fcff_t * (1.0 + terminal_growth) / (wacc - terminal_growth)
+
+    terminal_reinvestment_rate = _clip(terminal_growth / terminal_roic, 0.0, 1.0)
+    terminal_fcff = nopat_t * (1.0 + terminal_growth) * (1.0 - terminal_reinvestment_rate)
+    terminal_value = terminal_fcff / (wacc - terminal_growth)
     pv_terminal = terminal_value / ((1.0 + wacc) ** years)
+
     enterprise_value = pv_explicit + pv_terminal
     if enterprise_value <= 0:
-        return None
-    terminal_share = pv_terminal / enterprise_value
-    if terminal_share > MAX_TERMINAL_VALUE_SHARE:
         return None
     return {
         "enterprise_value": enterprise_value,
         "pv_explicit": pv_explicit,
         "pv_terminal": pv_terminal,
-        "terminal_share": terminal_share,
+        # 终值占比不再是可用性闸门(5年显式期的DCF终值占70~80%本来就是常态，拿它当
+        # 失真信号是找错了靶子)，只作为诊断字段输出，让人能一眼看出估值有多依赖永续假设。
+        "terminal_share": pv_terminal / enterprise_value,
+        "terminal_roic": terminal_roic,
+        "terminal_reinvestment_rate": terminal_reinvestment_rate,
+        "explicit_reinvestment": total_reinvestment,
+        "applied_near_term_growth": near_term_growth,
+        "applied_terminal_growth": terminal_growth,
     }
 
 
-def _justified_pb(avg_roe_frac: Optional[float], cost_of_equity: Optional[float], terminal_growth: float) -> Optional[float]:
-    """银行/保险/证券的"合理市净率"模型：fair P/B = (ROE-g)/(r-g)。
+def _excess_return_discount_factor(cost_of_equity: float, growth: float, years: int) -> float:
+    """Σ_{t=1..N} (1+g)^(t-1) / (1+r)^t —— 剩余收益的折现因子之和。
 
-    FCFF DCF 对金融类公司不适用(存贷款不是资本开支/营运资金变动)，
-    这是分析师覆盖银行/险资时的标准替代框架，直接用 ROE 和股权成本算合理估值。
+    账面价值按 g 增长，超额收益按 r 折现。抽出来是因为它同时被"算合理市净率"和
+    "从当前股价反推市场隐含ROE"两个方向用到，必须是同一个数。
     """
-    if avg_roe_frac is None or cost_of_equity is None:
+    factor = 0.0
+    for step in range(1, years + 1):
+        factor += ((1.0 + growth) ** (step - 1)) / ((1.0 + cost_of_equity) ** step)
+    return factor
+
+
+def _residual_income_pb(
+    roe_frac: Optional[float],
+    cost_of_equity: Optional[float],
+    growth: float,
+    fade_years: int = FINANCIAL_EXCESS_RETURN_FADE_YEARS,
+) -> Optional[float]:
+    """金融类公司的合理市净率：剩余收益(超额收益)模型。
+
+        P/B = 1 + Σ_{t=1..N} (ROE_t − r) × (1+g)^(t-1) / (1+r)^t
+
+    **为什么不再用 `fair P/B = (ROE−g)/(r−g)`**：那个 Gordon 形式本身没错，错在它对
+    银行完全没有分辨力。实测银行 beta 低，CAPM 股权成本只有 5~7%，配 3% 的永续增长，
+    分母 `r−g` 只剩 1.4~2.4 个百分点——r 或 g 差 50bp，合理市净率就动 25%。用一个
+    对输入如此敏感的公式给全市场银行排序，输出的精度是假的(实测算出 3~4 倍市净率，
+    而中国银行股长期在 0.6 倍交易，一度让三只银行占据扫描榜前列)。
+
+    剩余收益模型锚定在账面价值上：`P/B = 1 + 超额收益的现值`。ROE 等于股权成本时
+    P/B 正好是 1，不存在会爆炸的分母，对输入的敏感度是线性而非双曲的。
+
+    ROE 在 `fade_years` 年内从当前水平**线性衰减到股权成本**：竞争会侵蚀超额回报，
+    假设一家银行永远赚 r 以上是没有依据的。衰减完成后超额收益为零，所以没有终值项
+    ——这也是这个模型比 Gordon 形式稳健的地方，价值不依赖于对第 N 年之后的假设。
+    """
+    if roe_frac is None or cost_of_equity is None or fade_years <= 0:
         return None
-    if cost_of_equity - terminal_growth < MIN_WACC_TERMINAL_SPREAD:
+    if cost_of_equity <= 0:
         return None
-    return (avg_roe_frac - terminal_growth) / (cost_of_equity - terminal_growth)
+
+    book_value = 1.0
+    present_value = 0.0
+    for step in range(1, fade_years + 1):
+        # 第 step 年的 ROE：从当前水平线性衰减到股权成本
+        weight = step / fade_years
+        roe_t = roe_frac + (cost_of_equity - roe_frac) * weight
+        present_value += (roe_t - cost_of_equity) * book_value / ((1.0 + cost_of_equity) ** step)
+        book_value *= (1.0 + growth)
+    return 1.0 + present_value
+
+
+def _implied_sustainable_roe(
+    current_pb: Optional[float],
+    cost_of_equity: Optional[float],
+    growth: float,
+    fade_years: int = FINANCIAL_EXCESS_RETURN_FADE_YEARS,
+) -> Optional[float]:
+    """从当前市净率反推市场隐含的可持续 ROE(小数)。
+
+    把剩余收益公式倒过来解(假设 ROE 在整个窗口内保持不变)：
+        P/B = 1 + (ROE − r) × Σ(1+g)^(t-1)/(1+r)^t   ⟹   ROE = r + (P/B − 1) / Σ
+
+    这是这一版对金融股最有用的输出。模型和市场分歧巨大时，与其硬给一个"合理市净率
+    是账面的 3 倍"的结论，不如告诉使用者**市场到底在假设什么**：中国银行股在 0.6 倍
+    市净率交易，隐含的可持续 ROE 往往只有个位数甚至更低，远低于财报上报出来的十几个
+    点。差距就是市场对资产质量/隐性风险的定价——那部分是纯 CAPM+ROE 框架看不见的，
+    需要人工判断，而不是让模型假装它不存在。
+    """
+    if current_pb is None or current_pb <= 0 or cost_of_equity is None or cost_of_equity <= 0:
+        return None
+    factor = _excess_return_discount_factor(cost_of_equity, growth, fade_years)
+    if factor <= 0:
+        return None
+    return cost_of_equity + (current_pb - 1.0) / factor
 
 
 def _annual_values_by_year(frame: Optional[pd.DataFrame], column: str) -> Dict[int, float]:
@@ -621,8 +777,17 @@ def _fcff_history(
     for year, ocf in operating_cash.items():
         if year not in capex:
             continue
-        after_tax_interest = interest_expense.get(year, 0.0) * (1.0 - effective_tax_rate)
-        cash_based[year] = ocf - capex[year] + after_tax_interest
+        # 中国会计准则(CAS 31)把"偿付利息支付的现金"归在**筹资活动**
+        # (c_pay_dist_dpcp_int_exp 位于筹资分节)，间接法是把财务费用加回净利润的，
+        # 所以经营活动现金流本身已经是**付息前**口径：
+        #     CFO_CAS ≈ 净利 + D&A + 财务费用 − ΔWC
+        #             = EBIT(1−t) + I·t + D&A − ΔWC
+        # 于是 `CFO − capex` 已经等于 FCFF 再加上一笔利息税盾，要**减掉** I·t 才对。
+        # 美国准则下利息付现在经营活动里，才是教科书上那个 `CFO + I(1−t) − capex`；
+        # 直接套用会多算大约一整笔利息费用。实测 44.2% 的公司利息超过
+        # (OCF−capex) 的 10%，23.6% 超过 30%，不是可以忽略的量级。
+        interest_tax_shield = interest_expense.get(year, 0.0) * effective_tax_rate
+        cash_based[year] = ocf - capex[year] - interest_tax_shield
 
     # 交叉验证的窗口和 DCF 基准取值的窗口保持一致(都是最近3期)，这样
     # cross_check_ratio 就能直接读成"tushare 的基准 FCFF 是报表口径的几倍"。
@@ -648,6 +813,74 @@ def _fcff_history(
         "source": source,
         "cross_check_ratio": cross_check_ratio,
     }
+
+
+def _roic_estimate(
+    fina_slice: Optional[pd.DataFrame],
+    effective_tax_rate: float,
+) -> Dict[str, Any]:
+    """投入资本回报率(小数)，附口径与交叉验证倍数。
+
+    ROIC 是这个模型里最吃重的一个数：质量闸门用它判断"增长是否创造价值"，再投资
+    口径的 DCF 用它决定"长一个百分点要投多少钱"。以前完全采信 tushare 的 `roic`
+    一个聚合值——和当初完全采信 `fcff` 是同一类风险。
+
+    实测自算的 `EBIT×(1−实际税率) / 全部投入资本` 与 tushare `roic` 的相关系数只有
+    0.710(中位数 5.16% vs 5.30%)，不算高。这里以 tushare 的值为主(它的口径更完整，
+    考虑了商誉、在建工程等调整)，缺失时用自算值兜底，两者都有时输出
+    `cross_check_ratio` 供人工判断。取近5年均值而不是最新一年，避免单年波动。
+    """
+    reported = _annual_values_by_year(fina_slice, "roic")
+    reported_mean = (
+        sum(reported.values()) / len(reported) / 100.0 if reported else None
+    )
+
+    ebit = _annual_values_by_year(fina_slice, "ebit")
+    invest_capital = _annual_values_by_year(fina_slice, "invest_capital")
+    computed_values = [
+        ebit[year] * (1.0 - effective_tax_rate) / invest_capital[year]
+        for year in sorted(set(ebit) & set(invest_capital))
+        if invest_capital[year] > 0
+    ]
+    computed_mean = sum(computed_values) / len(computed_values) if computed_values else None
+
+    cross_check_ratio = None
+    if reported_mean is not None and computed_mean is not None and reported_mean > 0:
+        cross_check_ratio = computed_mean / reported_mean
+
+    if reported_mean is not None and reported_mean > 0:
+        return {
+            "value": _clip(reported_mean, *ROIC_BOUNDS),
+            "source": "tushare_roic",
+            "cross_check_ratio": cross_check_ratio,
+        }
+    if computed_mean is not None and computed_mean > 0:
+        return {
+            "value": _clip(computed_mean, *ROIC_BOUNDS),
+            "source": "computed_nopat_over_invested_capital",
+            "cross_check_ratio": None,
+        }
+    return {"value": None, "source": None, "cross_check_ratio": cross_check_ratio}
+
+
+def _base_nopat(
+    fina_slice: Optional[pd.DataFrame],
+    effective_tax_rate: float,
+    years: int = 3,
+) -> Optional[float]:
+    """基准 NOPAT = 近3年 `EBIT × (1 − 实际税率)` 的均值。
+
+    用 NOPAT 而不是历史自由现金流当 DCF 的起点，是这一版的核心改动：自由现金流里
+    混着营运资金的一次性释放和"资本开支低于折旧"的资产损耗，把它当可持续现金流
+    外推是错的。NOPAT 是经营层面的税后利润，再投资在 DCF 里显式扣除。
+    """
+    ebit = _annual_values_by_year(fina_slice, "ebit")
+    if not ebit:
+        return None
+    recent = [ebit[year] for year in sorted(ebit)[-years:]]
+    if not recent:
+        return None
+    return sum(recent) / len(recent) * (1.0 - effective_tax_rate)
 
 
 def _parent_profit_share(
@@ -704,9 +937,10 @@ def _parent_equity_value(
     进而系统性高估归母价值——上一版把回报率从 1403% 压到 149%，剩下的这一层就是
     这个原因。
 
-    所以按归母利润占比把全体股东的股权价值切一刀，再和账面少数股东权益取**较大**的
-    那个作为扣除额：两种口径各有失效场景(比例法在子公司亏损时失真、账面法在子公司
-    高回报时失真)，取大是保守的那一侧。拿不到利润占比时退回纯账面口径。
+    所以只要能算出归母利润占比，就按比例把全体股东的股权价值切一刀——少数股东分到的
+    是子公司未来现金流的那一份，不是它的账面净资产。曾经写成"和账面取较大者"，那是
+    保守化而不是准确化：取大等于在两个估计之间系统性偏向低估归母价值，方向性偏差和
+    高估一样是错的。算不出利润占比时才退回纯账面口径。
     """
     gross_equity = enterprise_value - net_debt
     if parent_profit_share is None or gross_equity <= 0:
@@ -716,29 +950,42 @@ def _parent_equity_value(
             "equity_value": gross_equity - book_minority,
         }
     proportionate = gross_equity * (1.0 - parent_profit_share)
-    if proportionate > book_minority:
-        return {
-            "minority_claim": proportionate,
-            "minority_basis": "proportionate",
-            "equity_value": gross_equity - proportionate,
-        }
     return {
-        "minority_claim": book_minority,
-        "minority_basis": "book",
-        "equity_value": gross_equity - book_minority,
+        "minority_claim": proportionate,
+        "minority_basis": "proportionate",
+        "equity_value": gross_equity - proportionate,
     }
 
 
-def _estimate_near_term_growth(fcff_cagr_pct: Optional[float], profit_cagr_pct: Optional[float]) -> float:
-    """近端增速：优先用 FCFF 复合增速，其次净利润复合增速，都不可用时按 0 处理。
+def _fundamental_growth(income_slice: Optional[pd.DataFrame], fina_slice: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """近端增速：营业收入/EBIT/净利润三条复合增速取中位数。
 
-    `_cagr_pct` 已经把"基期接近0导致的天文数字增速"归成 None，所以这里拿到的一定
-    是一个还算可信的增速，clip 只负责收掉尾部极端值——而不再承担"把垃圾值压进
-    允许范围"的职责(那样等于把不可用的输入翻译成最乐观的假设)。
+    以前优先用 FCFF 复合增速——那是所有序列里噪声最大的一条(华特达因那次 339.6% 的
+    离谱增速就出自它)。收入是最稳定的增长代理，EBIT 次之，净利润再次之，三者取中位
+    能压掉单条序列的异常。全部不可用时按 0 处理，而不是猜一个正增长。
+
+    注意这里用的都是**合并口径**(revenue / ebit / n_income)，和 NOPAT、FCFF 保持一致；
+    归母那一刀在最后按利润占比切(见 _parent_equity_value)。
     """
-    source_pct = fcff_cagr_pct if fcff_cagr_pct is not None else profit_cagr_pct
-    growth = (source_pct / 100.0) if source_pct is not None else 0.0
-    return _clip(growth, *NEAR_TERM_GROWTH_BOUNDS)
+    def _cagr(frame, column) -> Optional[float]:
+        values = _annual_values_by_year(frame, column)
+        years = sorted(values)
+        return _series_cagr_pct([values[year] for year in years], years) if years else None
+
+    revenue_cagr = _cagr(income_slice, "revenue")
+    ebit_cagr = _cagr(fina_slice, "ebit")
+    profit_cagr = _cagr(income_slice, "n_income")
+    if profit_cagr is None:
+        profit_cagr = _cagr(income_slice, "n_income_attr_p")
+
+    median_pct = _median([revenue_cagr, ebit_cagr, profit_cagr], min_count=1)
+    growth = (median_pct / 100.0) if median_pct is not None else 0.0
+    return {
+        "growth": _clip(growth, *NEAR_TERM_GROWTH_BOUNDS),
+        "revenue_cagr_pct": revenue_cagr,
+        "ebit_cagr_pct": ebit_cagr,
+        "profit_cagr_pct": profit_cagr,
+    }
 
 
 def _intrinsic_value_snapshot(
@@ -769,64 +1016,86 @@ def _intrinsic_value_snapshot(
         "book_minority": None,
         "parent_profit_share": None,
         "terminal_value_share": None,
+        "terminal_roic": None,
+        "terminal_reinvestment_rate": None,
         "justified_pb": None,
-        "base_fcff": None,
-        "fcff_source": None,
-        "fcff_cross_check_ratio": None,
+        "financial_roe": None,
+        "base_nopat": None,
+        "roic": None,
+        "roic_source": None,
+        "roic_cross_check_ratio": None,
         "near_term_growth": None,
-        "fcff_cagr_pct": None,
+        "applied_terminal_growth": None,
+        "revenue_cagr_pct": None,
+        "ebit_cagr_pct": None,
         "profit_cagr_pct": None,
+        "cash_fcff": None,
+        "cash_fcff_source": None,
+        "fcff_cross_check_ratio": None,
         "unavailable_reason": None,
     }
 
     if is_financial:
-        avg_roe = (
-            safe_float(fina_slice["roe"].mean())
-            if fina_slice is not None and "roe" in fina_slice and not fina_slice.empty
-            else None
-        )
+        # 金融股用加权平均ROE(roe_waa)而不是期末ROE：增发/回购的年份两者能差出几个
+        # 百分点，而合理市净率对 ROE 极其敏感。roe_waa 缺失时才退回 roe。
+        avg_roe = None
+        for column in ("roe_waa", "roe"):
+            values = _annual_values_by_year(fina_slice, column)
+            if values:
+                avg_roe = sum(values.values()) / len(values)
+                break
         avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
-        result["justified_pb"] = _justified_pb(avg_roe_frac, cost_of_equity, terminal_growth_rate)
+        result["financial_roe"] = avg_roe_frac
+        result["justified_pb"] = _residual_income_pb(
+            avg_roe_frac, cost_of_equity, terminal_growth_rate
+        )
         if result["justified_pb"] is None:
             result["unavailable_reason"] = "股权成本或ROE数据不足，无法估算合理市净率"
         return result
 
+    # --- 增长与回报率：DCF 的两个核心输入 ---
+    growth_info = _fundamental_growth(income_slice, fina_slice)
+    result["near_term_growth"] = growth_info["growth"]
+    result["revenue_cagr_pct"] = growth_info["revenue_cagr_pct"]
+    result["ebit_cagr_pct"] = growth_info["ebit_cagr_pct"]
+    result["profit_cagr_pct"] = growth_info["profit_cagr_pct"]
+
+    roic_info = _roic_estimate(fina_slice, effective_tax_rate)
+    result["roic"] = roic_info["value"]
+    result["roic_source"] = roic_info["source"]
+    result["roic_cross_check_ratio"] = safe_float(roic_info["cross_check_ratio"], 2)
+
+    result["base_nopat"] = _base_nopat(fina_slice, effective_tax_rate)
+
+    # 现金流量表口径的自由现金流不再进 DCF，但仍作为交叉验证保留：NOPAT 口径算出来的
+    # 价值如果和实打实收到的现金差太远，是个值得人工看一眼的信号。
     fcff_history = _fcff_history(
         fina_slice=fina_slice,
         cashflow_slice=cashflow_slice,
         income_slice=income_slice,
         effective_tax_rate=effective_tax_rate,
     )
-    result["fcff_source"] = fcff_history["source"]
+    result["cash_fcff_source"] = fcff_history["source"]
     result["fcff_cross_check_ratio"] = safe_float(fcff_history["cross_check_ratio"], 2)
-    recent_fcff = fcff_history["values"][-3:]
-    if recent_fcff:
-        result["base_fcff"] = safe_float(sum(recent_fcff) / len(recent_fcff))
-    result["fcff_cagr_pct"] = _series_cagr_pct(fcff_history["values"], fcff_history["years"])
-
-    if income_slice is not None and not income_slice.empty and "n_income_attr_p" in income_slice:
-        profit_by_year = _annual_values_by_year(income_slice, "n_income_attr_p")
-        profit_years = sorted(profit_by_year)
-        result["profit_cagr_pct"] = _series_cagr_pct(
-            [profit_by_year[year] for year in profit_years], profit_years
-        )
-
-    result["near_term_growth"] = _estimate_near_term_growth(
-        result["fcff_cagr_pct"], result["profit_cagr_pct"]
-    )
+    recent_cash_fcff = fcff_history["values"][-3:]
+    if recent_cash_fcff:
+        result["cash_fcff"] = safe_float(sum(recent_cash_fcff) / len(recent_cash_fcff))
 
     if wacc is None:
         result["unavailable_reason"] = "市值或有息负债数据不足，无法估算WACC"
         return result
-    if result["base_fcff"] is None or result["base_fcff"] <= 0:
-        result["unavailable_reason"] = "近年FCFF为负或缺失，DCF不适用"
+    if result["base_nopat"] is None or result["base_nopat"] <= 0:
+        result["unavailable_reason"] = "EBIT缺失或为负，NOPAT口径DCF不适用"
+        return result
+    if result["roic"] is None:
+        result["unavailable_reason"] = "ROIC数据不足，无法确定增长需要多少再投资"
         return result
 
-    valuation = _two_stage_fcff_value(
-        result["base_fcff"], result["near_term_growth"], terminal_growth_rate, wacc
+    valuation = _two_stage_reinvestment_value(
+        result["base_nopat"], result["roic"], result["near_term_growth"], terminal_growth_rate, wacc
     )
     if valuation is None:
-        result["unavailable_reason"] = "WACC与永续增长率利差过窄、或估值几乎全部来自终值，DCF结果不稳定"
+        result["unavailable_reason"] = "WACC与永续增长率利差过窄，Gordon终值不稳定"
         return result
 
     latest_fina = fina_slice.iloc[-1] if fina_slice is not None and not fina_slice.empty else None
@@ -838,13 +1107,12 @@ def _intrinsic_value_snapshot(
 
     net_debt = safe_float(latest_fina.get("netdebt")) if latest_fina is not None else None
     if net_debt is None:
-        interest_debt = safe_float(latest_fina.get("interestdebt")) if latest_fina is not None else None
+        debt_info = _interest_bearing_debt(fina_slice, balancesheet_slice)
         money_cap = safe_float(latest_bs.get("money_cap")) if latest_bs is not None else None
-        net_debt = (interest_debt or 0.0) - (money_cap or 0.0)
+        net_debt = (debt_info["value"] or 0.0) - (money_cap or 0.0)
 
-    # FCFF 是"全体股东+债权人"口径的现金流，算出来的股权价值同样含少数股东那一份，
-    # 但拿来比的市值(total_mv)只是母公司上市股本。子公司持股比例低的公司(华特达因
-    # 的利润几乎全部来自持股约五成的控股子公司)不折成归母口径，回报率会凭空翻倍。
+    # FCFF/NOPAT 都是"全体股东+债权人"口径，而拿来比的市值(total_mv)只是母公司上市
+    # 股本。子公司持股比例低的公司不折成归母口径，回报率会凭空翻倍。
     book_minority = safe_float(latest_bs.get("minority_int")) if latest_bs is not None else None
     if book_minority is None and latest_bs is not None:
         total_equity = safe_float(latest_bs.get("total_hldr_eqy_inc_min_int"))
@@ -861,6 +1129,10 @@ def _intrinsic_value_snapshot(
 
     result["enterprise_value"] = valuation["enterprise_value"]
     result["terminal_value_share"] = valuation["terminal_share"]
+    result["terminal_roic"] = valuation["terminal_roic"]
+    result["terminal_reinvestment_rate"] = valuation["terminal_reinvestment_rate"]
+    result["applied_terminal_growth"] = valuation["applied_terminal_growth"]
+    result["near_term_growth"] = valuation["applied_near_term_growth"]
     result["net_debt"] = net_debt
     result["parent_profit_share"] = parent_profit_share
     result["book_minority"] = book_minority
@@ -894,13 +1166,17 @@ def _quality_assessment(
     thresholds: Dict[str, float],
 ) -> Dict[str, Any]:
     reasons: List[str] = []
+    notes: List[str] = []
     if years_available < MIN_ANNUAL_PERIODS_FOR_QUALITY:
         reasons.append(f"年报数据不足{MIN_ANNUAL_PERIODS_FOR_QUALITY}期，无法判断质量")
-        return {"passes": False, "reasons": reasons}
+        return {"passes": False, "reasons": reasons, "notes": notes}
 
     min_value_growth = thresholds["min_value_growth_pct"]
     if value_growth_pct is None:
-        reasons.append("年报数据不足以对比去年同期计算出的内在价值，无法判断价值是否在增长")
+        # 算不出"去年那次快照"不等于基本面在恶化，只是这一项没有信息。以前把它并进
+        # 不通过的理由里，实测成了第一大拦截原因(全市场 1225 只)——那是把数据可得性
+        # 当成了负面信号，制造假阴性。现在只记一条提示，不影响是否通过。
+        notes.append("年报数据不足以对比去年同期计算出的内在价值，这一项未参与判断")
     elif value_growth_pct < min_value_growth:
         reasons.append(
             f"按最新年报算出的内在价值比去年同期下降了{-value_growth_pct:.1f}%"
@@ -915,7 +1191,7 @@ def _quality_assessment(
                 f"近{years_available}年平均ROE {avg_roe if avg_roe is not None else 'NA'} 低于阈值 {min_roe}"
                 "(金融类资本结构特殊，不适用ROIC-WACC口径)"
             )
-        return {"passes": len(reasons) == 0, "reasons": reasons}
+        return {"passes": len(reasons) == 0, "reasons": reasons, "notes": notes}
 
     if avg_roic is None or wacc_pct is None:
         reasons.append("ROIC或WACC数据不足，无法判断是否创造价值")
@@ -939,7 +1215,7 @@ def _quality_assessment(
     if debt_to_assets is not None and debt_to_assets > thresholds["max_debt_to_assets"]:
         reasons.append(f"资产负债率 {debt_to_assets} 高于阈值 {thresholds['max_debt_to_assets']}")
 
-    return {"passes": len(reasons) == 0, "reasons": reasons}
+    return {"passes": len(reasons) == 0, "reasons": reasons, "notes": notes}
 
 
 def screen_value_investing_candidates(
@@ -990,10 +1266,24 @@ def screen_value_investing_candidates(
     finally:
         connection.close()
 
-    # 永续增长率不能高于无风险利率：一家公司如果能永远以高于长期国债的名义速度增长，
-    # 终局就是它大于整个经济体。这是 DCF 的标准约束，也是这次把"1.7%的无风险利率配
-    # 3%的永续增长"这种自相矛盾的假设堵掉的地方——利差被人为压窄，终值就会失真。
-    effective_terminal_growth = min(terminal_growth_rate, risk_free_rate)
+    # 永续增长率的上限取 MAX_TERMINAL_GROWTH_RATE(长期名义GDP增速的代理)，而不是
+    # 当期无风险利率。教科书的 g <= rf 成立的前提是 rf 反映长期名义增长；中国当前
+    # 10 年期国债只有 1.7%，那是政策压低的结果，拿它当全市场的长期名义增长率会
+    # 系统性低估。
+    effective_terminal_growth = min(terminal_growth_rate, MAX_TERMINAL_GROWTH_RATE)
+
+    # --- 归一化无风险利率 ---
+    # 贴现率和永续增长率必须建立在**同一个**对长期名义增长的判断上，否则模型会从
+    # 自相矛盾里凭空造出价值：用 1.68% 的当期国债利率折现，同时假设现金流永远以 3%
+    # 增长，等于说"这家公司能永远跑赢无风险利率 1.3 个百分点还不承担风险"——终值
+    # 会被这个缺口撑爆。实测拆掉股权成本地板后，Top15 的 WACC 全部落在 4.1%~6.6%，
+    # 最高分那只只有 4.54%，低于它自己的债权成本，这不是"算准"是算错。
+    #
+    # 修法不是在输出端加地板(那会把全市场过半股票的股权成本压成同一个数，beta 白算)，
+    # 而是在输入端归一化：利率处在历史低位时用"长期正常水平"代替当期观测值，这是
+    # Damodaran 的 normalized risk-free rate 做法。取 max 之后 g <= rf 自动成立，
+    # 截面上的 beta 差异也完整保留。
+    normalized_risk_free_rate = max(risk_free_rate, effective_terminal_growth)
 
     if market_latest.empty or basic.empty:
         return {
@@ -1106,7 +1396,7 @@ def screen_value_investing_candidates(
             interest_bearing_debt=debt_info["value"],
             interest_expense=safe_float(income_latest_row.get("fin_exp_int_exp")),
             effective_tax_rate=effective_tax_rate,
-            risk_free_rate=risk_free_rate,
+            risk_free_rate=normalized_risk_free_rate,
             equity_risk_premium=equity_risk_premium,
         )
         wacc_pct = safe_float(wacc_info["wacc"] * 100.0) if wacc_info else None
@@ -1170,6 +1460,7 @@ def screen_value_investing_candidates(
                     "is_financial": is_financial,
                     "quality_passed": False,
                     "quality_reasons": quality["reasons"],
+                    "quality_notes": quality["notes"],
                     "avg_roe_pct": avg_roe,
                     "avg_roic_pct": avg_roic,
                     "wacc_pct": wacc_pct,
@@ -1190,11 +1481,11 @@ def screen_value_investing_candidates(
         reversion_pct = None
         if history is not None:
             if pe_ttm and pe_ttm > 0:
-                median_pe = safe_float(history.loc[history["pe_ttm"] > 0, "pe_ttm"].median())
+                median_pe = _history_median(history["pe_ttm"])
                 if median_pe:
                     reversion_pct = (median_pe / pe_ttm - 1.0) * 100.0
             if reversion_pct is None and pb and pb > 0:
-                median_pb = safe_float(history.loc[history["pb"] > 0, "pb"].median())
+                median_pb = _history_median(history["pb"])
                 if median_pb:
                     reversion_pct = (median_pb / pb - 1.0) * 100.0
         earnings_yield_pct = (100.0 / pe_ttm) if pe_ttm and pe_ttm > 0 else None
@@ -1209,25 +1500,32 @@ def screen_value_investing_candidates(
         expected_return_pct = None
         expected_return_pct_bear = None
         expected_return_pct_bull = None
+        # 从当前市净率反推市场隐含的可持续 ROE：模型和市场分歧大时，这个数比"合理
+        # 市净率是账面的几倍"有用得多——它直接说出市场在假设什么。
+        implied_roe = (
+            _implied_sustainable_roe(pb, cost_of_equity, effective_terminal_growth)
+            if is_financial
+            else None
+        )
         dcf_unavailable_reason = current_snapshot["unavailable_reason"]
         justified_pb = current_snapshot["justified_pb"]
         dcf_enterprise_value = current_snapshot["enterprise_value"]
         dcf_equity_value = current_snapshot["equity_value"]
         dcf_net_debt = current_snapshot["net_debt"]
         dcf_book_minority = current_snapshot["book_minority"] or 0.0
-        dcf_base_fcff = current_snapshot["base_fcff"]
-        fcff_cagr_pct = current_snapshot["fcff_cagr_pct"]
+        dcf_base_nopat = current_snapshot["base_nopat"]
+        dcf_roic = current_snapshot["roic"]
         fcf_yield_pct = None
 
         if is_financial:
-            avg_roe_frac = (avg_roe / 100.0) if avg_roe is not None else None
+            avg_roe_frac = current_snapshot["financial_roe"]
             if justified_pb is not None and pb and pb > 0:
                 expected_return_pct = (justified_pb / pb - 1.0) * 100.0
                 if cost_of_equity is not None:
-                    bear_pb = _justified_pb(
+                    bear_pb = _residual_income_pb(
                         avg_roe_frac, cost_of_equity + SCENARIO_DISCOUNT_RATE_SPREAD, effective_terminal_growth
                     )
-                    bull_pb = _justified_pb(
+                    bull_pb = _residual_income_pb(
                         avg_roe_frac, cost_of_equity - SCENARIO_DISCOUNT_RATE_SPREAD, effective_terminal_growth
                     )
                     expected_return_pct_bear = (bear_pb / pb - 1.0) * 100.0 if bear_pb is not None else None
@@ -1252,11 +1550,13 @@ def screen_value_investing_candidates(
                 # 30% × 1.3 = 39% 会突破 NEAR_TERM_GROWTH_BOUNDS 的上界。
                 bear_growth = _clip(near_term_growth * SCENARIO_GROWTH_MULTIPLIER[0], *NEAR_TERM_GROWTH_BOUNDS)
                 bull_growth = _clip(near_term_growth * SCENARIO_GROWTH_MULTIPLIER[1], *NEAR_TERM_GROWTH_BOUNDS)
-                bear_valuation = _two_stage_fcff_value(
-                    dcf_base_fcff, bear_growth, effective_terminal_growth, bear_wacc
+                bear_valuation = _two_stage_reinvestment_value(
+                    dcf_base_nopat, dcf_roic, bear_growth, effective_terminal_growth, bear_wacc
                 )
                 bull_valuation = (
-                    _two_stage_fcff_value(dcf_base_fcff, bull_growth, effective_terminal_growth, bull_wacc)
+                    _two_stage_reinvestment_value(
+                        dcf_base_nopat, dcf_roic, bull_growth, effective_terminal_growth, bull_wacc
+                    )
                     if bull_wacc - effective_terminal_growth >= MIN_WACC_TERMINAL_SPREAD
                     else None
                 )
@@ -1284,6 +1584,7 @@ def screen_value_investing_candidates(
                 "is_financial": is_financial,
                 "quality_passed": True,
                 "quality_reasons": [],
+                "quality_notes": quality["notes"],
                 "avg_roe_pct": avg_roe,
                 "avg_roic_pct": avg_roic,
                 "ocf_to_net_profit": ocf_to_np,
@@ -1312,17 +1613,40 @@ def screen_value_investing_candidates(
                 "roic_wacc_spread_pct": (
                     safe_float(avg_roic - wacc_pct, 2) if avg_roic is not None and wacc_pct is not None else None
                 ),
-                "dcf_base_fcff_yi": safe_float(dcf_base_fcff / 1e8, 2) if dcf_base_fcff else None,
-                "dcf_base_fcff_source": current_snapshot["fcff_source"],
+                "dcf_base_nopat_yi": safe_float(dcf_base_nopat / 1e8, 2) if dcf_base_nopat else None,
+                "dcf_roic_pct": safe_float(dcf_roic * 100.0, 2) if dcf_roic is not None else None,
+                "dcf_roic_source": current_snapshot["roic_source"],
+                "roic_cross_check_ratio": current_snapshot["roic_cross_check_ratio"],
+                "dcf_terminal_roic_pct": (
+                    safe_float(current_snapshot["terminal_roic"] * 100.0, 2)
+                    if current_snapshot["terminal_roic"] is not None
+                    else None
+                ),
+                "dcf_terminal_reinvestment_rate_pct": (
+                    safe_float(current_snapshot["terminal_reinvestment_rate"] * 100.0, 1)
+                    if current_snapshot["terminal_reinvestment_rate"] is not None
+                    else None
+                ),
+                "cash_fcff_yi": (
+                    safe_float(current_snapshot["cash_fcff"] / 1e8, 2)
+                    if current_snapshot["cash_fcff"]
+                    else None
+                ),
+                "cash_fcff_source": current_snapshot["cash_fcff_source"],
                 "fcff_cross_check_ratio": current_snapshot["fcff_cross_check_ratio"],
-                "fcff_cagr_pct": safe_float(fcff_cagr_pct, 1),
+                "revenue_cagr_pct": safe_float(current_snapshot["revenue_cagr_pct"], 1),
+                "ebit_cagr_pct": safe_float(current_snapshot["ebit_cagr_pct"], 1),
                 "profit_cagr_pct": safe_float(profit_cagr_pct, 1),
                 "near_term_growth_pct": (
                     safe_float(current_snapshot["near_term_growth"] * 100.0, 1)
                     if current_snapshot["near_term_growth"] is not None
                     else None
                 ),
-                "terminal_growth_pct": effective_terminal_growth * 100.0,
+                "terminal_growth_pct": (
+                    safe_float(current_snapshot["applied_terminal_growth"] * 100.0, 2)
+                    if current_snapshot["applied_terminal_growth"] is not None
+                    else effective_terminal_growth * 100.0
+                ),
                 "dcf_enterprise_value_yi": safe_float(dcf_enterprise_value / 1e8, 2) if dcf_enterprise_value else None,
                 "dcf_terminal_value_share_pct": (
                     safe_float(current_snapshot["terminal_value_share"] * 100.0, 1)
@@ -1348,6 +1672,20 @@ def screen_value_investing_candidates(
                 ),
                 "dcf_equity_value_yi": safe_float(dcf_equity_value / 1e8, 2) if dcf_equity_value else None,
                 "justified_pb": safe_float(justified_pb, 2),
+                "financial_roe_pct": (
+                    safe_float(current_snapshot["financial_roe"] * 100.0, 2)
+                    if current_snapshot["financial_roe"] is not None
+                    else None
+                ),
+                "implied_sustainable_roe_pct": (
+                    safe_float(implied_roe * 100.0, 2) if implied_roe is not None else None
+                ),
+                "roe_vs_implied_gap_pct": (
+                    safe_float((current_snapshot["financial_roe"] - implied_roe) * 100.0, 2)
+                    if implied_roe is not None and current_snapshot["financial_roe"] is not None
+                    else None
+                ),
+                "excess_return_fade_years": FINANCIAL_EXCESS_RETURN_FADE_YEARS if is_financial else None,
                 "market_cap_yi": safe_float(market_cap_yuan / 1e8, 2) if market_cap_yuan else None,
                 "dcf_unavailable_reason": dcf_unavailable_reason,
                 "expected_return_pct": safe_float(expected_return_pct, 1),
@@ -1377,12 +1715,15 @@ def screen_value_investing_candidates(
         "thresholds": thresholds,
         "assumptions": {
             "risk_free_rate_pct": risk_free_rate * 100.0,
+            "normalized_risk_free_rate_pct": normalized_risk_free_rate * 100.0,
+            "valuation_model": "two_stage_reinvestment_fcff",
             "risk_free_rate_source": risk_free_rate_source,
             "equity_risk_premium_pct": equity_risk_premium * 100.0,
             "terminal_growth_rate_pct": effective_terminal_growth * 100.0,
             "terminal_growth_rate_requested_pct": terminal_growth_rate * 100.0,
-            "min_cost_of_equity_pct": MIN_COST_OF_EQUITY * 100.0,
-            "max_terminal_value_share_pct": MAX_TERMINAL_VALUE_SHARE * 100.0,
+            "max_terminal_growth_rate_pct": MAX_TERMINAL_GROWTH_RATE * 100.0,
+            "min_wacc_terminal_spread_pct": MIN_WACC_TERMINAL_SPREAD * 100.0,
+            "terminal_roic_convergence": TERMINAL_ROIC_CONVERGENCE,
             "market_index_code": MARKET_INDEX_CODE,
             "dcf_explicit_years": DCF_EXPLICIT_YEARS,
         },
