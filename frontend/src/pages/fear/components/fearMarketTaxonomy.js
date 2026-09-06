@@ -33,6 +33,8 @@ export const CN_GENERAL_GROUPS = [
       cnOption('INNO100.CN', 'A创100', '创新100'),
       cnOption('000510.SH', '中证A500', '宽基'),
       cnOption('000905.SH', '中证500', '宽基'),
+      cnOption('000852.SH', '中证1000', '宽基'),
+      cnOption('932000.CSI', '中证2000', '宽基'),
       cnOption('000680.SH', '科创综指', '宽基'),
       cnOption('000688.SH', '科创50', '宽基'),
       cnOption('000698.SH', '科创100', '宽基'),

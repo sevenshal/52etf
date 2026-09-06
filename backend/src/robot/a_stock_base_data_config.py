@@ -10,6 +10,8 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000300.SH", "name": "沪深300"},
     {"index_code": "000510.SH", "name": "中证A500"},
     {"index_code": "000905.SH", "name": "中证500"},
+    {"index_code": "000852.SH", "name": "中证1000"},
+    {"index_code": "932000.CSI", "name": "中证2000"},
     {"index_code": "000985.SH", "name": "中证全指"},
     {"index_code": "899050.BJ", "name": "北证50"},
     {"index_code": "000688.SH", "name": "科创50"},
@@ -56,6 +58,24 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "index_name": "中证500",
         "option_underlyings": ["OP510500.SH", "OP159922.SZ"],
         "proxy_etf": "510500.SH",
+    },
+    {
+        "symbol": "000852.SH",
+        "ticker": "中证1000",
+        "label": "中证1000",
+        "index_name": "中证1000指数",
+        # 中证1000只有中金所股指期权(MO)，我们只同步沪深两市的ETF期权，
+        # 所以和微盘400一样借中证500/创业板ETF期权的PCR当风险偏好代理。
+        "option_underlyings": ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        "proxy_etf": "512100.SH",
+    },
+    {
+        "symbol": "932000.CSI",
+        "ticker": "中证2000",
+        "label": "中证2000",
+        "index_name": "中证2000指数",
+        "option_underlyings": ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        "proxy_etf": "563300.SH",
     },
     {
         "symbol": "000985.SH",
@@ -288,6 +308,8 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "510300.SH",
     "563360.SH",
     "510500.SH",
+    "512100.SH",
+    "563300.SH",
     "510300.SH",
     "589000.SH",
     "588000.SH",
@@ -349,6 +371,8 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
 A_STOCK_ETF_DAILY_NAMES = {
     "563360.SH": "A500ETF",
     "510500.SH": "中证500ETF",
+    "512100.SH": "中证1000ETF",
+    "563300.SH": "中证2000ETF",
     "589000.SH": "科创综指ETF",
     "588000.SH": "科创50ETF",
     "588220.SH": "科创100ETF",

@@ -168,6 +168,29 @@ def test_a_stock_fear_greed_targets_include_dividend_low_volatility():
     assert A_STOCK_ETF_DAILY_NAMES[target["proxy_etf"]] == "红利低波ETF"
 
 
+def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
+    targets_by_symbol = {
+        str(item["symbol"]).upper(): item
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+    }
+    pools = {str(item["index_code"]).upper() for item in A_STOCK_FACTOR_INDEX_POOLS}
+    expected = {
+        "000852.SH": ("中证1000", "中证1000指数", "512100.SH", "中证1000ETF"),
+        "932000.CSI": ("中证2000", "中证2000指数", "563300.SH", "中证2000ETF"),
+    }
+
+    for symbol, (ticker, index_name, proxy_etf, proxy_name) in expected.items():
+        target = targets_by_symbol[symbol]
+        assert target["ticker"] == ticker
+        assert target["index_name"] == index_name
+        assert target["proxy_etf"] == proxy_etf
+        assert symbol in pools
+        assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
+        assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
+        # 两条指数都没有自己的ETF期权，借中证500/创业板ETF期权做风险偏好代理。
+        assert target["option_underlyings"] == ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"]
+
+
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
     proxy_symbols = [str(item).upper() for item in A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS]
     target_proxy_pairs = [
@@ -181,6 +204,8 @@ def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
         ("000300.SH", "510300.SH"),
         ("000510.SH", "563360.SH"),
         ("000905.SH", "510500.SH"),
+        ("000852.SH", "512100.SH"),
+        ("932000.CSI", "563300.SH"),
         ("000985.SH", "510300.SH"),
         ("000680.SH", "589000.SH"),
         ("000688.SH", "588000.SH"),
