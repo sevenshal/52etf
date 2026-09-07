@@ -468,6 +468,73 @@ def _run_etf_fear_greed_backfill(
         )
 
 
+def _format_a_stock_base_data_sync_result(result: Dict) -> str:
+    # 资金流失败已经降级成告警，任务整体仍算成功。前端结果预览只截前 96 个字符，
+    # 所以把告警放到最前面，否则埋在几十个字段中间会被忽略。
+    fund_flow_warning = (
+        f"[警告] 主力资金流同步失败 detail={result.get('fund_flow_error_detail')}；其余同步已完成。"
+        if result.get("fund_flow_errors") and not result.get("fund_flow_saved_rows")
+        else ""
+    )
+    return (
+        f"{fund_flow_warning}"
+        "A stock base data sync "
+        f"start={result.get('start_date')} "
+        f"market_start={result.get('market_start_date')} "
+        f"index_start={result.get('index_start_date')} "
+        f"index_daily_saved={result.get('index_daily_saved_rows')} "
+        f"index_daily_jobs={result.get('index_daily_jobs')} "
+        f"index_daily_errors={result.get('index_daily_errors')} "
+        f"fund_daily_saved={result.get('fund_daily_saved_rows')} "
+        f"fund_daily_jobs={result.get('fund_daily_jobs')} "
+        f"fund_daily_date_batches={result.get('fund_daily_date_batches')} "
+        f"fund_daily_symbol_jobs={result.get('fund_daily_symbol_jobs')} "
+        f"fund_daily_errors={result.get('fund_daily_errors')} "
+        f"option_start={result.get('option_start_date')} "
+        f"repo_start={result.get('repo_start_date')} "
+        f"option_basic_saved={result.get('option_basic_rows_saved')} "
+        f"option_daily_saved={result.get('option_daily_saved_rows')} "
+        f"option_refresh_dates={result.get('option_daily_refresh_dates')} "
+        f"option_chunks={result.get('option_daily_chunks')} "
+        f"option_errors={result.get('option_daily_errors')} "
+        f"repo_daily_saved={result.get('repo_daily_saved_rows')} "
+        f"repo_refresh_dates={result.get('repo_daily_refresh_dates')} "
+        f"repo_chunks={result.get('repo_daily_chunks')} "
+        f"repo_errors={result.get('repo_daily_errors')} "
+        f"chinabond_start={result.get('chinabond_start_date')} "
+        f"chinabond_daily_saved={result.get('chinabond_curve_daily_saved_rows')} "
+        f"chinabond_refresh_dates={result.get('chinabond_curve_refresh_dates')} "
+        f"chinabond_chunks={result.get('chinabond_curve_chunks')} "
+        f"chinabond_errors={result.get('chinabond_curve_errors')} "
+        f"income_mode={result.get('income_sync_mode')} "
+        f"income_scope={result.get('income_symbol_scope')} "
+        f"income_symbols={result.get('income_symbols')} "
+        f"income_start={result.get('income_start_date')} "
+        f"income_end={result.get('income_end_date')} "
+        f"end_date={result.get('end_date')} "
+        f"income_saved_rows={result.get('income_saved_rows')} "
+        f"income_fetch_seconds={result.get('income_fetch_seconds')} "
+        f"income_insert_seconds={result.get('income_insert_seconds')} "
+        f"income_total_seconds={result.get('income_total_seconds')} "
+        f"income_insert_batches={result.get('income_insert_batches')} "
+        f"income_skipped_symbols={result.get('income_skipped_symbols')} "
+        f"income_backfill_symbols={result.get('income_backfill_symbols')} "
+        f"income_incremental_symbols={result.get('income_incremental_symbols')} "
+        f"income_full_symbols={result.get('income_full_symbols')} "
+        f"balancesheet_saved_rows={result.get('balancesheet_saved_rows')} "
+        f"balancesheet_symbols={result.get('balancesheet_symbols')} "
+        f"cashflow_saved_rows={result.get('cashflow_saved_rows')} "
+        f"cashflow_symbols={result.get('cashflow_symbols')} "
+        f"fina_indicator_saved_rows={result.get('fina_indicator_saved_rows')} "
+        f"fina_indicator_symbols={result.get('fina_indicator_symbols')} "
+        f"fund_flow_source={result.get('fund_flow_source')} "
+        f"fund_flow_saved_rows={result.get('fund_flow_saved_rows')} "
+        f"fund_flow_trade_dates={result.get('fund_flow_trade_dates')} "
+        f"fund_flow_errors={result.get('fund_flow_errors')} "
+        f"tables={result.get('tables')}"
+    )
+
+
 def _run_a_stock_base_data_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -536,62 +603,7 @@ def _run_a_stock_base_data_sync(
         result.get("fund_flow_trade_dates"),
         result.get("fund_flow_errors"),
     )
-    return (
-        "A stock base data sync "
-        f"start={result.get('start_date')} "
-        f"market_start={result.get('market_start_date')} "
-        f"index_start={result.get('index_start_date')} "
-        f"index_daily_saved={result.get('index_daily_saved_rows')} "
-        f"index_daily_jobs={result.get('index_daily_jobs')} "
-        f"index_daily_errors={result.get('index_daily_errors')} "
-        f"fund_daily_saved={result.get('fund_daily_saved_rows')} "
-        f"fund_daily_jobs={result.get('fund_daily_jobs')} "
-        f"fund_daily_date_batches={result.get('fund_daily_date_batches')} "
-        f"fund_daily_symbol_jobs={result.get('fund_daily_symbol_jobs')} "
-        f"fund_daily_errors={result.get('fund_daily_errors')} "
-        f"option_start={result.get('option_start_date')} "
-        f"repo_start={result.get('repo_start_date')} "
-        f"option_basic_saved={result.get('option_basic_rows_saved')} "
-        f"option_daily_saved={result.get('option_daily_saved_rows')} "
-        f"option_refresh_dates={result.get('option_daily_refresh_dates')} "
-        f"option_chunks={result.get('option_daily_chunks')} "
-        f"option_errors={result.get('option_daily_errors')} "
-        f"repo_daily_saved={result.get('repo_daily_saved_rows')} "
-        f"repo_refresh_dates={result.get('repo_daily_refresh_dates')} "
-        f"repo_chunks={result.get('repo_daily_chunks')} "
-        f"repo_errors={result.get('repo_daily_errors')} "
-        f"chinabond_start={result.get('chinabond_start_date')} "
-        f"chinabond_daily_saved={result.get('chinabond_curve_daily_saved_rows')} "
-        f"chinabond_refresh_dates={result.get('chinabond_curve_refresh_dates')} "
-        f"chinabond_chunks={result.get('chinabond_curve_chunks')} "
-        f"chinabond_errors={result.get('chinabond_curve_errors')} "
-        f"income_mode={result.get('income_sync_mode')} "
-        f"income_scope={result.get('income_symbol_scope')} "
-        f"income_symbols={result.get('income_symbols')} "
-        f"income_start={result.get('income_start_date')} "
-        f"income_end={result.get('income_end_date')} "
-        f"end_date={result.get('end_date')} "
-        f"income_saved_rows={result.get('income_saved_rows')} "
-        f"income_fetch_seconds={result.get('income_fetch_seconds')} "
-        f"income_insert_seconds={result.get('income_insert_seconds')} "
-        f"income_total_seconds={result.get('income_total_seconds')} "
-        f"income_insert_batches={result.get('income_insert_batches')} "
-        f"income_skipped_symbols={result.get('income_skipped_symbols')} "
-        f"income_backfill_symbols={result.get('income_backfill_symbols')} "
-        f"income_incremental_symbols={result.get('income_incremental_symbols')} "
-        f"income_full_symbols={result.get('income_full_symbols')} "
-        f"balancesheet_saved_rows={result.get('balancesheet_saved_rows')} "
-        f"balancesheet_symbols={result.get('balancesheet_symbols')} "
-        f"cashflow_saved_rows={result.get('cashflow_saved_rows')} "
-        f"cashflow_symbols={result.get('cashflow_symbols')} "
-        f"fina_indicator_saved_rows={result.get('fina_indicator_saved_rows')} "
-        f"fina_indicator_symbols={result.get('fina_indicator_symbols')} "
-        f"fund_flow_source={result.get('fund_flow_source')} "
-        f"fund_flow_saved_rows={result.get('fund_flow_saved_rows')} "
-        f"fund_flow_trade_dates={result.get('fund_flow_trade_dates')} "
-        f"fund_flow_errors={result.get('fund_flow_errors')} "
-        f"tables={result.get('tables')}"
-    )
+    return _format_a_stock_base_data_sync_result(result)
 
 
 def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):

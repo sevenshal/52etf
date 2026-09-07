@@ -590,7 +590,26 @@ def sync_current_a_stock_fund_flow(*, tushare_service: Optional[TushareService] 
         )
     except Exception as exc:
         logger.warning("Tushare moneyflow_dc incremental sync failed, falling back to Eastmoney push2: %s", exc)
-        result = sync_current_a_stock_fund_flow_from_eastmoney()
+        try:
+            result = sync_current_a_stock_fund_flow_from_eastmoney()
+        except Exception as fallback_exc:
+            # 兜底源也挂了：两个都是外部 HTTP 服务，同时抖动是可预期的。
+            # 这里返回带 errors 的结果，由调用方决定怎么处理，不要直接把异常抛给
+            # 上层——资金流只是基础数据同步的最后一步，不该带走前面所有成果。
+            logger.warning("Eastmoney push2 fallback also failed: %s", fallback_exc)
+            return {
+                "mode": "incremental",
+                "source": SOURCE_EASTMONEY_PUSH2,
+                "primary_source": SOURCE_TUSHARE_MONEYFLOW_DC,
+                "primary_error": str(exc),
+                "saved_rows": 0,
+                "trade_dates": [],
+                "latest_trade_date": None,
+                "errors": [
+                    {"source": SOURCE_TUSHARE_MONEYFLOW_DC, "error": str(exc)},
+                    {"source": SOURCE_EASTMONEY_PUSH2, "error": str(fallback_exc)},
+                ],
+            }
         result["primary_source"] = SOURCE_TUSHARE_MONEYFLOW_DC
         result["primary_error"] = str(exc)
         return result

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,8 @@ DEEPSEEK_EXTRACTION_MODEL = os.getenv(
     "HK_REVIEW_DEEPSEEK_MODEL",
     "deepseek-chat",
 ).strip() or "deepseek-chat"
+PRESS_RELEASE_PROBE_ATTEMPTS = 2
+PRESS_RELEASE_PROBE_RETRY_SECONDS = 1.0
 PRESS_RELEASE_URL = (
     "https://www.hsi.com.hk/static/uploads/contents/en/news/pressRelease/"
     "{release_stamp}.pdf"
@@ -229,11 +232,9 @@ class HKIndexReviewAutomation:
             source_url = PRESS_RELEASE_URL.format(
                 release_stamp=f"{release_date:%Y%m%d}{timestamp}"
             )
-            response = requests.get(
-                source_url,
-                headers={"User-Agent": "52ETF-HK-index-review-monitor/1.0"},
-                timeout=30,
-            )
+            response = self._probe_release_url(source_url)
+            if response is None:
+                continue
             if response.status_code != 200 or not response.content.startswith(b"%PDF"):
                 continue
             temporary = output.with_suffix(".pdf.tmp")
@@ -253,6 +254,29 @@ class HKIndexReviewAutomation:
                 "source_url": source_url,
                 "sha256": metadata["sha256"],
             }
+        return None
+
+    @classmethod
+    def _probe_release_url(cls, source_url: str) -> Optional[requests.Response]:
+        """探测一个候选发布链接；探不到就返回 None。
+
+        这里是拿猜出来的时间戳拼 URL 逐个试，「探不到」本来就是正常路径（404 或
+        不是 PDF 都直接跳过）。网络异常要同等对待：8 个线程并发探测 hsi.com.hk，
+        对端偶尔掐掉一个连接很正常，不该让一个线程的 ConnectionError 把整个
+        discover_documents 连同港股基础数据同步一起带走。
+        """
+        for attempt in range(PRESS_RELEASE_PROBE_ATTEMPTS):
+            try:
+                return requests.get(
+                    source_url,
+                    headers={"User-Agent": "52ETF-HK-index-review-monitor/1.0"},
+                    timeout=30,
+                )
+            except requests.RequestException as exc:
+                if attempt + 1 < PRESS_RELEASE_PROBE_ATTEMPTS:
+                    time.sleep(PRESS_RELEASE_PROBE_RETRY_SECONDS)
+                    continue
+                logger.warning("HK 指数复核公告探测失败，跳过 %s: %s", source_url, exc)
         return None
 
     @staticmethod
