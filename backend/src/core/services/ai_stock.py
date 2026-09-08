@@ -58,12 +58,13 @@ DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_LLM_PROVIDER = "deepseek"
 # 各家大模型都提供 OpenAI 兼容的 /chat/completions，因此只需按供应商切换
 # 凭证、模型名与 base_url，请求与解析逻辑保持同一套。
-LLM_PROVIDERS: Dict[str, Dict[str, str]] = {
+LLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
     "deepseek": {
         "label": "DeepSeek",
         "default_model": "deepseek-chat",
         "extraction_model": "deepseek-chat",
         "base_url": "https://api.deepseek.com",
+        "read_timeout": 180,
         "key_env": "DEEPSEEK_API_KEY",
         "model_env": "DEEPSEEK_MODEL",
         "base_url_env": "DEEPSEEK_BASE_URL",
@@ -73,6 +74,13 @@ LLM_PROVIDERS: Dict[str, Dict[str, str]] = {
         "default_model": "glm-4.6",
         "extraction_model": "glm-4.6",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        # GLM 4.6 起默认开启思考，且 glm-5 系列无法关闭；同样的选股提示词
+        # 在 DeepSeek 上不到一分钟，在 GLM 上会超过 180 秒的旧默认读超时。
+        "read_timeout": 600,
+        # glm-5 系列不允许关闭思考（会报 1210），但接受 OpenAI 口径的
+        # reasoning_effort；结构化选股/抽取不需要长链思考，低档能把
+        # reasoning_tokens 压到 0。老的 glm-4 系列会忽略该字段。
+        "body_extra": {"reasoning_effort": "low"},
         "key_env": "ZHIPU_API_KEY",
         "model_env": "ZHIPU_MODEL",
         "base_url_env": "ZHIPU_BASE_URL",
@@ -1105,6 +1113,7 @@ class LLMStockSelector:
         self.api_key = (api_key or (settings.get(f"{prefix}_api_key") if settings else None) or os.getenv(spec["key_env"]) or "").strip()
         self.model = (model or (settings.get(f"{prefix}_model") if settings else None) or os.getenv(spec["model_env"]) or spec["default_model"]).strip()
         self.base_url = ((settings.get(f"{prefix}_base_url") if settings else None) or os.getenv(spec["base_url_env"]) or spec["base_url"]).rstrip("/")
+        self.read_timeout = int(spec["read_timeout"])
 
     def _call_json(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, read_timeout: Optional[int] = None) -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any]]:
         if not self.api_key:
@@ -1114,6 +1123,7 @@ class LLMStockSelector:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
             "messages": messages,
+            **LLM_PROVIDERS[self.provider].get("body_extra", {}),
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -1128,9 +1138,15 @@ class LLMStockSelector:
                     f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json=body,
-                    timeout=(30, read_timeout or 180),
+                    timeout=(30, read_timeout or self.read_timeout),
                 )
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except requests.HTTPError as exc:
+                    # 供应商把真正的原因写在响应体里（如智谱 1210「该模型始终思考」），
+                    # 只报 HTTP 状态码会让排查停在“调用失败”。
+                    detail = (response.text or "").strip().replace("\n", " ")[:300]
+                    raise requests.HTTPError(f"{exc}; 响应内容: {detail}" if detail else str(exc), response=response) from exc
                 payload = response.json()
                 choice = (payload.get("choices") or [{}])[0]
                 content = choice.get("message", {}).get("content", "")
