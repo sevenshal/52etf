@@ -55,6 +55,29 @@ logger = logging.getLogger(__name__)
 SHANGHAI_TZ_NAME = "Asia/Shanghai"
 PROMPT_VERSION = "news-ths-v14"  # v14: 行情时点改为业务语义，提示词不暴露供应商或存储实现
 DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_LLM_PROVIDER = "deepseek"
+# 各家大模型都提供 OpenAI 兼容的 /chat/completions，因此只需按供应商切换
+# 凭证、模型名与 base_url，请求与解析逻辑保持同一套。
+LLM_PROVIDERS: Dict[str, Dict[str, str]] = {
+    "deepseek": {
+        "label": "DeepSeek",
+        "default_model": "deepseek-chat",
+        "extraction_model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "key_env": "DEEPSEEK_API_KEY",
+        "model_env": "DEEPSEEK_MODEL",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+    },
+    "zhipu": {
+        "label": "智谱GLM",
+        "default_model": "glm-4.6",
+        "extraction_model": "glm-4.6",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "key_env": "ZHIPU_API_KEY",
+        "model_env": "ZHIPU_MODEL",
+        "base_url_env": "ZHIPU_BASE_URL",
+    },
+}
 CODE_PATTERN = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 
 COMMISSION_RATE = 0.00025
@@ -155,14 +178,31 @@ class AIStockModelError(AIStockError):
     pass
 
 
+def normalize_llm_provider(value: Any, default: str = DEFAULT_LLM_PROVIDER) -> str:
+    """Map a stored or user-supplied provider name onto a supported provider key."""
+    raw = str(value or "").strip().lower()
+    if raw in LLM_PROVIDERS:
+        return raw
+    if raw in ("glm", "bigmodel", "zhipuai", "智谱"):
+        return "zhipu"
+    return default
+
+
 def get_ai_stock_service_settings() -> Dict[str, Any]:
     """Return redacted integration settings from a short SQLite read."""
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
+        provider = normalize_llm_provider(config.llm_provider if config else None)
         return {
+            "llm_provider": provider,
+            "llm_provider_label": LLM_PROVIDERS[provider]["label"],
+            "llm_providers": [{"value": key, "label": item["label"], "default_model": item["default_model"]} for key, item in LLM_PROVIDERS.items()],
             "deepseek_configured": bool(config and config.deepseek_api_key),
             "deepseek_model": (config.deepseek_model if config else None) or DEFAULT_MODEL,
-            "deepseek_base_url": (config.deepseek_base_url if config else None) or "https://api.deepseek.com",
+            "deepseek_base_url": (config.deepseek_base_url if config else None) or LLM_PROVIDERS["deepseek"]["base_url"],
+            "zhipu_configured": bool(config and config.zhipu_api_key),
+            "zhipu_model": (config.zhipu_model if config else None) or LLM_PROVIDERS["zhipu"]["default_model"],
+            "zhipu_base_url": (config.zhipu_base_url if config else None) or LLM_PROVIDERS["zhipu"]["base_url"],
             "max_candidates": config.max_candidates if config and config.max_candidates is not None else MAX_CANDIDATES,
             "max_events": config.max_events if config and config.max_events is not None else MAX_EVENTS,
             "max_boards": config.max_boards if config and config.max_boards is not None else MAX_BOARDS,
@@ -186,9 +226,13 @@ def _load_ai_stock_service_config_for_runtime() -> Dict[str, Optional[str]]:
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
         return {
+            "llm_provider": normalize_llm_provider(config.llm_provider if config else None),
             "deepseek_api_key": config.deepseek_api_key if config else None,
             "deepseek_model": config.deepseek_model if config else None,
             "deepseek_base_url": config.deepseek_base_url if config else None,
+            "zhipu_api_key": config.zhipu_api_key if config else None,
+            "zhipu_model": config.zhipu_model if config else None,
+            "zhipu_base_url": config.zhipu_base_url if config else None,
         }
 
 
@@ -197,6 +241,9 @@ def update_ai_stock_service_settings(
     deepseek_api_key: Optional[str],
     deepseek_model: Optional[str],
     updated_by: str,
+    llm_provider: Optional[str] = None,
+    zhipu_api_key: Optional[str] = None,
+    zhipu_model: Optional[str] = None,
     max_candidates: Optional[int] = None,
     max_events: Optional[int] = None,
     max_boards: Optional[int] = None,
@@ -211,13 +258,20 @@ def update_ai_stock_service_settings(
     xueqiu_signal_enabled: Optional[int] = None,
     news_anchor_time: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Persist write-only DeepSeek key and strategy limits in one short transaction."""
+    """Persist write-only model keys and strategy limits in one short transaction."""
     key = str(deepseek_api_key or "").strip()
     model = str(deepseek_model or "").strip()
+    zhipu_key = str(zhipu_api_key or "").strip()
+    zhipu_model_name = str(zhipu_model or "").strip()
+    if llm_provider is not None and str(llm_provider).strip() and normalize_llm_provider(llm_provider, default="") == "":
+        raise ValueError(f"不支持的大模型供应商，只能是 {'/'.join(LLM_PROVIDERS)}")
     if deepseek_api_key is not None and key and len(key) > 512:
         raise ValueError("DeepSeek API Key 不能超过 512 个字符")
-    if model and len(model) > 100:
-        raise ValueError("模型名称不能超过 100 个字符")
+    if zhipu_api_key is not None and zhipu_key and len(zhipu_key) > 512:
+        raise ValueError("智谱 API Key 不能超过 512 个字符")
+    for name in (model, zhipu_model_name):
+        if name and len(name) > 100:
+            raise ValueError("模型名称不能超过 100 个字符")
     for name, value in [("max_candidates", max_candidates), ("max_events", max_events), ("max_boards", max_boards), ("max_candidates_per_board", max_candidates_per_board), ("min_market_cap", min_market_cap), ("min_avg_turnover", min_avg_turnover), ("max_recommendations", max_recommendations), ("min_listing_days", min_listing_days)]:
         if value is not None and (not isinstance(value, int) or value < 1 or value > 100_000_000):
             raise ValueError(f"{name} 必须是 1-100000000 的整数")
@@ -238,10 +292,16 @@ def update_ai_stock_service_settings(
         if not config:
             config = AIStockServiceConfig(id=1)
             db.add(config)
+        if llm_provider is not None and str(llm_provider).strip():
+            config.llm_provider = normalize_llm_provider(llm_provider)
         if deepseek_api_key is not None:
             config.deepseek_api_key = key or None
         if model:
             config.deepseek_model = model
+        if zhipu_api_key is not None:
+            config.zhipu_api_key = zhipu_key or None
+        if zhipu_model_name:
+            config.zhipu_model = zhipu_model_name
         if max_candidates is not None:
             config.max_candidates = max_candidates
         if max_events is not None:
@@ -1026,16 +1086,29 @@ class AIStockDataProvider:
         return {_normalize_ts_code(item.get("symbol")): item for item in result}
 
 
-class DeepSeekStockSelector:
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+class LLMStockSelector:
+    """OpenAI-compatible chat client for whichever provider is configured.
+
+    DeepSeek and 智谱 GLM both speak ``POST {base_url}/chat/completions`` with a
+    bearer key and ``response_format=json_object``, so only the credential,
+    model name and base URL differ between them.
+    """
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, provider: Optional[str] = None):
         settings = _load_ai_stock_service_config_for_runtime() if api_key is None else {}
-        self.api_key = (api_key or (settings.get("deepseek_api_key") if settings else None) or os.getenv("DEEPSEEK_API_KEY") or "").strip()
-        self.model = (model or (settings.get("deepseek_model") if settings else None) or os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL).strip()
-        self.base_url = ((settings.get("deepseek_base_url") if settings else None) or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
+        self.provider = normalize_llm_provider(
+            provider or (settings.get("llm_provider") if settings else None) or os.getenv("AI_STOCK_LLM_PROVIDER")
+        )
+        spec = LLM_PROVIDERS[self.provider]
+        self.label = spec["label"]
+        prefix = self.provider if self.provider != "deepseek" else "deepseek"
+        self.api_key = (api_key or (settings.get(f"{prefix}_api_key") if settings else None) or os.getenv(spec["key_env"]) or "").strip()
+        self.model = (model or (settings.get(f"{prefix}_model") if settings else None) or os.getenv(spec["model_env"]) or spec["default_model"]).strip()
+        self.base_url = ((settings.get(f"{prefix}_base_url") if settings else None) or os.getenv(spec["base_url_env"]) or spec["base_url"]).rstrip("/")
 
     def _call_json(self, messages: List[Dict[str, str]], max_tokens: Optional[int] = None, read_timeout: Optional[int] = None) -> Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any]]:
         if not self.api_key:
-            raise AIStockConfigurationError("未配置 DEEPSEEK_API_KEY，不能生成 AI 推荐")
+            raise AIStockConfigurationError(f"未配置 {self.label} API Key，不能生成 AI 推荐")
         body = {
             "model": self.model,
             "temperature": 0.2,
@@ -1045,7 +1118,7 @@ class DeepSeekStockSelector:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         # Long read timeout: round-3 payloads (news + boards + hundreds of
-        # candidates) can take DeepSeek well over a minute. Transient network
+        # candidates) can take the model well over a minute. Transient network
         # errors and successful-but-empty replies get one retry. A malformed
         # non-empty model reply is not retried because it will usually repeat.
         last_exc: Optional[Exception] = None
@@ -1065,7 +1138,7 @@ class DeepSeekStockSelector:
                     finish_reason = choice.get("finish_reason")
                     usage = payload.get("usage") or {}
                     detail = (
-                        "DeepSeek 返回空内容"
+                        f"{self.label} 返回空内容"
                         f" (finish_reason={finish_reason!r}, usage={usage!r})"
                     )
                     if attempt == 0:
@@ -1075,18 +1148,18 @@ class DeepSeekStockSelector:
                     raise AIStockModelError(f"{detail}（已重试）")
                 parsed = json.loads(content)
                 if not isinstance(parsed, dict):
-                    raise AIStockModelError("DeepSeek 返回不是 JSON 对象")
+                    raise AIStockModelError(f"{self.label} 返回不是 JSON 对象")
                 return parsed, content, body, {"completion_id": payload.get("id"), "usage": payload.get("usage") or {}, "model": payload.get("model")}
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt == 0:
-                    logger.warning("DeepSeek 请求失败（第 1 次，准备重试）: %s", exc)
+                    logger.warning("%s 请求失败（第 1 次，准备重试）: %s", self.label, exc)
                     time.sleep(1)
                     continue
-                raise AIStockModelError(f"DeepSeek 请求失败（已重试）: {exc}") from exc
+                raise AIStockModelError(f"{self.label} 请求失败（已重试）: {exc}") from exc
             except (ValueError, TypeError, IndexError) as exc:
-                raise AIStockModelError(f"DeepSeek 响应解析失败: {exc}") from exc
-        raise AIStockModelError(f"DeepSeek 请求失败: {last_exc}")
+                raise AIStockModelError(f"{self.label} 响应解析失败: {exc}") from exc
+        raise AIStockModelError(f"{self.label} 请求失败: {last_exc}")
 
     def extract_events(self, news_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         headlines = news_snapshot.get("headlines") or []
@@ -1143,7 +1216,7 @@ class DeepSeekStockSelector:
         raw_response, content, request_body, metadata = self._call_json(messages)
         events = _validated_events(raw_response, headlines)
         if not events:
-            raise AIStockModelError("DeepSeek 未返回带新闻标题证据的有效事件")
+            raise AIStockModelError(f"{self.label} 未返回带新闻标题证据的有效事件")
         return {
             "model": self.model,
             "events": events,
@@ -1194,7 +1267,7 @@ class DeepSeekStockSelector:
         raw_response, content, request_body, metadata = self._call_json(messages)
         mappings = _validated_board_mappings(raw_response, event_stage["events"], catalog.get("items") or [])
         if not mappings:
-            raise AIStockModelError("DeepSeek 未把新闻事件映射到有效 THS 板块")
+            raise AIStockModelError(f"{self.label} 未把新闻事件映射到有效 THS 板块")
         return {
             "model": self.model,
             "board_mappings": mappings,
@@ -1276,7 +1349,7 @@ class DeepSeekStockSelector:
         ]
         raw_response, content, request_body, metadata = self._call_json(messages)
         if not isinstance(raw_response.get("picks"), list):
-            raise AIStockModelError("DeepSeek 返回不包含 picks 列表")
+            raise AIStockModelError(f"{self.label} 返回不包含 picks 列表")
         return {"model": self.model, "response": raw_response, "transcript": {"stage": "THS_BOARDS_TO_STOCK_SELECTION", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
 
     def advise_positions(
@@ -1316,10 +1389,25 @@ class DeepSeekStockSelector:
         messages = [*first_messages, {"role": "assistant", "content": event_stage["transcript"]["response_content"]}, {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)}]
         raw_response, content, request_body, metadata = self._call_json(messages)
         if not isinstance(raw_response.get("advices"), list):
-            raise AIStockModelError("DeepSeek 返回不包含 advices 列表")
+            raise AIStockModelError(f"{self.label} 返回不包含 advices 列表")
         return {"model": self.model, "response": raw_response, "transcript": {"stage": "HOLD_ADVICE", "request": request_body, "response_content": content, "response_json": raw_response, "response_metadata": metadata}}
 
-def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict[str, Any], board_stage: Dict[str, Any], run_id: int, selector: Optional[DeepSeekStockSelector] = None) -> Dict[str, Any]:
+# 历史名称：其他模块（如港股复盘）仍按此名 import / patch 这个客户端。
+DeepSeekStockSelector = LLMStockSelector
+
+
+def default_extraction_model() -> str:
+    """Non-reasoning model of the configured provider, for structured extraction.
+
+    Reasoning models can spend the whole completion budget on reasoning tokens
+    and return empty content, so extraction callers pin the chat model of
+    whichever provider is currently configured.
+    """
+    settings = _load_ai_stock_service_config_for_runtime()
+    return LLM_PROVIDERS[normalize_llm_provider(settings.get("llm_provider"))]["extraction_model"]
+
+
+def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict[str, Any], board_stage: Dict[str, Any], run_id: int, selector: Optional[LLMStockSelector] = None) -> Dict[str, Any]:
     """Advisory round-4 sell/hold advice persisted to ai_stock_hold_evaluations.
 
     Reads current paper positions as plain snapshots (short transaction),
@@ -1353,7 +1441,7 @@ def evaluate_paper_holdings(*, now: Optional[datetime] = None, event_stage: Dict
             row["xueqiu_direction"] = direction_by_code[item["ts_code"]]
         compact.append(row)
     try:
-        selection = (selector or DeepSeekStockSelector()).advise_positions(event_stage, board_stage, compact)
+        selection = (selector or LLMStockSelector()).advise_positions(event_stage, board_stage, compact)
     except Exception as exc:
         logger.warning("AI hold advice skipped: %s", exc)
         return {"evaluated": False, "reason": str(exc)[:200]}
@@ -1505,9 +1593,9 @@ def _validated_picks(
 
 
 class AIStockRecommendationService:
-    def __init__(self, provider: Optional[AIStockDataProvider] = None, selector: Optional[DeepSeekStockSelector] = None):
+    def __init__(self, provider: Optional[AIStockDataProvider] = None, selector: Optional[LLMStockSelector] = None):
         self.provider = provider or AIStockDataProvider()
-        self.selector = selector or DeepSeekStockSelector()
+        self.selector = selector or LLMStockSelector()
 
     def run_recommendation(
         self,
@@ -1566,7 +1654,7 @@ class AIStockRecommendationService:
             # 明确返回空列表代表模型按严格错价门槛主动弃权，应作为成功的“无推荐”批次保存；
             # 非空回复却全部无法通过证据链校验，才属于模型输出错误。
             if not picks and selection["response"].get("picks") != []:
-                raise AIStockModelError("DeepSeek 未返回带新闻→THS板块→股票证据的有效候选")
+                raise AIStockModelError("AI 模型未返回带新闻→THS板块→股票证据的有效候选")
         except Exception as exc:
             with get_db_ctx() as db:
                 run = db.get(AIStockRecommendationRun, run_id)
@@ -1923,7 +2011,7 @@ def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dic
             )
         if not already_started:
             try:
-                # 异步：占位后立即返回，不阻塞机器人主循环（DeepSeek 多轮可能耗时数分钟），
+                # 异步：占位后立即返回，不阻塞机器人主循环（模型多轮调用可能耗时数分钟），
                 # 避免卡住后续 OPENING/INTRADAY 的触发窗口。
                 AIStockRecommendationService().run_recommendation_async(now=timestamp, run_type=run_type)
                 result["recommendation"] = {"status": "RUNNING", "run_type": run_type}
@@ -1998,7 +2086,7 @@ def trigger_recommendation_async(
 ) -> Dict[str, Any]:
     """Fire a recommendation batch in a background thread and return immediately.
 
-    The full run can take minutes (news + 3 DeepSeek rounds + THS data), so the
+    The full run can take minutes (news + 3 model rounds + THS data), so the
     HTTP request never blocks on it.  Completion/failure is pushed to every
     connected frontend via the shared backend event stream
     (``ai_stock_run_updated``).

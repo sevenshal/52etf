@@ -35,8 +35,11 @@ router = APIRouter(prefix="/api/ai-stock", tags=["AI Stock"])
 
 class AIStockServiceSettingsUpdate(BaseModel):
     # Empty clears the saved key; omitted retains the current stored value.
+    llm_provider: Optional[str] = Field(default=None, pattern=r"^(?:deepseek|zhipu)$")
     deepseek_api_key: Optional[str] = Field(default=None, max_length=512)
     deepseek_model: Optional[str] = Field(default=None, max_length=100)
+    zhipu_api_key: Optional[str] = Field(default=None, max_length=512)
+    zhipu_model: Optional[str] = Field(default=None, max_length=100)
     max_candidates: Optional[int] = Field(default=None, ge=1, le=10000)
     max_events: Optional[int] = Field(default=None, ge=1, le=100)
     max_boards: Optional[int] = Field(default=None, ge=1, le=50)
@@ -72,8 +75,11 @@ def save_ai_stock_settings(
 ):
     try:
         return update_ai_stock_service_settings(
+            llm_provider=payload.llm_provider,
             deepseek_api_key=payload.deepseek_api_key,
             deepseek_model=payload.deepseek_model,
+            zhipu_api_key=payload.zhipu_api_key,
+            zhipu_model=payload.zhipu_model,
             updated_by=account_id,
             max_candidates=payload.max_candidates,
             max_events=payload.max_events,

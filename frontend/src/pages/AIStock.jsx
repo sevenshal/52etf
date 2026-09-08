@@ -57,7 +57,7 @@ const readableModelContent = content => {
   }
 };
 
-const messageLabel = role => ({ system: '系统规则', user: '发送给 DeepSeek', assistant: 'DeepSeek 回复' }[role] || role);
+const messageLabel = role => ({ system: '系统规则', user: '发送给 AI 模型', assistant: 'AI 模型回复' }[role] || role);
 const stageLabel = (stage, index) => ({
   NEWS_EVENTS: '第 1 轮：全部新闻标题 → 新闻事件/热词',
   EVENTS_TO_THS_BOARDS: '第 2 轮：新闻事件 → THS 全量板块目录',
@@ -91,7 +91,7 @@ const ConversationViewer = ({ runId }) => {
       <Text type="secondary">按真实调用顺序展示。轮 1 发送全部新闻标题；轮 2 为自包含请求（系统规则+THS 全量目录+事件）；轮 3 继承轮 1 的新闻与事件回复并追加选股指令。展开“核验本轮原始 API 记录”可看每轮完整 messages。</Text>
       {stages.map((stage, index) => {
         const requestMessages = stage?.request?.messages || [];
-        // The second request replays prior messages for DeepSeek's stateless API.
+        // The second request replays prior messages for the model's stateless API.
         // In this human-facing view we keep only its newly added user message.
         const visibleMessages = index === 0
           ? requestMessages.filter(item => item.role !== 'assistant')
@@ -107,7 +107,7 @@ const ConversationViewer = ({ runId }) => {
               </div>
             ))}
             <div className="ai-stock-chat-bubble ai-stock-chat-assistant">
-              <div className="ai-stock-chat-bubble-label">DeepSeek 回复</div>
+              <div className="ai-stock-chat-bubble-label">AI 模型回复</div>
               <pre>{readableModelContent(stage.response_content)}</pre>
             </div>
             <Collapse
@@ -390,8 +390,11 @@ const AIStock = () => {
   const [settings, setSettings] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [llmProvider, setLlmProvider] = useState('deepseek');
   const [deepseekApiKey, setDeepseekApiKey] = useState('');
   const [deepseekModel, setDeepseekModel] = useState('deepseek-chat');
+  const [zhipuApiKey, setZhipuApiKey] = useState('');
+  const [zhipuModel, setZhipuModel] = useState('glm-4.6');
   const [maxCandidates, setMaxCandidates] = useState(1500);
   const [maxEvents, setMaxEvents] = useState(8);
   const [maxBoards, setMaxBoards] = useState(8);
@@ -531,8 +534,11 @@ const AIStock = () => {
   }, [loadAll]);
 
   const openSettings = useCallback(() => {
+    setLlmProvider(settings?.llm_provider || 'deepseek');
     setDeepseekApiKey('');
     setDeepseekModel(settings?.deepseek_model || 'deepseek-chat');
+    setZhipuApiKey('');
+    setZhipuModel(settings?.zhipu_model || 'glm-4.6');
     setMaxCandidates(settings?.max_candidates ?? 1500);
     setMaxEvents(settings?.max_events ?? 8);
     setMaxBoards(settings?.max_boards ?? 8);
@@ -552,8 +558,14 @@ const AIStock = () => {
   const saveSettings = useCallback(async () => {
     setSavingSettings(true);
     try {
-      const payload = { deepseek_model: deepseekModel.trim() || 'deepseek-chat' };
+      const payload = {
+        llm_provider: llmProvider,
+        deepseek_model: deepseekModel.trim() || 'deepseek-chat',
+        zhipu_model: zhipuModel.trim() || 'glm-4.6',
+      };
+      // 只提交填写了的密钥；留空表示保留后端已存的那一个。
       if (deepseekApiKey.trim()) payload.deepseek_api_key = deepseekApiKey.trim();
+      if (zhipuApiKey.trim()) payload.zhipu_api_key = zhipuApiKey.trim();
       payload.max_candidates = maxCandidates;
       payload.max_events = maxEvents;
       payload.max_boards = maxBoards;
@@ -570,6 +582,7 @@ const AIStock = () => {
       const response = await request.put('/api/ai-stock/settings', payload);
       setSettings(response.data);
       setDeepseekApiKey('');
+      setZhipuApiKey('');
       setSettingsOpen(false);
       message.success('AI 荐股配置已保存');
     } catch (error) {
@@ -577,7 +590,7 @@ const AIStock = () => {
     } finally {
       setSavingSettings(false);
     }
-  }, [deepseekApiKey, deepseekModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled, newsAnchorTime]);
+  }, [llmProvider, deepseekApiKey, deepseekModel, zhipuApiKey, zhipuModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled, newsAnchorTime]);
 
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
@@ -844,19 +857,49 @@ const AIStock = () => {
         width={520}
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Text type="secondary">密钥仅提交给后端保存，页面不会显示已保存的完整值。留空可保留当前密钥。</Text>
-          <Input.Password
-            value={deepseekApiKey}
-            onChange={event => setDeepseekApiKey(event.target.value)}
-            placeholder={settings?.deepseek_configured ? '已配置；输入新 Key 可替换' : '请输入 DeepSeek API Key'}
-            autoComplete="new-password"
-          />
-          <Input
-            value={deepseekModel}
-            onChange={event => setDeepseekModel(event.target.value)}
-            placeholder="deepseek-chat"
-            addonBefore="模型"
-          />
+          <Text type="secondary">密钥仅提交给后端保存，页面不会显示已保存的完整值。留空可保留当前密钥。两家的密钥各自独立保存，切换供应商不会清空另一家。</Text>
+          <Row align="middle" gutter={12}>
+            <Col span={8}><Text style={{ fontSize: 13 }}>大模型供应商</Text></Col>
+            <Col span={16}>
+              <Select
+                style={{ width: '100%' }}
+                value={llmProvider}
+                onChange={setLlmProvider}
+                options={[{ value: 'deepseek', label: 'DeepSeek' }, { value: 'zhipu', label: '智谱 GLM' }]}
+              />
+            </Col>
+          </Row>
+          {llmProvider === 'deepseek' ? (
+            <>
+              <Input.Password
+                value={deepseekApiKey}
+                onChange={event => setDeepseekApiKey(event.target.value)}
+                placeholder={settings?.deepseek_configured ? '已配置；输入新 Key 可替换' : '请输入 DeepSeek API Key'}
+                autoComplete="new-password"
+              />
+              <Input
+                value={deepseekModel}
+                onChange={event => setDeepseekModel(event.target.value)}
+                placeholder="deepseek-chat"
+                addonBefore="模型"
+              />
+            </>
+          ) : (
+            <>
+              <Input.Password
+                value={zhipuApiKey}
+                onChange={event => setZhipuApiKey(event.target.value)}
+                placeholder={settings?.zhipu_configured ? '已配置；输入新 Key 可替换' : '请输入智谱 API Key'}
+                autoComplete="new-password"
+              />
+              <Input
+                value={zhipuModel}
+                onChange={event => setZhipuModel(event.target.value)}
+                placeholder="glm-4.6"
+                addonBefore="模型"
+              />
+            </>
+          )}
           <Divider style={{ margin: '4px 0' }}>策略参数</Divider>
           <Row align="middle" gutter={12}>
             <Col span={16}>

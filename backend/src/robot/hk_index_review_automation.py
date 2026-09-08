@@ -31,10 +31,8 @@ DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("HK_REVIEW_DEEPSEEK_TIMEOUT_SEC
 DEEPSEEK_MAX_OUTPUT_TOKENS = int(os.getenv("HK_REVIEW_DEEPSEEK_MAX_OUTPUT_TOKENS", "8192"))
 # 结构化抽取需要把输出预算留给 JSON 正文；deepseek-reasoner 可能把完整
 # completion 预算耗尽在 reasoning_tokens，最终返回空 content。
-DEEPSEEK_EXTRACTION_MODEL = os.getenv(
-    "HK_REVIEW_DEEPSEEK_MODEL",
-    "deepseek-chat",
-).strip() or "deepseek-chat"
+# 留空时按 AI 荐股当前配置的供应商选对应的非推理模型（DeepSeek / 智谱 GLM）。
+DEEPSEEK_EXTRACTION_MODEL = os.getenv("HK_REVIEW_DEEPSEEK_MODEL", "").strip()
 PRESS_RELEASE_PROBE_ATTEMPTS = 2
 PRESS_RELEASE_PROBE_RETRY_SECONDS = 1.0
 PRESS_RELEASE_URL = (
@@ -331,7 +329,7 @@ class HKIndexReviewAutomation:
         text_path: Path,
         candidate_path: Path,
     ) -> Dict:
-        from ..core.services.ai_stock import DeepSeekStockSelector
+        from ..core.services.ai_stock import DeepSeekStockSelector, default_extraction_model
 
         evidence_text = text_path.read_text(encoding="utf-8")
         prompt = (
@@ -361,7 +359,7 @@ class HKIndexReviewAutomation:
             {"role": "user", "content": prompt},
         ]
         log_path = candidate_path.with_suffix(".deepseek.log")
-        selector = DeepSeekStockSelector(model=DEEPSEEK_EXTRACTION_MODEL)
+        selector = DeepSeekStockSelector(model=DEEPSEEK_EXTRACTION_MODEL or default_extraction_model())
         try:
             candidate, content, _, _ = selector._call_json(
                 messages,
