@@ -2727,10 +2727,14 @@ class AStockBaseDataSyncService:
         )
         fund_flow_errors = fund_flow_result.get("errors") or []
         if fund_flow_errors and not fund_flow_result.get("saved_rows"):
-            raise RuntimeError(
-                "A stock fund flow sync failed: "
-                f"errors={len(fund_flow_errors)} "
-                f"first_error={fund_flow_errors[0] if fund_flow_errors else None}"
+            # 资金流是同步的最后一步，数据源是两个外部 HTTP 服务（tushare moneyflow_dc
+            # 和东方财富 push2），同时抖动、或者非交易日双双取不到数据都是可预期的。
+            # 前面行情、复权、财务、指数、期权的成果已经落库，不该被它判成整体失败，
+            # 所以这里只告警并把错误带进结果里。
+            self.logger.warning(
+                "A stock fund flow sync failed, keeping the rest of the sync: errors=%s first_error=%s",
+                len(fund_flow_errors),
+                fund_flow_errors[0],
             )
 
         basic_rows = _count_analytics_table_rows(self.analytics_db, AStockBasic.__tablename__)
@@ -2952,6 +2956,7 @@ class AStockBaseDataSyncService:
             "fund_flow_end_date": fund_flow_result.get("end_date") or fund_flow_result.get("latest_trade_date"),
             "fund_flow_source_counts": fund_flow_result.get("source_counts"),
             "fund_flow_errors": len(fund_flow_result.get("errors") or []),
+            "fund_flow_error_detail": (fund_flow_result.get("errors") or [None])[0],
             "fund_flow_existing_rows_before": fund_flow_result.get("existing_rows_before"),
             "fund_flow_previous_latest_trade_date": fund_flow_result.get("previous_latest_trade_date"),
             "tables": {
