@@ -120,13 +120,13 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
                 as_of=date(2026, 8, 21),
             )
 
-    def test_run_deepseek_writes_candidate_and_log(self):
+    def test_run_llm_extraction_writes_candidate_and_log(self):
         text_path = Path(self.temporary.name) / "20260821.txt"
         text_path.write_text("===== PAGE 1 =====\nreview text", encoding="utf-8")
         candidate_path = Path(self.temporary.name) / "20260821.candidate.json"
         candidate = _candidate()
         with patch(
-            "src.core.services.ai_stock.DeepSeekStockSelector"
+            "src.core.services.ai_stock.LLMStockSelector"
         ) as selector_class:
             selector = selector_class.return_value
             selector._call_json.return_value = (
@@ -135,17 +135,18 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
                 {},
                 {},
             )
-            result = self.automation._run_deepseek(text_path, candidate_path)
+            result, provider = self.automation._run_llm_extraction(text_path, candidate_path)
 
         selector_class.assert_called_once_with(model="deepseek-chat")
         self.assertEqual(candidate, result)
+        self.assertEqual(selector.provider, provider)
         self.assertEqual(
             candidate,
             json.loads(candidate_path.read_text(encoding="utf-8")),
         )
         self.assertEqual(
             json.dumps(candidate),
-            candidate_path.with_suffix(".deepseek.log").read_text(encoding="utf-8"),
+            candidate_path.with_suffix(".llm.log").read_text(encoding="utf-8"),
         )
         call = selector._call_json.call_args
         messages = call.args[0]
@@ -154,28 +155,84 @@ class HKIndexReviewAutomationTest(unittest.TestCase):
         self.assertEqual(call.kwargs["max_tokens"], 8192)
         self.assertEqual(
             call.kwargs["read_timeout"],
-            self.automation.deepseek_timeout_seconds,
+            self.automation.llm_timeout_seconds,
         )
 
-    def test_run_deepseek_failure_is_wrapped_and_logged(self):
+    def test_extraction_follows_the_ai_stock_provider_configuration(self):
+        # 港股检讨抽取不再自带供应商：改用 AI 荐股页面配置的那一家，
+        # 切到智谱后必须发智谱的模型名，并把供应商写进审计字段。
+        from src.core.database import AIStockServiceConfig, get_db_ctx
+        from src.core.services.ai_stock import update_ai_stock_service_settings
+
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            original = config.llm_provider if config else None
+        text_path = Path(self.temporary.name) / "20260821.txt"
+        text_path.write_text("===== PAGE 1 =====\nreview text", encoding="utf-8")
+        candidate_path = Path(self.temporary.name) / "20260821.candidate.json"
+        candidate = _candidate()
+        try:
+            update_ai_stock_service_settings(
+                deepseek_api_key=None,
+                deepseek_model=None,
+                llm_provider="zhipu",
+                updated_by="admin",
+            )
+            with patch("src.core.services.ai_stock.LLMStockSelector") as selector_class:
+                selector_class.return_value._call_json.return_value = (
+                    candidate,
+                    json.dumps(candidate),
+                    {},
+                    {},
+                )
+                self.automation._run_llm_extraction(text_path, candidate_path)
+            selector_class.assert_called_once_with(model="glm-4.6")
+        finally:
+            update_ai_stock_service_settings(
+                deepseek_api_key=None,
+                deepseek_model=None,
+                llm_provider=original or "deepseek",
+                updated_by="admin",
+            )
+
+        with (
+            patch.object(self.automation, "_latest_effective_dates", return_value={}),
+            patch.object(self.automation, "_latest_constituent_codes", return_value={}),
+        ):
+            manifest = self.automation._prepare_and_validate_manifest(
+                _candidate(),
+                {
+                    "path": Path(self.temporary.name) / "20260821.pdf",
+                    "source_url": "https://www.hsi.com.hk/official.pdf",
+                    "sha256": "abc123",
+                },
+                as_of=date(2026, 8, 21),
+                provider="zhipu",
+            )
+        self.assertEqual(
+            "official_pdf_zhipu_schema_validated",
+            manifest["snapshots"][0]["extraction_method"],
+        )
+
+    def test_run_llm_extraction_failure_is_wrapped_and_logged(self):
         text_path = Path(self.temporary.name) / "20260821.txt"
         text_path.write_text("review text", encoding="utf-8")
         candidate_path = Path(self.temporary.name) / "20260821.candidate.json"
         with (
             patch(
-                "src.core.services.ai_stock.DeepSeekStockSelector"
+                "src.core.services.ai_stock.LLMStockSelector"
             ) as selector_class,
-            self.assertRaisesRegex(RuntimeError, "DeepSeek extraction failed"),
+            self.assertRaisesRegex(RuntimeError, "extraction failed"),
         ):
             selector_class.return_value._call_json.side_effect = ValueError("boom")
-            self.automation._run_deepseek(text_path, candidate_path)
+            self.automation._run_llm_extraction(text_path, candidate_path)
 
         self.assertEqual(
             "boom",
-            candidate_path.with_suffix(".deepseek.log").read_text(encoding="utf-8"),
+            candidate_path.with_suffix(".llm.log").read_text(encoding="utf-8"),
         )
 
-    def test_existing_source_document_is_not_sent_to_deepseek(self):
+    def test_existing_source_document_is_not_sent_to_the_model(self):
         document = {
             "path": Path(self.temporary.name) / "20260522.pdf",
             "source_url": "https://www.hsi.com.hk/official.pdf",

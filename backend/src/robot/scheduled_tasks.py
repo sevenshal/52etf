@@ -1610,9 +1610,9 @@ class ScheduledTaskManager:
                         default="", description="可选；为空时使用服务端默认缓存目录。",
                     ),
                     TaskParameterDefinition(
-                        key="auto_process_reviews", label="DeepSeek自动处理新检讨",
+                        key="auto_process_reviews", label="AI自动处理新检讨",
                         value_type="boolean", default=True,
-                        description="发现新的恒生季度检讨PDF后，由DeepSeek解析为候选JSON，硬校验通过才补行情并导入权重；API Key 使用 AI 选股页面的 DeepSeek 配置。",
+                        description="发现新的恒生季度检讨PDF后，由大模型解析为候选JSON，硬校验通过才补行情并导入权重；供应商（DeepSeek / 智谱 GLM）与 API Key 使用 AI 选股页面的配置。",
                     ),
                     TaskParameterDefinition(
                         key="review_discovery_lookback_days", label="公告发现窗口",

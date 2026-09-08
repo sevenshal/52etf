@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
 from pypdf import PdfReader
@@ -26,13 +26,26 @@ INDEX_LIMITS = {
     "HSTECH": (25, 40),
 }
 DEFAULT_DISCOVERY_LOOKBACK_DAYS = int(os.getenv("HK_REVIEW_DISCOVERY_LOOKBACK_DAYS", "45"))
-DEFAULT_DEEPSEEK_TIMEOUT_SECONDS = int(os.getenv("HK_REVIEW_DEEPSEEK_TIMEOUT_SECONDS", "600"))
+# 抽取用的大模型凭证与供应商都复用 AI 荐股页面的配置（DeepSeek / 智谱 GLM），
+# 这里只保留跟本任务有关的超时、输出预算和模型覆盖。旧的 HK_REVIEW_DEEPSEEK_*
+# 环境变量继续兼容，便于存量部署无感升级。
+DEFAULT_LLM_TIMEOUT_SECONDS = int(
+    os.getenv("HK_REVIEW_LLM_TIMEOUT_SECONDS")
+    or os.getenv("HK_REVIEW_DEEPSEEK_TIMEOUT_SECONDS")
+    or "600"
+)
 # HSI+HSCEI+HSTECH 三个快照共约 160 行成分，JSON 输出需要接近 8K token。
-DEEPSEEK_MAX_OUTPUT_TOKENS = int(os.getenv("HK_REVIEW_DEEPSEEK_MAX_OUTPUT_TOKENS", "8192"))
-# 结构化抽取需要把输出预算留给 JSON 正文；deepseek-reasoner 可能把完整
-# completion 预算耗尽在 reasoning_tokens，最终返回空 content。
-# 留空时按 AI 荐股当前配置的供应商选对应的非推理模型（DeepSeek / 智谱 GLM）。
-DEEPSEEK_EXTRACTION_MODEL = os.getenv("HK_REVIEW_DEEPSEEK_MODEL", "").strip()
+LLM_MAX_OUTPUT_TOKENS = int(
+    os.getenv("HK_REVIEW_LLM_MAX_OUTPUT_TOKENS")
+    or os.getenv("HK_REVIEW_DEEPSEEK_MAX_OUTPUT_TOKENS")
+    or "8192"
+)
+# 结构化抽取需要把输出预算留给 JSON 正文；推理型模型（如 deepseek-reasoner）
+# 可能把整个 completion 预算耗尽在 reasoning_tokens，最终返回空 content。
+# 留空时按 AI 荐股当前配置的供应商选对应的非推理模型。
+LLM_EXTRACTION_MODEL = (
+    os.getenv("HK_REVIEW_LLM_MODEL") or os.getenv("HK_REVIEW_DEEPSEEK_MODEL") or ""
+).strip()
 PRESS_RELEASE_PROBE_ATTEMPTS = 2
 PRESS_RELEASE_PROBE_RETRY_SECONDS = 1.0
 PRESS_RELEASE_URL = (
@@ -123,14 +136,14 @@ def _fridays_between(start: date, end: date) -> Iterable[date]:
 
 
 class HKIndexReviewAutomation:
-    """Discover official review PDFs and let DeepSeek produce guarded candidates."""
+    """Discover official review PDFs and let the configured LLM produce guarded candidates."""
 
     def __init__(
         self,
         sync_service,
         cache_dir: Optional[str] = None,
         discovery_lookback_days: int = DEFAULT_DISCOVERY_LOOKBACK_DAYS,
-        deepseek_timeout_seconds: int = DEFAULT_DEEPSEEK_TIMEOUT_SECONDS,
+        llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
     ):
         self.sync_service = sync_service
         self.cache_dir = Path(
@@ -141,7 +154,7 @@ class HKIndexReviewAutomation:
             )
         )
         self.discovery_lookback_days = max(30, int(discovery_lookback_days))
-        self.deepseek_timeout_seconds = max(60, int(deepseek_timeout_seconds))
+        self.llm_timeout_seconds = max(60, int(llm_timeout_seconds))
 
     def run(self, as_of: Optional[date] = None) -> Dict:
         as_of_date = as_of or date.today()
@@ -296,8 +309,8 @@ class HKIndexReviewAutomation:
         evidence_text = self._extract_text(pdf_path)
         text_path.write_text(evidence_text, encoding="utf-8")
         _atomic_write_json(schema_path, REVIEW_OUTPUT_SCHEMA)
-        candidate = self._run_deepseek(text_path, candidate_path)
-        manifest = self._prepare_and_validate_manifest(candidate, document, as_of)
+        candidate, provider = self._run_llm_extraction(text_path, candidate_path)
+        manifest = self._prepare_and_validate_manifest(candidate, document, as_of, provider=provider)
         new_symbols = self._new_constituent_symbols(manifest)
         history = self._bootstrap_new_symbols(new_symbols, as_of)
         _atomic_write_json(candidate_path, manifest)
@@ -324,12 +337,13 @@ class HKIndexReviewAutomation:
             )
         return "".join(sections)
 
-    def _run_deepseek(
+    def _run_llm_extraction(
         self,
         text_path: Path,
         candidate_path: Path,
-    ) -> Dict:
-        from ..core.services.ai_stock import DeepSeekStockSelector, default_extraction_model
+    ) -> Tuple[Dict, str]:
+        """Extract the review snapshots with the provider configured for AI 荐股."""
+        from ..core.services.ai_stock import LLMStockSelector, default_extraction_model
 
         evidence_text = text_path.read_text(encoding="utf-8")
         prompt = (
@@ -358,28 +372,29 @@ class HKIndexReviewAutomation:
             },
             {"role": "user", "content": prompt},
         ]
-        log_path = candidate_path.with_suffix(".deepseek.log")
-        selector = DeepSeekStockSelector(model=DEEPSEEK_EXTRACTION_MODEL or default_extraction_model())
+        log_path = candidate_path.with_suffix(".llm.log")
+        selector = LLMStockSelector(model=LLM_EXTRACTION_MODEL or default_extraction_model())
         try:
             candidate, content, _, _ = selector._call_json(
                 messages,
-                max_tokens=DEEPSEEK_MAX_OUTPUT_TOKENS,
-                read_timeout=self.deepseek_timeout_seconds,
+                max_tokens=LLM_MAX_OUTPUT_TOKENS,
+                read_timeout=self.llm_timeout_seconds,
             )
         except Exception as exc:
             log_path.write_text(str(exc), encoding="utf-8")
-            raise RuntimeError(f"DeepSeek extraction failed: {exc}") from exc
+            raise RuntimeError(f"{selector.label} extraction failed: {exc}") from exc
         log_path.write_text(content, encoding="utf-8")
         if not isinstance(candidate.get("snapshots"), list):
-            raise RuntimeError("DeepSeek returned JSON without a snapshots array")
+            raise RuntimeError(f"{selector.label} returned JSON without a snapshots array")
         _atomic_write_json(candidate_path, candidate)
-        return candidate
+        return candidate, selector.provider
 
     def _prepare_and_validate_manifest(
         self,
         candidate: Dict,
         document: Dict,
         as_of: date,
+        provider: str = "deepseek",
     ) -> Dict:
         snapshots = candidate.get("snapshots")
         if not isinstance(snapshots, list):
@@ -438,7 +453,8 @@ class HKIndexReviewAutomation:
                     "effective_date": effective_date.isoformat(),
                     "source_url": document["source_url"],
                     "source_document": document["path"].name,
-                    "extraction_method": "official_pdf_deepseek_schema_validated",
+                    # 审计字段记录实际抽取用的供应商，DeepSeek 的取值与历史行保持一致。
+                    "extraction_method": f"official_pdf_{provider}_schema_validated",
                     "verified": True,
                 }
             )
