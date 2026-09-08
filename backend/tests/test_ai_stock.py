@@ -1267,11 +1267,10 @@ def test_selector_uses_the_configured_provider_credentials():
         assert back["llm_provider"] == "deepseek"
         assert back["zhipu_configured"] is True
     finally:
-        if original is not None:
-            with get_db_ctx() as db:
-                config = db.get(AIStockServiceConfig, 1)
-                if config:
-                    config.llm_provider, config.zhipu_api_key, config.zhipu_model = original
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            if config:
+                config.llm_provider, config.zhipu_api_key, config.zhipu_model = original or ("deepseek", None, "glm-4.6")
 
 
 def test_hold_evaluations_advice_column_registered_and_idempotent():
