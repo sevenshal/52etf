@@ -1204,6 +1204,76 @@ def test_compute_csi_all_share_top_bottom_uses_last_turn_signal_from_chart_histo
     ai_stock_module._CSI_TOP_BOTTOM_CACHE.clear()
 
 
+def test_zhipu_columns_registered_and_idempotent():
+    from sqlalchemy import text
+    from src.core.database import ensure_table_columns, engine
+
+    # 模拟存量库：旧结构没有供应商与智谱相关字段。
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(ai_stock_service_configs)")).fetchall()}
+        for column in ("llm_provider", "zhipu_api_key", "zhipu_model", "zhipu_base_url"):
+            if column in existing:
+                conn.execute(text(f"ALTER TABLE ai_stock_service_configs DROP COLUMN {column}"))
+
+    ensure_table_columns()
+    ensure_table_columns()  # 幂等：重复执行不报错
+    with engine.connect() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(ai_stock_service_configs)")).fetchall()}
+    assert {"llm_provider", "zhipu_api_key", "zhipu_model", "zhipu_base_url"} <= cols
+    assert get_ai_stock_service_settings()["llm_provider"] == "deepseek"
+
+
+def test_selector_uses_the_configured_provider_credentials():
+    from src.core.database import get_db_ctx, AIStockServiceConfig
+    from src.core.services.ai_stock import LLMStockSelector
+
+    with get_db_ctx() as db:
+        config = db.get(AIStockServiceConfig, 1)
+        original = (config.llm_provider, config.zhipu_api_key, config.zhipu_model) if config else None
+    try:
+        saved = update_ai_stock_service_settings(
+            deepseek_api_key=None,
+            deepseek_model=None,
+            llm_provider="zhipu",
+            zhipu_api_key="zhipu-test-key",
+            zhipu_model="glm-4.6",
+            updated_by="admin",
+        )
+        assert saved["llm_provider"] == "zhipu"
+        assert saved["zhipu_configured"] is True
+        assert "zhipu_api_key" not in saved  # 写入型密钥不回显
+
+        selector = LLMStockSelector()
+        assert selector.provider == "zhipu"
+        assert selector.api_key == "zhipu-test-key"
+        assert selector.model == "glm-4.6"
+        assert selector.base_url == "https://open.bigmodel.cn/api/paas/v4"
+
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"id": "glm-1", "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+        with mock.patch("src.core.services.ai_stock.requests.post", return_value=response) as post:
+            selector._call_json([])
+        assert post.call_args.args[0] == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer zhipu-test-key"
+
+        # 切回 DeepSeek 不会清掉已保存的智谱密钥。
+        back = update_ai_stock_service_settings(
+            deepseek_api_key=None,
+            deepseek_model=None,
+            llm_provider="deepseek",
+            updated_by="admin",
+        )
+        assert back["llm_provider"] == "deepseek"
+        assert back["zhipu_configured"] is True
+    finally:
+        if original is not None:
+            with get_db_ctx() as db:
+                config = db.get(AIStockServiceConfig, 1)
+                if config:
+                    config.llm_provider, config.zhipu_api_key, config.zhipu_model = original
+
+
 def test_hold_evaluations_advice_column_registered_and_idempotent():
     from sqlalchemy import text
     from src.core.database import ensure_table_columns, engine

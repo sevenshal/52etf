@@ -656,9 +656,14 @@ class AIStockServiceConfig(Base):
     __tablename__ = "ai_stock_service_configs"
 
     id = Column(Integer, primary_key=True, default=1)
+    # 生效的大模型供应商：deepseek 或 zhipu（智谱 GLM，OpenAI 兼容接口）
+    llm_provider = Column(String(16), nullable=False, default="deepseek")
     deepseek_api_key = Column(String(512))
     deepseek_model = Column(String(100), nullable=False, default="deepseek-chat")
     deepseek_base_url = Column(String(500), nullable=False, default="https://api.deepseek.com")
+    zhipu_api_key = Column(String(512))
+    zhipu_model = Column(String(100), nullable=False, default="glm-4.6")
+    zhipu_base_url = Column(String(500), nullable=False, default="https://open.bigmodel.cn/api/paas/v4")
     max_candidates = Column(Integer)
     max_events = Column(Integer)
     max_boards = Column(Integer)
@@ -1787,6 +1792,10 @@ def ensure_table_columns():
         "ai_stock_service_configs": {
             "xueqiu_signal_enabled": "ALTER TABLE ai_stock_service_configs ADD COLUMN xueqiu_signal_enabled INTEGER NOT NULL DEFAULT 0",
             "news_anchor_time": "ALTER TABLE ai_stock_service_configs ADD COLUMN news_anchor_time VARCHAR(5) NOT NULL DEFAULT '14:00'",
+            "llm_provider": "ALTER TABLE ai_stock_service_configs ADD COLUMN llm_provider VARCHAR(16) NOT NULL DEFAULT 'deepseek'",
+            "zhipu_api_key": "ALTER TABLE ai_stock_service_configs ADD COLUMN zhipu_api_key VARCHAR(512)",
+            "zhipu_model": "ALTER TABLE ai_stock_service_configs ADD COLUMN zhipu_model VARCHAR(100) NOT NULL DEFAULT 'glm-4.6'",
+            "zhipu_base_url": "ALTER TABLE ai_stock_service_configs ADD COLUMN zhipu_base_url VARCHAR(500) NOT NULL DEFAULT 'https://open.bigmodel.cn/api/paas/v4'",
         },
         "ai_stock_paper_lots": {
             "stop_half_triggered": "ALTER TABLE ai_stock_paper_lots ADD COLUMN stop_half_triggered BOOLEAN NOT NULL DEFAULT 0",
