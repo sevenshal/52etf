@@ -29,6 +29,12 @@ API_BASE_URL = "https://spzhapi.dfcfs.cn"
 SNAPSHOT_TABLE = "eastmoney_cube_holdings_snapshots"
 RANK_SNAPSHOT_TABLE = "eastmoney_rank_snapshots"
 RANK_TYPE = "rate_250d_drawdown_0.2_asset_500k"
+# 单个组合抓取失败在并发访问东方财富 App 接口时是常态噪声，先重试再谈失败率。
+TRANSPORT_RETRY_ATTEMPTS = 3
+TRANSPORT_RETRY_BACKOFF_SECONDS = 0.6
+# 失败超过这个比例只告警，不再把已经抓到的组合一起丢掉。
+FAILURE_TOLERANCE_DIVISOR = 10
+FAILURE_TOLERANCE_FLOOR = 3
 SM4_KEY_AND_IV = bytes.fromhex("e4dd41fd138867c3665492702fe277eb")
 DEFAULT_DEVICE_ID = "E5099551-EB1E-4EDE-9B7A-7099B401C811"
 DEFAULT_USER_AGENT = "%E4%B8%9C%E6%96%B9%E8%B4%A2%E5%AF%8C/20260826100.1031 CFNetwork/3860.700.1 Darwin/25.6.0"
@@ -111,19 +117,47 @@ class EastmoneyClient:
             "clientVersion": self.credentials.app_version,
         }
 
+    async def _request_with_retry(self, description: str, send) -> Dict[str, Any]:
+        """重试可预期的传输层抖动。
+
+        榜单池是最近 5 个交易日的并集（上百个组合），并发打东方财富 App 接口时
+        偶发超时、连接重置、5xx 都是正常噪声，裸调一次就判这个组合失败会把失败率
+        推过阈值，进而让整轮快照被判失败。业务错误（code != 0）不在这里重试。
+        """
+        for attempt in range(1, TRANSPORT_RETRY_ATTEMPTS + 1):
+            try:
+                return await send()
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                retriable = (
+                    isinstance(exc, httpx.TransportError)
+                    or exc.response.status_code >= 500
+                )
+                if not retriable or attempt == TRANSPORT_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "东方财富 %s 第 %s/%s 次请求失败，重试: %s",
+                    description, attempt, TRANSPORT_RETRY_ATTEMPTS, exc,
+                )
+                await asyncio.sleep(TRANSPORT_RETRY_BACKOFF_SECONDS * attempt)
+        raise RuntimeError(f"东方财富 {description} 重试耗尽")
+
     async def _post(self, method: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        body = self._envelope(method, args)
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "rnversion": self.credentials.rn_version,
-            "appversion": self.credentials.app_version,
-            "Content-Type": "application/json",
-            "User-Agent": DEFAULT_USER_AGENT,
-            "sign": compute_eastmoney_sign(body),
-        }
-        response = await self.client.post(f"{API_BASE_URL}/rtV3", headers=headers, json=body)
-        response.raise_for_status()
-        payload = response.json()
+        async def send() -> Dict[str, Any]:
+            # 每次重试都重新生成 envelope：timestamp / randomCode / sign 都是一次性的。
+            body = self._envelope(method, args)
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "rnversion": self.credentials.rn_version,
+                "appversion": self.credentials.app_version,
+                "Content-Type": "application/json",
+                "User-Agent": DEFAULT_USER_AGENT,
+                "sign": compute_eastmoney_sign(body),
+            }
+            response = await self.client.post(f"{API_BASE_URL}/rtV3", headers=headers, json=body)
+            response.raise_for_status()
+            return response.json()
+
+        payload = await self._request_with_retry(method, send)
         if int(payload.get("code", -1)) != 0:
             raise RuntimeError(f"东方财富接口 {method} 失败: {payload.get('code')} {payload.get('message')}")
         return payload
@@ -148,9 +182,12 @@ class EastmoneyClient:
             "utToken": self.credentials.ut_token, "appVer": self.credentials.app_ver_code,
             "zh": combination_id, "userId": self.credentials.user_id,
         })
-        response = await self.client.get(f"{API_BASE_URL}/srtV1?{query}")
-        response.raise_for_status()
-        payload = response.json()
+        async def send() -> Dict[str, Any]:
+            response = await self.client.get(f"{API_BASE_URL}/srtV1?{query}")
+            response.raise_for_status()
+            return response.json()
+
+        payload = await self._request_with_retry("rt_add_concern", send)
         message = str(payload.get("message") or payload.get("msg") or "")
         if int(payload.get("code", -1)) != 0 and "成功" not in message:
             raise RuntimeError(f"关注东方财富组合 {combination_id} 失败: {payload.get('message')}")
@@ -456,17 +493,40 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
                 "raw_holding_json": json.dumps(holding, ensure_ascii=False, separators=(",", ":")),
                 "created_at": now, "updated_at": now,
             })
-    if rolling_rankings and len(failed) > max(3, len(rolling_rankings) // 10):
-        raise RuntimeError(f"东方财富持仓失败过多: {len(failed)}/{len(rolling_rankings)}")
+    if rolling_rankings and not rows:
+        # 一个组合都没抓到才是真失败：凭据过期、接口变更、整体被限流。
+        raise RuntimeError(f"东方财富持仓全部失败: {len(failed)}/{len(rolling_rankings)}")
+    warning: Optional[str] = None
+    tolerance = max(FAILURE_TOLERANCE_FLOOR, len(rolling_rankings) // FAILURE_TOLERANCE_DIVISOR)
+    if rolling_rankings and len(failed) > tolerance:
+        # 单个组合抓取失败是外部 HTTP 抖动的正常噪声，已经抓到的九成组合不该被它带走：
+        # 只降级成告警，快照照常落库，由结果消息把失败数暴露出来。
+        warning = f"东方财富持仓失败偏多 {len(failed)}/{len(rolling_rankings)}"
+        logger.warning("%s，保留已抓到的 %s 个组合", warning, len(rolling_rankings) - len(failed))
+
+    written = True
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
     try:
         _ensure_schema(connection)
-        connection.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE snapshot_at = ?", [snapshot_at])
-        if rows:
-            frame = pd.DataFrame(rows)
-            connection.register("eastmoney_snapshot_rows", frame)
-            columns = ", ".join(f'"{column}"' for column in frame.columns)
-            connection.execute(f"INSERT INTO {SNAPSHOT_TABLE} ({columns}) SELECT {columns} FROM eastmoney_snapshot_rows")
+        existing_cubes = connection.execute(
+            f"SELECT COUNT(DISTINCT cube_symbol) FROM {SNAPSHOT_TABLE} WHERE snapshot_at = ?",
+            [snapshot_at],
+        ).fetchone()[0]
+        new_cubes = len({row["cube_symbol"] for row in rows})
+        if existing_cubes > new_cubes:
+            # 同一时点已有更完整的快照（上一轮补采的），别用这次退化的结果覆盖它。
+            written = False
+            logger.warning(
+                "东方财富 %s 已有 %s 个组合的快照，本轮只有 %s 个，跳过覆盖",
+                snapshot_at.isoformat(sep=" "), existing_cubes, new_cubes,
+            )
+        else:
+            connection.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE snapshot_at = ?", [snapshot_at])
+            if rows:
+                frame = pd.DataFrame(rows)
+                connection.register("eastmoney_snapshot_rows", frame)
+                columns = ", ".join(f'"{column}"' for column in frame.columns)
+                connection.execute(f"INSERT INTO {SNAPSHOT_TABLE} ({columns}) SELECT {columns} FROM eastmoney_snapshot_rows")
     finally:
         connection.close()
     return {
@@ -475,16 +535,24 @@ async def run_eastmoney_holdings_job(*, force: bool = False, workers: int = 4) -
         "rank_count": len(rankings),
         "rolling_combination_count": len(rolling_rankings),
         "holding_rows": len(rows), "failed_count": len(failed), "failed": failed[:10],
+        "written": written, "warning": warning,
     }
 
 
-def process_eastmoney_holdings_refresh_for_robot() -> str:
-    result = asyncio.run(run_eastmoney_holdings_job())
+def _format_eastmoney_holdings_result(result: Dict[str, Any]) -> str:
     if result.get("skipped"):
         return f"跳过东方财富实盘榜单刷新: {result.get('message')}"
+    # 告警放最前面：前端结果预览只截前 96 个字符，埋在字段中间会被忽略。
+    prefix = f"[告警] {result['warning']} | " if result.get("warning") else ""
+    if not result.get("written", True):
+        prefix += "[告警] 同时点已有更完整快照，本轮未落库 | "
     return (
-        f"东方财富实盘榜单与持仓刷新 rank={result['rank_count']} "
+        f"{prefix}东方财富实盘榜单与持仓刷新 rank={result['rank_count']} "
         f"rolling={result['rolling_combination_count']} "
         f"rank_at={result['snapshot_at']} rows={result['holding_rows']} "
         f"failed={result['failed_count']}"
     )
+
+
+def process_eastmoney_holdings_refresh_for_robot() -> str:
+    return _format_eastmoney_holdings_result(asyncio.run(run_eastmoney_holdings_job()))
