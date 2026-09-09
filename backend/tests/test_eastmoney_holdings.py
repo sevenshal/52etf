@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 from datetime import date, datetime, timedelta
 
 import duckdb
+import httpx
 import polars as pl
 
 from src.robot.eastmoney_holdings import (
@@ -15,6 +16,8 @@ from src.robot.eastmoney_holdings import (
     _complete_holdings_snapshot_exists,
     _normalize_rank_at,
     _parse_source_update_at,
+    _format_eastmoney_holdings_result,
+    run_eastmoney_holdings_job,
 )
 from src.app.api.eastmoney_holdings import (
     _attach_eastmoney_history_5d_ratios,
@@ -219,3 +222,111 @@ class EastmoneyHoldingsTest(IsolatedAsyncioTestCase):
             _attach_eastmoney_today_ratio(object(), items, datetime(2026, 9, 1).date())
         self.assertEqual(1.1, items[0]["momentum_multiple_today"])
         self.assertEqual(1.82, items[0]["weight_price_ratio_today"])
+
+
+class _ReusableConnection:
+    """任务里每一段都会 close 连接，测试要在这些段之间复用同一个内存库。"""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def close(self):
+        pass
+
+
+class EastmoneyHoldingsResilienceTest(IsolatedAsyncioTestCase):
+    """外部 HTTP 抖动不该带走整轮快照。"""
+
+    def setUp(self):
+        self.client = EastmoneyClient(EastmoneyCredentials("ct", "ut", "user", "device"))
+
+    async def asyncTearDown(self):
+        await self.client.client.aclose()
+
+    async def test_transport_error_is_retried_before_failing_the_combination(self):
+        ok = AsyncMock()
+        ok.raise_for_status = lambda: None
+        ok.json = lambda: {"code": 0, "data": [{"BlockName": "半导体", "data": [{"__code": "688001"}]}]}
+        self.client.client.post = AsyncMock(
+            side_effect=[httpx.ReadTimeout("timeout"), httpx.ConnectError("reset"), ok]
+        )
+        with patch("src.robot.eastmoney_holdings.asyncio.sleep", new=AsyncMock()):
+            rows = await self.client.fetch_holdings(900000001)
+        self.assertEqual("半导体", rows[0]["segment_name"])
+        self.assertEqual(3, self.client.client.post.await_count)
+
+    async def test_client_error_is_not_retried(self):
+        response = httpx.Response(403, request=httpx.Request("POST", "https://example.com"))
+        failing = AsyncMock()
+        failing.raise_for_status = lambda: (_ for _ in ()).throw(
+            httpx.HTTPStatusError("forbidden", request=response.request, response=response)
+        )
+        self.client.client.post = AsyncMock(return_value=failing)
+        with self.assertRaises(httpx.HTTPStatusError):
+            await self.client.fetch_holdings(900000001)
+        self.assertEqual(1, self.client.client.post.await_count)
+
+    def test_partial_failure_keeps_the_snapshot_and_fronts_the_warning(self):
+        message = _format_eastmoney_holdings_result({
+            "snapshot_at": "2026-09-08 10:30:00", "rank_count": 200,
+            "rolling_combination_count": 139, "holding_rows": 1200,
+            "failed_count": 14, "warning": "东方财富持仓失败偏多 14/139", "written": True,
+        })
+        self.assertTrue(message.startswith("[告警] 东方财富持仓失败偏多 14/139"))
+        self.assertIn("rows=1200", message)
+
+    def test_degraded_run_does_not_overwrite_a_more_complete_snapshot(self):
+        message = _format_eastmoney_holdings_result({
+            "snapshot_at": "2026-09-08 10:30:00", "rank_count": 200,
+            "rolling_combination_count": 139, "holding_rows": 10,
+            "failed_count": 100, "warning": None, "written": False,
+        })
+        self.assertIn("同时点已有更完整快照", message[:96])
+
+    async def test_job_keeps_the_snapshot_when_a_tenth_of_the_combinations_fail(self):
+        connection = _ReusableConnection(duckdb.connect(":memory:"))
+        combinations = [{"combinationId": index, "userName": f"u{index}"} for index in range(1, 140)]
+
+        async def fetch_holdings(combination_id):
+            if combination_id <= 14:
+                raise httpx.ReadTimeout("timeout")
+            return [{"__code": "600000", "market": "1", "positionRateDetail": "10", "__zxjg": "9.9"}]
+
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.fetch_rank_page.return_value = {
+            "data": {"updateTime": "2026-09-08 10:31:02", "totalPages": 1, "pages": combinations}
+        }
+        client.fetch_holdings.side_effect = fetch_holdings
+        with patch("src.robot.eastmoney_holdings._load_credentials", return_value=None), patch(
+            "src.robot.eastmoney_holdings.EastmoneyClient", return_value=client
+        ), patch("src.robot.eastmoney_holdings.connect_duckdb", return_value=connection):
+            result = await run_eastmoney_holdings_job(force=True)
+
+        # 14/139 超过一成的容忍度，但抓到的 125 个组合必须落库，任务不能整体判失败。
+        self.assertEqual(14, result["failed_count"])
+        self.assertTrue(result["written"])
+        self.assertIn("14/139", result["warning"])
+        self.assertEqual(125, connection.execute(
+            "SELECT COUNT(DISTINCT cube_symbol) FROM eastmoney_cube_holdings_snapshots"
+        ).fetchone()[0])
+
+    async def test_job_still_fails_when_every_combination_fails(self):
+        connection = _ReusableConnection(duckdb.connect(":memory:"))
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.fetch_rank_page.return_value = {
+            "data": {
+                "updateTime": "2026-09-08 10:31:02", "totalPages": 1,
+                "pages": [{"combinationId": index, "userName": "u"} for index in range(1, 21)],
+            }
+        }
+        client.fetch_holdings.side_effect = RuntimeError("东方财富接口失败: -1 凭据过期")
+        with patch("src.robot.eastmoney_holdings._load_credentials", return_value=None), patch(
+            "src.robot.eastmoney_holdings.EastmoneyClient", return_value=client
+        ), patch("src.robot.eastmoney_holdings.connect_duckdb", return_value=connection):
+            with self.assertRaisesRegex(RuntimeError, "东方财富持仓全部失败"):
+                await run_eastmoney_holdings_job(force=True)
