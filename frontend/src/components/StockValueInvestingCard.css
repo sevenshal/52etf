@@ -1,0 +1,56 @@
+.stock-value-investing {
+  margin-top: 20px;
+}
+
+.stock-value-investing__headline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 24px;
+  margin-bottom: 12px;
+}
+
+.stock-value-investing__return-range {
+  font-size: 12px;
+}
+
+.stock-value-investing__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 2px 18px;
+  padding: 10px 14px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+.stock-value-investing__metric {
+  min-width: 0;
+  color: #666;
+  line-height: 1.8;
+}
+
+.stock-value-investing__metric strong {
+  color: #262626;
+  font-weight: 600;
+}
+
+.stock-value-investing__metric .is-positive {
+  color: #389e0d;
+}
+
+.stock-value-investing__metric .is-negative {
+  color: #cf1322;
+}
+
+.stock-value-investing__gate {
+  margin-bottom: 12px;
+}
+
+.stock-value-investing__assumptions {
+  margin-top: 12px;
+}
+
+.stock-value-investing__disclaimer {
+  display: block;
+  margin-top: 10px;
+}

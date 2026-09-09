@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, Query
 from ...core.services.value_investing_scanner import (
     DEFAULT_EQUITY_RISK_PREMIUM,
     DEFAULT_TERMINAL_GROWTH_RATE,
+    evaluate_value_investing_stock,
     screen_value_investing_candidates,
 )
-from .account import valid_admin_account
+from .account import valid_account, valid_admin_account
 
 router = APIRouter(prefix="/api/value-investing", tags=["Value Investing"])
 
@@ -63,6 +64,36 @@ def screen_value_investing(
         exclude_st=exclude_st,
         quality_overrides=overrides or None,
         top_n=top_n,
+        as_of=as_of,
+        risk_free_rate=(risk_free_rate_pct / 100.0) if risk_free_rate_pct is not None else None,
+        equity_risk_premium=equity_risk_premium_pct / 100.0,
+        terminal_growth_rate=terminal_growth_rate_pct / 100.0,
+    )
+
+
+@router.get("/stock/{ts_code}")
+def value_investing_stock_profile(
+    ts_code: str,
+    as_of: date | None = Query(default=None),
+    risk_free_rate_pct: float | None = Query(
+        default=None, description="WACC假设：无风险利率(%)，留空自动取中债国债收益率曲线10年期利率"
+    ),
+    equity_risk_premium_pct: float = Query(
+        default=DEFAULT_EQUITY_RISK_PREMIUM * 100.0, description="WACC假设：股权风险溢价(%)"
+    ),
+    terminal_growth_rate_pct: float = Query(
+        default=DEFAULT_TERMINAL_GROWTH_RATE * 100.0, description="DCF假设：永续增长率(%)"
+    ),
+    _: str = Depends(valid_account),
+):
+    """单只股票的价值投资基本面画像，供个股详情页展示。
+
+    走的是全市场扫描同一套 ROIC-WACC 质量闸门与 DCF/合理市净率估值，只是把范围收敛
+    到这一只、并且质量闸门没通过时也把估值算完（详情页要看到差多少，而不只是"没过"）。
+    与 /screen 不同，这里只读单只股票，不是管理员专用的全市场重扫描。
+    """
+    return evaluate_value_investing_stock(
+        ts_code,
         as_of=as_of,
         risk_free_rate=(risk_free_rate_pct / 100.0) if risk_free_rate_pct is not None else None,
         equity_risk_premium=equity_risk_premium_pct / 100.0,

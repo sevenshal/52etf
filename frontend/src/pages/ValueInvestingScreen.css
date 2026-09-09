@@ -35,13 +35,11 @@
   margin-bottom: 16px;
 }
 
-.value-investing-table .is-positive,
-.value-investing-detail .is-positive {
+.value-investing-table .is-positive {
   color: #389e0d;
 }
 
-.value-investing-table .is-negative,
-.value-investing-detail .is-negative {
+.value-investing-table .is-negative {
   color: #cf1322;
 }
 
@@ -51,16 +49,6 @@
 
 .value-investing-return-range {
   font-size: 12px;
-}
-
-.value-investing-detail-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.value-investing-detail-warning {
-  margin-bottom: 0;
 }
 
 .value-investing-excluded {

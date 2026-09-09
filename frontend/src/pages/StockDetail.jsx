@@ -6,6 +6,7 @@ import StockKlineChart from '../components/StockKlineChart';
 import XueqiuStockLink from '../components/XueqiuStockLink';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
+import StockValueInvestingCard from '../components/StockValueInvestingCard';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
 
@@ -156,6 +157,7 @@ const StockDetail = () => {
           height={600}
         />
       </Card>
+      {isAStock ? <StockValueInvestingCard symbol={normalizedSymbol} /> : null}
     </div>
   );
 };

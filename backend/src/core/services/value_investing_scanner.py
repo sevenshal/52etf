@@ -224,11 +224,24 @@ def _latest_risk_free_rate(connection, curve_id: str, term_years: float) -> Opti
     return (yield_rate_pct / 100.0) if yield_rate_pct is not None else None
 
 
+def _symbol_filter(symbols: Optional[Sequence[str]], column: str = "ts_code") -> tuple[str, List[str]]:
+    """把可选的股票范围收敛成一段 SQL 条件和对应参数。
+
+    个股详情页只关心一只股票，把范围下推到 SQL 而不是先把全市场读进内存再过滤，
+    单只股票的查询才不用付全市场扫描的代价。
+    """
+    if not symbols:
+        return "", []
+    placeholders = ", ".join("?" for _ in symbols)
+    return f" AND {column} IN ({placeholders})", [str(symbol) for symbol in symbols]
+
+
 def _annual_rows(
     connection,
     table: str,
     columns: Sequence[str],
     periods: int = ANNUAL_HISTORY_PERIODS,
+    symbols: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """只取年报(end_date为12-31)，按 end_date 取最近 periods 期。
 
@@ -251,51 +264,61 @@ def _annual_rows(
         ).fetchall()
     }
     projection = ", ".join(f'"{name}"' for name in dict.fromkeys(selected) if name in available)
+    symbol_clause, symbol_params = _symbol_filter(symbols)
     query = f"""
         WITH deduped AS (
             SELECT {projection},
                    ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS _dedup_rn
             FROM {table}
-            WHERE end_date IS NOT NULL AND strftime(end_date, '%m-%d') = '12-31'
+            WHERE end_date IS NOT NULL AND strftime(end_date, '%m-%d') = '12-31'{symbol_clause}
         )
         SELECT * EXCLUDE (_dedup_rn)
         FROM deduped
         WHERE _dedup_rn = 1
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) <= {int(periods)}
     """
-    return connection.execute(query).fetchdf()
+    return connection.execute(query, symbol_params).fetchdf()
 
 
-def _latest_market_row(connection) -> pd.DataFrame:
+def _latest_market_row(connection, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
     if not duckdb_table_exists(connection, "a_stock_market_daily"):
         return pd.DataFrame()
-    query = """
+    symbol_clause, symbol_params = _symbol_filter(symbols)
+    query = f"""
         SELECT ts_code, trade_date, close, total_mv, circ_mv, pe, pe_ttm, pb, dv_ttm
         FROM a_stock_market_daily
+        WHERE TRUE{symbol_clause}
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) = 1
     """
-    return connection.execute(query).fetchdf()
+    return connection.execute(query, symbol_params).fetchdf()
 
 
-def _valuation_history(connection, start_date: date) -> pd.DataFrame:
+def _valuation_history(connection, start_date: date, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
     if not duckdb_table_exists(connection, "a_stock_market_daily"):
         return pd.DataFrame()
-    query = """
+    symbol_clause, symbol_params = _symbol_filter(symbols)
+    query = f"""
         SELECT ts_code, pe_ttm, pb
         FROM a_stock_market_daily
-        WHERE trade_date >= ?
+        WHERE trade_date >= ?{symbol_clause}
     """
-    return connection.execute(query, [start_date]).fetchdf()
+    return connection.execute(query, [start_date, *symbol_params]).fetchdf()
 
 
-def _beta_by_symbol(connection, lookback_start: date, market_index_code: str) -> Dict[str, float]:
+def _beta_by_symbol(
+    connection,
+    lookback_start: date,
+    market_index_code: str,
+    symbols: Optional[Sequence[str]] = None,
+) -> Dict[str, float]:
     """用近 BETA_LOOKBACK_DAYS 天的日收益率对基准指数做回归斜率估算 beta。
 
     一次 SQL 对全市场做 REGR_SLOPE 分组聚合，避免逐个股票 Python 循环回归。
     """
     if not duckdb_table_exists(connection, "a_stock_index_daily") or not duckdb_table_exists(connection, "a_stock_market_daily"):
         return {}
-    query = """
+    symbol_clause, symbol_params = _symbol_filter(symbols, column="m.ts_code")
+    query = f"""
         WITH index_returns AS (
             SELECT trade_date, pct_chg AS index_pct_chg
             FROM a_stock_index_daily
@@ -307,13 +330,13 @@ def _beta_by_symbol(connection, lookback_start: date, market_index_code: str) ->
             COUNT(*) AS obs
         FROM a_stock_market_daily m
         JOIN index_returns i ON m.trade_date = i.trade_date
-        WHERE m.pct_chg IS NOT NULL AND m.trade_date >= ?
+        WHERE m.pct_chg IS NOT NULL AND m.trade_date >= ?{symbol_clause}
         GROUP BY m.ts_code
         HAVING COUNT(*) >= ? AND REGR_SLOPE(m.pct_chg, i.index_pct_chg) IS NOT NULL
     """
     frame = connection.execute(
         query,
-        [market_index_code, lookback_start, lookback_start, MIN_BETA_OBSERVATIONS],
+        [market_index_code, lookback_start, lookback_start, *symbol_params, MIN_BETA_OBSERVATIONS],
     ).fetchdf()
     if frame.empty:
         return {}
@@ -1228,12 +1251,19 @@ def screen_value_investing_candidates(
     risk_free_rate: Optional[float] = None,
     equity_risk_premium: float = DEFAULT_EQUITY_RISK_PREMIUM,
     terminal_growth_rate: float = DEFAULT_TERMINAL_GROWTH_RATE,
+    symbols: Optional[Sequence[str]] = None,
+    force_valuation: bool = False,
 ) -> Dict[str, Any]:
     """跑一次全市场价值投资扫描，返回按 DCF/合理估值测算的潜在 return% 排序的候选列表。
 
     只读查询 DuckDB 分析库；金融类公司(银行/保险/证券)使用单独的质量与估值口径。
     risk_free_rate 留空(None)时现取中债国债收益率曲线10年期利率，曲线还没同步到
     时才退回静态假设；显式传值则始终使用调用方指定的值。
+
+    `symbols` 把扫描范围收敛到指定股票(下推到 SQL)，`force_valuation` 让没通过
+    质量闸门的股票也照样跑完估值。两个开关是给个股详情页用的：详情页要展示的是
+    "这只股票在同一套价值投资口径下长什么样"，闸门没过恰恰是最需要看到数字的
+    情形——只给一句"未通过"没法判断差多少。全市场扫描保持原行为不变。
     """
     thresholds = dict(DEFAULT_QUALITY_THRESHOLDS)
     if quality_overrides:
@@ -1245,18 +1275,20 @@ def screen_value_investing_candidates(
 
     connection = connect_analytics_db()
     try:
+        basic_clause, basic_params = _symbol_filter(symbols)
         basic = connection.execute(
-            "SELECT ts_code, name, industry, list_date, list_status FROM a_stock_basic"
+            f"SELECT ts_code, name, industry, list_date, list_status FROM a_stock_basic WHERE TRUE{basic_clause}",
+            basic_params,
         ).fetchdf()
-        income_annual = _annual_rows(connection, "a_stock_income", INCOME_SCAN_COLUMNS)
+        income_annual = _annual_rows(connection, "a_stock_income", INCOME_SCAN_COLUMNS, symbols=symbols)
         # 资产负债表以前只取最新1期。现在"去年那次估值快照"也要用去年的少数股东权益
         # 和货币资金，否则两次快照的净债务/少数股东口径会打架，同比差值就成了噪声。
-        balancesheet_annual = _annual_rows(connection, "a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS)
-        cashflow_annual = _annual_rows(connection, "a_stock_cashflow", CASHFLOW_SCAN_COLUMNS)
-        fina_annual = _annual_rows(connection, "a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS)
-        market_latest = _latest_market_row(connection)
-        valuation_history = _valuation_history(connection, history_start)
-        beta_by_symbol = _beta_by_symbol(connection, beta_lookback_start, MARKET_INDEX_CODE)
+        balancesheet_annual = _annual_rows(connection, "a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS, symbols=symbols)
+        cashflow_annual = _annual_rows(connection, "a_stock_cashflow", CASHFLOW_SCAN_COLUMNS, symbols=symbols)
+        fina_annual = _annual_rows(connection, "a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS, symbols=symbols)
+        market_latest = _latest_market_row(connection, symbols=symbols)
+        valuation_history = _valuation_history(connection, history_start, symbols=symbols)
+        beta_by_symbol = _beta_by_symbol(connection, beta_lookback_start, MARKET_INDEX_CODE, symbols=symbols)
         risk_free_rate_source = "explicit_override"
         if risk_free_rate is None:
             risk_free_rate = _latest_risk_free_rate(connection, CHINABOND_GOVERNMENT_BOND_CURVE_ID, RISK_FREE_RATE_TERM_YEARS)
@@ -1451,7 +1483,7 @@ def screen_value_investing_candidates(
             thresholds=thresholds,
         )
 
-        if not quality["passes"]:
+        if not quality["passes"] and not force_valuation:
             candidates.append(
                 {
                     "ts_code": ts_code,
@@ -1469,7 +1501,8 @@ def screen_value_investing_candidates(
                 }
             )
             continue
-        quality_passed += 1
+        if quality["passes"]:
+            quality_passed += 1
 
         pe_ttm = safe_float(market_row.get("pe_ttm"))
         pb = safe_float(market_row.get("pb"))
@@ -1582,8 +1615,8 @@ def screen_value_investing_candidates(
                 "name": name,
                 "industry": basic_row.get("industry"),
                 "is_financial": is_financial,
-                "quality_passed": True,
-                "quality_reasons": [],
+                "quality_passed": quality["passes"],
+                "quality_reasons": quality["reasons"],
                 "quality_notes": quality["notes"],
                 "avg_roe_pct": avg_roe,
                 "avg_roic_pct": avg_roic,
@@ -1730,3 +1763,66 @@ def screen_value_investing_candidates(
         "candidates": ranked[: max(0, int(top_n))],
         "excluded_sample": excluded[: max(0, int(top_n))],
     }
+
+
+def evaluate_value_investing_stock(
+    ts_code: str,
+    *,
+    as_of: Optional[date] = None,
+    risk_free_rate: Optional[float] = None,
+    equity_risk_premium: float = DEFAULT_EQUITY_RISK_PREMIUM,
+    terminal_growth_rate: float = DEFAULT_TERMINAL_GROWTH_RATE,
+) -> Dict[str, Any]:
+    """按与全市场扫描完全相同的口径，单独算一只股票的价值投资基本面画像。
+
+    刻意复用 `screen_value_investing_candidates` 而不是另写一套单股逻辑：个股详情页
+    上的 ROIC/WACC、DCF 内在价值、潜在回报率必须和「价值投资扫描」页上那只股票的
+    数字一模一样，各写一份迟早会漂移。差别只有三处入参：范围收敛到这一只、不按
+    市值和 ST 预过滤、闸门没过也照样把估值算完。
+    """
+    symbol = str(ts_code or "").strip().upper()
+    if not symbol:
+        return {"status": "not_found", "ts_code": symbol, "candidate": None, "message": "缺少股票代码"}
+
+    result = screen_value_investing_candidates(
+        min_total_mv=None,
+        exclude_st=False,
+        top_n=1,
+        as_of=as_of,
+        risk_free_rate=risk_free_rate,
+        equity_risk_premium=equity_risk_premium,
+        terminal_growth_rate=terminal_growth_rate,
+        symbols=[symbol],
+        force_valuation=True,
+    )
+    candidate = next(
+        (
+            item
+            for item in [*result.get("candidates", []), *result.get("excluded_sample", [])]
+            if item.get("ts_code") == symbol
+        ),
+        None,
+    )
+    payload: Dict[str, Any] = {
+        "ts_code": symbol,
+        "as_of": result.get("as_of"),
+        "status": result.get("status"),
+        "thresholds": result.get("thresholds"),
+        "assumptions": result.get("assumptions"),
+        "candidate": candidate,
+    }
+    if result.get("message"):
+        payload["message"] = result["message"]
+    # 扫描范围已经收敛到这一只股票，所以"查不到行情/基础信息"说的是这只股票，
+    # 不是分析库整体为空——直接沿用全市场那句"暂无市场行情"会把人引到错误的方向。
+    if payload["status"] == "no_data" or (payload["status"] == "completed" and candidate is None):
+        payload["status"] = "not_found"
+        payload["message"] = (
+            "分析库里没有这只股票的行情或基础信息，可能不是 A 股、已退市，或基础数据尚未同步"
+        )
+    elif payload["status"] == "fundamentals_not_synced":
+        payload["message"] = (
+            "这只股票的利润表/资产负债表/现金流量表/财务指标尚未同步到分析库，"
+            "跑一次 A 股基础数据同步后才能算出价值投资口径的估值"
+        )
+    return payload
