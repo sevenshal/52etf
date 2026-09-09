@@ -1,0 +1,17 @@
+.value-investing-detail .is-positive {
+  color: #389e0d;
+}
+
+.value-investing-detail .is-negative {
+  color: #cf1322;
+}
+
+.value-investing-detail-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.value-investing-detail-warning {
+  margin-bottom: 0;
+}

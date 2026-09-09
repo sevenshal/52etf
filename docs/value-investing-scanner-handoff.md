@@ -373,6 +373,9 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
 | `backend/scripts/verify_value_investing_tushare_access.py` | 验证 tushare 账号权限的诊断脚本 |
 | `backend/scripts/inspect_a_stock_income_revenue_gap.py` | 验证 `operate_income` 历史是否为空的诊断脚本 |
 | `frontend/src/pages/ValueInvestingScreen.jsx` / `.css` | 「研究」→「价值投资」页面 |
+| `frontend/src/components/ValueInvestingDetail.jsx` / `.css` | 估值假设明细的唯一渲染实现，扫描页展开行和个股详情页共用 |
+| `frontend/src/components/StockValueInvestingCard.jsx` / `.css` | 个股详情页 `/stock/{symbol}` 的价值投资基本面卡片 |
+| `backend/tests/test_value_investing_stock_profile.py` | 个股画像 == 全市场扫描同一行的逐字段回归测试（DuckDB fixture） |
 | `backend/tests/test_value_investing_scanner.py` | 第 9 节 5 个问题的回归测试（合成数据） |
 | `backend/tests/test_analytics_schema_upgrade.py` | 旧窄表 → 自动补列 → 已有行保留 的升级测试 |
 
@@ -666,3 +669,35 @@ ROE_隐含 = r + (当前P/B − 1) / Σ(1+g)^(t-1)/(1+r)^t
 仍在榜首的 603202.SH 天有为(+538%)是 ROIC 31%、增速 28%、PE 12 的次新股，5 年历史里
 有相当部分是上市前数据——这是输入本身单薄，不是公式错误。次新股的历史深度是否该单独
 设一道闸门，留待后续判断。
+
+---
+
+## 13. 个股详情页复用（2026-09-09）
+
+`/stock/{symbol}` 之前只有行情头部 + K线 + 估值曲线，价值投资那套基本面分析只在管理员的
+「价值投资扫描」页上出现。现在把同一套结论搬到了个股详情页。
+
+**接口**：`GET /api/value-investing/stock/{ts_code}`，鉴权是 `valid_account`（跟详情页其余
+接口一致），不是 `/screen` 的管理员专用——它只读一只股票，不是全市场重扫描。
+
+**实现方式是复用而非重写**：`evaluate_value_investing_stock()` 直接调
+`screen_value_investing_candidates()`，只改三个入参：
+
+| 入参 | 值 | 原因 |
+|---|---|---|
+| `symbols=[ts_code]` | 新增 | 范围下推到 SQL（`_symbol_filter()` 拼进 `_annual_rows` / `_latest_market_row` / `_valuation_history` / `_beta_by_symbol` / `a_stock_basic` 五处查询），单股查询不必付全市场扫描的代价 |
+| `force_valuation=True` | 新增 | 闸门没过也把估值算完。全市场扫描对没过闸门的股票只返回一行摘要就够了；详情页要回答的是"差多少"，只给"未通过"没用 |
+| `exclude_st=False`, `min_total_mv=None` | — | 用户点开哪只就看哪只，不做预过滤 |
+
+全市场扫描的行为完全不变：两个开关都有默认值，`ranked` 仍然只收 `quality_passed` 的候选。
+
+`backend/tests/test_value_investing_stock_profile.py` 用一个最小 DuckDB 分析库把两条路径都
+跑一遍，断言 `profile["candidate"] == ` 全市场扫描里同一只股票那一行（逐字段相等）。**这条
+断言就是防漂移的锁**：以后谁想给详情页单独写一套"差不多"的算法，这个测试会先红。
+
+前端同理：估值假设明细从 `ValueInvestingScreen.jsx` 里抽成 `ValueInvestingDetail.jsx`，
+扫描页的展开行和详情页卡片共用一份渲染，不存在两套说法。
+
+**未验证**：本地没有生产分析库，单股查询在真实数据量下的耗时没有实测过。DuckDB 对
+`a_stock_market_daily` 这种大表的 `ts_code IN (?)` 过滤是否走上索引/zonemap，上线后要看一眼
+详情页的接口耗时。

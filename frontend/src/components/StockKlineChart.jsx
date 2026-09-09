@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Form, InputNumber, Popover, Segmented, Spin, Switch } from 'antd';
+import { Form, InputNumber, Popover, Segmented, Space, Spin, Switch } from 'antd';
 import { InfoCircleOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
@@ -11,6 +11,7 @@ import {
   preprocessKlinesVolume,
 } from '../utils/klines';
 import { appendNineTurnAtr } from '../utils/nineTurn';
+import { DEFAULT_MACD_PARAMS, calculateMacd } from '../utils/macd';
 
 const POC_WINDOW_OPTIONS = [
   { label: '125', value: 125 },
@@ -19,6 +20,11 @@ const POC_WINDOW_OPTIONS = [
 ];
 const VOLUME_LOOKBACK_DAYS = 60;
 const VOLUME_BASELINE_SERIES_NAME = `成交量${VOLUME_LOOKBACK_DAYS}日几何均线`;
+const MACD_HISTOGRAM_SERIES_NAME = 'MACD柱';
+const UP_COLOR = '#ef232a';
+const DOWN_COLOR = '#14b143';
+const DIF_COLOR = '#f5a623';
+const DEA_COLOR = '#1890ff';
 
 const toPositiveNumber = (value) => {
   if (value === null || value === undefined || value === '') return null;
@@ -126,6 +132,7 @@ const StockKlineChart = ({
   const [volumeStdDevMultiplier, setVolumeStdDevMultiplier] = useState(1);
   const [showSupportResistance, setShowSupportResistance] = useState(true);
   const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
+  const [macdParams, setMacdParams] = useState(DEFAULT_MACD_PARAMS);
   const [chartOption, setChartOption] = useState({});
   const zoomRef = useRef(null);
 
@@ -357,6 +364,70 @@ const StockKlineChart = ({
       }
     ];
 
+    // MACD 副图：放在成交量下面，用第 3 个 grid。
+    const {
+      dif,
+      dea,
+      histogram,
+      growing: macdGrowing,
+      params: appliedMacdParams,
+    } = calculateMacd(processedKlines, macdParams);
+    const macdLabel = `MACD(${appliedMacdParams.fast},${appliedMacdParams.slow},${appliedMacdParams.signal})`;
+    // 柱子的实心/空心跟随动能方向，而不只是正负：红色实心=正且在放大(多头动能增强)，
+    // 红色空心=正但在收缩(多头动能衰减)，绿色同理。这是通达信/同花顺的画法，动能拐点
+    // 一眼能看出来，只涂正负两色是看不出来的。
+    const macdHistogramData = histogram.map((value, index) => {
+      if (value === null) return null;
+      const color = value >= 0 ? UP_COLOR : DOWN_COLOR;
+      return {
+        value,
+        itemStyle: macdGrowing[index]
+          ? { color }
+          : { color: 'transparent', borderColor: color, borderWidth: 1 },
+      };
+    });
+
+    series.push(
+      {
+        name: MACD_HISTOGRAM_SERIES_NAME,
+        type: 'bar',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: macdHistogramData,
+        barWidth: '60%',
+        tooltip: { show: false },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          label: { show: false },
+          lineStyle: { color: '#bfbfbf', width: 1, type: 'solid' },
+          data: [{ yAxis: 0 }],
+        },
+      },
+      {
+        name: 'DIF',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: dif,
+        symbol: 'none',
+        connectNulls: false,
+        lineStyle: { color: DIF_COLOR, width: 1 },
+        tooltip: { show: false },
+      },
+      {
+        name: 'DEA',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: dea,
+        symbol: 'none',
+        connectNulls: false,
+        lineStyle: { color: DEA_COLOR, width: 1 },
+        tooltip: { show: false },
+      },
+    );
+
     const indicatorLegendNames = [];
     const getSegmentPrice = value => (value && typeof value === 'object' ? value.price : value);
     const hasLevelData = data => data.some(value => toPositiveNumber(getSegmentPrice(value)) !== null);
@@ -566,6 +637,20 @@ const StockKlineChart = ({
                 </div>
               `;
             }
+            const difValue = dif[dataIndex];
+            const deaValue = dea[dataIndex];
+            const histogramValue = histogram[dataIndex];
+            if (Number.isFinite(difValue) && Number.isFinite(deaValue)) {
+              const histogramColor = histogramValue >= 0 ? UP_COLOR : DOWN_COLOR;
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color: #666;">${macdLabel}　</span>
+                  <span style="color: ${DIF_COLOR};">DIF ${formatNumber(difValue, 3)}</span>
+                  <span style="color: ${DEA_COLOR}; margin-left: 8px;">DEA ${formatNumber(deaValue, 3)}</span>
+                  <span style="color: ${histogramColor}; margin-left: 8px;">柱 ${formatNumber(histogramValue, 3)}</span>
+                </div>
+              `;
+            }
             if ([2, 3, 4].includes(currentKline.lowCount) && Number.isFinite(currentKline.latestRisingClose)) {
               result += `
                 <div style="margin-bottom: 4px;">
@@ -624,6 +709,9 @@ const StockKlineChart = ({
           'MA20',
           '成交量',
           VOLUME_BASELINE_SERIES_NAME,
+          MACD_HISTOGRAM_SERIES_NAME,
+          'DIF',
+          'DEA',
           '连续走强',
           '连续走弱',
           ...indicatorLegendNames,
@@ -639,9 +727,13 @@ const StockKlineChart = ({
           '下财年估值下限': false,
         }
       },
+      // 三个 grid 上下叠放：主图 / 成交量 / MACD，日期标签只留在最下面那个副图上，
+      // 中间两处重复的日期轴纯属噪声。
+      axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: [
-        { left: '10%', right: '8%', height: '60%' },
-        { left: '10%', right: '8%', top: '75%', height: '20%' }
+        { left: '10%', right: '8%', top: '8%', height: '44%' },
+        { left: '10%', right: '8%', top: '57%', height: '12%' },
+        { left: '10%', right: '8%', top: '74%', height: '12%' }
       ],
       xAxis: [
         {
@@ -650,6 +742,8 @@ const StockKlineChart = ({
           scale: true,
           boundaryGap: false,
           axisLine: { onZero: false },
+          axisTick: { show: false },
+          axisLabel: { show: false },
           splitLine: { show: false },
           splitNumber: 20,
           min: 'dataMin',
@@ -665,6 +759,17 @@ const StockKlineChart = ({
           axisTick: { show: false },
           splitLine: { show: false },
           axisLabel: { show: false }
+        },
+        {
+          type: 'category',
+          gridIndex: 2,
+          data: dates,
+          scale: true,
+          boundaryGap: false,
+          axisLine: { onZero: false },
+          axisTick: { show: false },
+          splitLine: { show: false },
+          splitNumber: 20
         }
       ],
       yAxis: [
@@ -680,25 +785,36 @@ const StockKlineChart = ({
           axisLine: { show: false },
           axisTick: { show: false },
           splitLine: { show: false }
+        },
+        {
+          scale: true,
+          gridIndex: 2,
+          splitNumber: 3,
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
+          axisLabel: { fontSize: 10, formatter: value => formatNumber(value, 2) }
         }
       ],
       dataZoom: [
         {
           type: 'inside',
-          xAxisIndex: [0, 1],
+          xAxisIndex: [0, 1, 2],
           ...zoomRange,
         },
         {
           show: true,
-          xAxisIndex: [0, 1],
+          xAxisIndex: [0, 1, 2],
           type: 'slider',
-          top: '90%',
+          top: '92%',
+          height: 18,
           ...zoomRange,
         }
       ],
       series
     };
   }, [
+    macdParams,
     processedKlines,
     showSupportResistance,
     valuationDateOffsetDays,
@@ -787,6 +903,50 @@ const StockKlineChart = ({
         </Form.Item>
         <Form.Item
           label={renderMetricTitle(
+            'MACD(快/慢/信号)',
+            <>
+              <div>
+                <code>DIF = EMA(收盘,快) − EMA(收盘,慢)</code>，
+                <code>DEA = EMA(DIF,信号)</code>，
+                <code>MACD柱 = (DIF − DEA) × 2</code>（A股口径，乘2）。
+              </div>
+              <div style={{ marginTop: 6 }}>
+                EMA 用首个收盘价递推播种，与通达信/同花顺一致，便于和券商软件对数；
+                前 max(快,慢,信号)−1 根带初始化偏差，不画。
+              </div>
+              <div style={{ marginTop: 6 }}>
+                柱子<strong>实心</strong>表示动能在放大，<strong>空心</strong>表示动能在收缩——
+                空心红柱意味着还在多头区间但势头已经在衰减。
+              </div>
+            </>
+          )}
+        >
+          <Space.Compact>
+            <InputNumber
+              min={1}
+              max={200}
+              style={{ width: 64 }}
+              value={macdParams.fast}
+              onChange={value => setMacdParams(current => ({ ...current, fast: value }))}
+            />
+            <InputNumber
+              min={1}
+              max={400}
+              style={{ width: 64 }}
+              value={macdParams.slow}
+              onChange={value => setMacdParams(current => ({ ...current, slow: value }))}
+            />
+            <InputNumber
+              min={1}
+              max={200}
+              style={{ width: 64 }}
+              value={macdParams.signal}
+              onChange={value => setMacdParams(current => ({ ...current, signal: value }))}
+            />
+          </Space.Compact>
+        </Form.Item>
+        <Form.Item
+          label={renderMetricTitle(
             '换手衰减',
             <>
               <div>开启后，每根历史 K 线会先用当天换手率衰减已有筹码，再加入当天新成交量。</div>
@@ -806,7 +966,7 @@ const StockKlineChart = ({
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}`}
+          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}-${macdParams.fast}-${macdParams.slow}-${macdParams.signal}`}
           option={chartOption}
           notMerge={false}
           onChartReady={handleChartReady}
