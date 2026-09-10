@@ -7,6 +7,7 @@ from sqlalchemy import func, and_
 from ...core.static_info import get_static_info_snapshot_map
 from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import (
+    load_a_stock_consensus_detail,
     load_a_stock_consensus_history,
     search_a_stock_consensus_candidates,
 )
@@ -30,8 +31,7 @@ class AStockConsensusSearchRequest(BaseModel):
     max_market_cap_100m: Optional[float] = None
     min_undervalue_pct: Optional[float] = 10.0
     min_growth_pct: Optional[float] = 10.0
-    report_lookback_days: int = 60
-    min_report_count: int = 5
+    min_organization_count: int = 1
     limit: int = 200
 
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
@@ -173,8 +173,7 @@ async def a_stock_consensus_search(
             max_market_cap_100m=request.max_market_cap_100m,
             min_undervalue_pct=request.min_undervalue_pct,
             min_growth_pct=request.min_growth_pct,
-            report_lookback_days=request.report_lookback_days,
-            min_report_count=request.min_report_count,
+            min_organization_count=request.min_organization_count,
             limit=request.limit,
         )
     except HTTPException:
@@ -246,6 +245,21 @@ def get_stock_evc_history(
         d.pop("_sa_instance_state", None)
         result.append(d)
     return result
+
+@router.get("/a-stock-consensus/detail/{symbol}")
+def get_a_stock_consensus_detail(
+    symbol: str,
+    account_id: str = Depends(get_account_id),
+):
+    analytics_db = AnalyticsSession()
+    try:
+        return load_a_stock_consensus_detail(analytics_db, symbol)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
 
 @router.get("/a-stock-consensus/history/{symbol}")
 def get_a_stock_consensus_history(

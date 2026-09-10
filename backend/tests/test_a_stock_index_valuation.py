@@ -152,37 +152,27 @@ def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):
 
 
 def test_load_a_stock_consensus_valuation_map_builds_forward_range():
-    report_rows = [{
-        "ts_code": "600519.SH",
-        "report_date": date(2026, 7, 20),
-        "report_title": "贵州茅台研报",
-        "org_name": "测试券商",
-        "author_name": "分析师",
-        "quarter": "2026",
-        "eps": 10,
-        "pe": 20,
-        "np": 100,
-        "rating": "买入",
-        "min_price": 120,
-        "max_price": 140,
-        "trade_date": date(2026, 7, 31),
-        "close": 100,
-    }, {
-        "ts_code": "600519.SH",
-        "report_date": date(2026, 7, 20),
-        "report_title": "贵州茅台研报",
-        "org_name": "测试券商",
-        "author_name": "分析师",
-        "quarter": "2027",
-        "eps": 12,
-        "pe": 18,
-        "np": 120,
-        "rating": "买入",
-        "min_price": 120,
-        "max_price": 140,
-        "trade_date": date(2026, 7, 31),
-        "close": 100,
-    }]
+    def report_row(quarter, eps):
+        return {
+            "ts_code": "600519.SH",
+            "report_date": date(2026, 7, 20),
+            "report_title": "贵州茅台研报",
+            "org_name": "测试券商",
+            "author_name": "分析师",
+            "quarter": quarter,
+            "eps": eps,
+            "pe": 20,
+            "np": None,
+            "rating": "买入",
+            "min_price": 120,
+            "max_price": 140,
+        }
+
+    report_rows = [report_row("2026Q4", 10), report_row("2027Q4", 12)]
+    disclosure_rows = [
+        {"ts_code": "600519.SH", "end_date": date(2025, 9, 30), "ann_date": date(2025, 10, 30)},
+        {"ts_code": "600519.SH", "end_date": date(2026, 3, 31), "ann_date": date(2026, 4, 25)},
+    ]
 
     class Result:
         def __init__(self, rows=None, scalar=None):
@@ -200,17 +190,29 @@ def test_load_a_stock_consensus_valuation_map_builds_forward_range():
 
     class FakeDb:
         def execute(self, statement, params=None):
-            if params is None:
+            sql = str(statement)
+            if "MAX(trade_date)" in sql:
                 return Result(scalar=date(2026, 7, 31))
-            return Result(rows=report_rows)
+            if "a_stock_income" in sql:
+                return Result(rows=disclosure_rows)
+            if "a_stock_report_rc" in sql:
+                return Result(rows=report_rows)
+            return Result(rows=[{"ts_code": "600519.SH", "close": 100}])
 
     result = load_a_stock_consensus_valuation_map(FakeDb(), ["600519.SH"])
 
-    assert result["600519.SH"]["fair_value_lo"] == pytest.approx(130)
-    assert result["600519.SH"]["fair_value_mid"] == pytest.approx(130)
-    assert result["600519.SH"]["fair_value_hi"] == pytest.approx(130)
-    assert result["600519.SH"]["forward_next_fy_lo"] == pytest.approx(156)
-    assert result["600519.SH"]["forward_next_fy_hi"] == pytest.approx(156)
+    valuation = result["600519.SH"]
+    # 按机构去重后的最低 / 中位 / 最高；只有一家机构时就是它自己的目标价区间。
+    assert valuation["fair_value_lo"] == pytest.approx(120)
+    assert valuation["fair_value_mid"] == pytest.approx(130)
+    assert valuation["fair_value_hi"] == pytest.approx(140)
+    assert valuation["forward_next_fy_lo"] == pytest.approx(144)
+    assert valuation["forward_next_fy_mid"] == pytest.approx(156)
+    assert valuation["forward_next_fy_hi"] == pytest.approx(168)
+    assert valuation["last_price"] == 100
+    # T 池(一季报 04-25 之后)只有一家机构，退到 T-1 池。
+    assert valuation["pool"] == "T-1"
+    assert valuation["is_stale"] is True
 
 
 def test_calculate_weighted_index_valuation_reports_stale_constituent_weight():
@@ -243,3 +245,21 @@ def test_calculate_weighted_index_valuation_treats_missing_stale_flag_as_fresh()
 
     assert result["stale_covered_count"] == 0
     assert result["stale_weight_ratio"] == pytest.approx(0)
+
+
+def test_calculate_weighted_index_valuation_counts_forward_filled_constituents():
+    holdings = [_holding("AAA.SH", 0.5), _holding("BBB.SZ", 0.5)]
+    fresh = _valuation("AAA.SH", 10, 8, 12, 10, 14)
+    filled = _valuation("BBB.SZ", 20, 10, 30, 20, 40)
+    filled.is_stale = True
+    filled.is_ffilled = True
+
+    result = calculate_weighted_index_valuation(
+        index_level=1000,
+        holdings=holdings,
+        valuations={"AAA.SH": fresh, "BBB.SZ": filled},
+    )
+
+    assert result["ffilled_covered_count"] == 1
+    assert result["stale_covered_count"] == 1
+    assert result["stale_weight_ratio"] == pytest.approx(0.5)

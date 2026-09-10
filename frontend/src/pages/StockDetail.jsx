@@ -8,6 +8,7 @@ import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
 import StockFinancialsCard from '../components/StockFinancialsCard';
 import StockValueInvestingCard from '../components/StockValueInvestingCard';
+import AStockConsensusValuationModal from '../components/AStockConsensusValuationModal';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
 
@@ -22,6 +23,8 @@ const StockDetail = () => {
   const [symbolSearching, setSymbolSearching] = useState(false);
   const [stockSummary, setStockSummary] = useState({});
   const [klines, setKlines] = useState([]);
+  const [consensusDetail, setConsensusDetail] = useState(null);
+  const [consensusModal, setConsensusModal] = useState({ open: false, offset: 0, bound: 'lo' });
   const symbolSearchTimer = useRef(null);
   const symbolSearchSequence = useRef(0);
   const { quotes, register } = useRealtimeQuotes('stock_detail_page');
@@ -88,6 +91,20 @@ const StockDetail = () => {
     }
   }, [isAStock, normalizedSymbol]);
 
+  const fetchConsensusDetail = useCallback(async () => {
+    if (!isAStock) {
+      setConsensusDetail(null);
+      return;
+    }
+    try {
+      const { data } = await request.get(`/api/evc/a-stock-consensus/detail/${normalizedSymbol}`);
+      setConsensusDetail(data || null);
+    } catch (error) {
+      console.error('获取一致预期估值失败:', error);
+      setConsensusDetail(null);
+    }
+  }, [isAStock, normalizedSymbol]);
+
   const week52 = useMemo(() => {
     const cutoff = day => new Date(day).getTime() >= Date.now() - 366 * 24 * 60 * 60 * 1000;
     const recent = (klines || []).filter(item => cutoff(item.timestamp));
@@ -104,10 +121,13 @@ const StockDetail = () => {
     setStockSummary({});
     setKlines([]);
     setEvcHistory([]);
+    setConsensusDetail(null);
+    setConsensusModal(previous => ({ ...previous, open: false }));
     if (isAStock) searchSymbols(normalizedSymbol, true);
     fetchEvcHistory();
     fetchStockSummary();
-  }, [fetchEvcHistory, fetchStockSummary, isAStock, normalizedSymbol, searchSymbols]);
+    fetchConsensusDetail();
+  }, [fetchConsensusDetail, fetchEvcHistory, fetchStockSummary, isAStock, normalizedSymbol, searchSymbols]);
 
   useEffect(() => () => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -145,6 +165,8 @@ const StockDetail = () => {
             quote={quotes[normalizedSymbol]}
             summary={stockSummary}
             week52={week52}
+            consensus={consensusDetail}
+            onOpenConsensus={(offset, bound) => setConsensusModal({ open: true, offset, bound })}
           />
         ) : null}
         <StockKlineChart
@@ -158,6 +180,16 @@ const StockDetail = () => {
           height={600}
         />
       </Card>
+      {isAStock && consensusDetail?.status === 'available' ? (
+        <AStockConsensusValuationModal
+          open={consensusModal.open}
+          detail={consensusDetail}
+          horizonOffset={consensusModal.offset}
+          bound={consensusModal.bound}
+          onHorizonChange={offset => setConsensusModal(previous => ({ ...previous, offset }))}
+          onClose={() => setConsensusModal(previous => ({ ...previous, open: false }))}
+        />
+      ) : null}
       {/* 先报表本身、再算出来的估值：人得先看见财报长什么样，才谈得上判断估值 */}
       {isAStock ? <StockFinancialsCard symbol={normalizedSymbol} /> : null}
       {isAStock ? <StockValueInvestingCard symbol={normalizedSymbol} /> : null}
