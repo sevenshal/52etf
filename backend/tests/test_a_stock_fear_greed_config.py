@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.services.a_stock_fear_greed_clone_service import ALL_A_STOCK_OPTIONS
 from src.robot.a_stock_base_data_config import (
+    A_STOCK_OPTION_PROXY_UNDERLYINGS,
     ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS,
     A_STOCK_ETF_DAILY_NAMES,
     A_STOCK_ETF_DAILY_SYMBOLS,
@@ -62,7 +63,8 @@ def test_a_stock_fear_greed_targets_include_bse_50():
     assert target["ticker"] == "北证50"
     assert target["index_name"] == "北证50"
     assert "899050.BJ" in pools
-    assert target["option_underlyings"] == []
+    # 北证50 和所有期权指数零交集，候选照常声明，运行时权重全为 0、put/call 分项缺失。
+    assert target["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
     assert target.get("proxy_etf") is None
 
 
@@ -92,7 +94,7 @@ def test_a_stock_fear_greed_targets_include_star_100():
     assert target["ticker"] == "科创100"
     assert target["index_name"] == "上证科创板100指数"
     assert "000698.SH" in pools
-    assert target["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]
+    assert target["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
     assert target["proxy_etf"] == "588220.SH"
     assert target["proxy_etf"] in A_STOCK_ETF_DAILY_SYMBOLS
     assert A_STOCK_ETF_DAILY_NAMES[target["proxy_etf"]] == "科创100ETF"
@@ -117,7 +119,7 @@ def test_a_stock_fear_greed_targets_include_priority_sector_indexes():
         target = targets_by_symbol[symbol]
         assert target["ticker"] == ticker
         assert target["index_name"] == index_name
-        assert target["option_underlyings"] == []
+        assert target["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
         assert target["proxy_etf"] == proxy_etf
         assert symbol in pools
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
@@ -141,7 +143,7 @@ def test_a_stock_fear_greed_targets_include_second_tier_sector_indexes():
         target = targets_by_symbol[symbol]
         assert target["ticker"] == ticker
         assert target["index_name"] == index_name
-        assert target["option_underlyings"] == []
+        assert target["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
         assert target["proxy_etf"] == proxy_etf
         assert symbol in pools
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
@@ -184,13 +186,9 @@ def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
 
-    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，只能借代理。
+    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，走统一代理候选集。
     assert targets_by_symbol["000852.SH"]["option_underlyings"] == ["OP000852.SH"]
-    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
-        "OP510500.SH",
-        "OP159922.SZ",
-        "OP159915.SZ",
-    ]
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
 
 
 def test_indexes_with_their_own_options_use_them():
@@ -218,36 +216,61 @@ def test_indexes_with_their_own_options_use_them():
         assert targets_by_symbol[symbol]["option_underlyings"] == expected, symbol
 
 
-def test_borrowed_option_proxies_match_the_index_style():
-    """没有自己期权的指数，借来的代理必须和它的风格对得上，否则宁可留空。
+def test_indexes_without_their_own_options_share_one_proxy_candidate_set():
+    """没有自己期权的指数统一用同一组候选，具体权重在运行时按成分重叠度算。
 
-    put_call_options 只是 7 个分项之一，缺一个仍能出值（A_STOCK_MIN_COMPONENT_COUNT=6），
-    所以「借一个不相干的标的」比「留空」更糟——那是往分项里灌噪音。
+    以前是给每条指数手挑标的，挑错了就往 put/call 分项里灌噪音（中证煤炭、上证红利
+    曾经挂着科创50+创业板+中证500）。现在只声明候选，重叠为 0 的自动权重归零，
+    北证50 这种零交集的会直接缺失该分项。
+    """
+    own_options = {"000016.SH", "000300.SH", "000852.SH", "000905.SH", "000688.SH", "399006.SZ"}
+    whole_market = {"000985.SH"}
+    for item in A_STOCK_INDEX_FEAR_GREED_TARGETS:
+        symbol = str(item["symbol"]).upper()
+        if symbol in own_options or symbol in whole_market:
+            continue
+        assert item["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS, symbol
+
+
+def test_proxy_candidate_set_avoids_nested_and_unsynced_indexes():
+    """候选集只放互斥的规模三档 + 两个板块口径。
+
+    上证50 是沪深300 的子集，放进来纯粹重复计数；深证100 的成分权重没有同步，
+    算不出重叠度。
+    """
+    from src.core.services.a_stock_fear_greed_clone_service import (
+        OPTION_UNDERLYING_TRACKED_INDEX,
+    )
+
+    tracked = {OPTION_UNDERLYING_TRACKED_INDEX[code] for code in A_STOCK_OPTION_PROXY_UNDERLYINGS}
+    assert tracked == {"000300.SH", "000905.SH", "000852.SH", "000688.SH", "399006.SZ"}
+    assert "000016.SH" not in tracked
+    assert "399330.SZ" not in tracked
+
+
+def test_indexes_with_their_own_options_use_them():
+    """有自己期权的指数必须用自己的期权，不能再借别的标的当代理。
+
+    全市场 12 个期权标的里只有 5 条指数有自己的期权：上证50、沪深300、中证500、
+    科创50、创业板指、中证1000。其余指数（中证A500、中证全指、科创100/200、
+    北证50、中证2000、微盘400 和各行业指数）确实没有，只能继续借代理。
     """
     targets_by_symbol = {
         str(item["symbol"]).upper(): item
         for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
     }
-    # 大盘宽基借沪深300口径
-    assert targets_by_symbol["000510.SH"]["option_underlyings"] == [
-        "OP000300.SH",
-        "OP510300.SH",
-        "OP159919.SZ",
-    ]
-    # 中证全指是全部A股，用全市场所有期权按成交量加总，不需要挑标的
-    assert targets_by_symbol["000985.SH"]["option_underlyings"] == [ALL_A_STOCK_OPTIONS]
-    # 同板块借科创50ETF期权
-    for symbol in ("000698.SH", "000699.SH"):
-        assert targets_by_symbol[symbol]["option_underlyings"] == ["OP588000.SH", "OP588080.SH"]
-    # 小盘借中证500/创业板
-    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [
-        "OP510500.SH",
-        "OP159922.SZ",
-        "OP159915.SZ",
-    ]
-    # 低波大盘价值风格找不到对得上的期权，留空
-    for symbol in ("399998.SZ", "000015.SH", "H30269.CSI"):
-        assert targets_by_symbol[symbol]["option_underlyings"] == [], symbol
+    own_options = {
+        # 中金所股指期权 + 对应的场内 ETF 期权
+        "000016.SH": ["OP000016.SH", "OP510050.SH"],
+        "000300.SH": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
+        "000852.SH": ["OP000852.SH"],
+        # 只有 ETF 期权的
+        "000905.SH": ["OP510500.SH", "OP159922.SZ"],
+        "000688.SH": ["OP588000.SH", "OP588080.SH"],
+        "399006.SZ": ["OP159915.SZ"],
+    }
+    for symbol, expected in own_options.items():
+        assert targets_by_symbol[symbol]["option_underlyings"] == expected, symbol
 
 
 def test_a_stock_fear_greed_proxy_etfs_stay_aligned_with_targets():
