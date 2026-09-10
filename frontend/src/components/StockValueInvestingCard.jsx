@@ -80,7 +80,21 @@ const StockValueInvestingCard = ({ symbol }) => {
           </Tooltip>
         </Space>
       )}
-      extra={profile?.as_of ? <Text type="secondary">数据截至 {profile.as_of}</Text> : null}
+      extra={profile?.as_of ? (
+        <Space size={8}>
+          {record?.valuation_basis === 'ttm' && (
+            <Tooltip title="估值用最新中期报告滚动出的12个月（TTM）口径，不是最近一期年报——A股年报4月才披露，纯年报口径最多能滞后9个月。质量闸门与内在价值同比仍走年报序列。">
+              <Tag color="cyan">TTM 截至 {record.valuation_period_end}</Tag>
+            </Tooltip>
+          )}
+          {record && record.valuation_basis !== 'ttm' && (
+            <Tooltip title="没有可用的中期报告，或缺去年同期数据无法滚动出完整12个月，退回年报口径。">
+              <Tag>年报口径</Tag>
+            </Tooltip>
+          )}
+          <Text type="secondary">行情 {profile.as_of}</Text>
+        </Space>
+      ) : null}
     >
       <Spin spinning={loading}>
         {statusMessage && <Alert type="info" showIcon message={statusMessage} />}

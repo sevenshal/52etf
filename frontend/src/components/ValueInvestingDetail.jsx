@@ -158,6 +158,13 @@ const ValueInvestingDetail = ({ record, column = 3 }) => {
         },
         { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
       ];
+  const basisItem = {
+    key: 'basis',
+    label: '估值口径',
+    children: record.valuation_basis === 'ttm'
+      ? `TTM 滚动12个月（截至 ${record.valuation_period_end || '最新中期报告'}）`
+      : '最近一期年报（无可用中期报告，或缺去年同期无法滚动）',
+  };
   const crossCheckItems = [
     {
       key: 'value_growth',
@@ -177,7 +184,7 @@ const ValueInvestingDetail = ({ record, column = 3 }) => {
         size="small"
         column={column}
         className="value-investing-detail"
-        items={[...items, ...crossCheckItems]}
+        items={[basisItem, ...items, ...crossCheckItems]}
       />
     </div>
   );

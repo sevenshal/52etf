@@ -376,6 +376,7 @@ reviewer 认为这个偏差没有材料影响可以不管，但这确实和我�
 | `frontend/src/components/ValueInvestingDetail.jsx` / `.css` | 估值假设明细的唯一渲染实现，扫描页展开行和个股详情页共用 |
 | `frontend/src/components/StockValueInvestingCard.jsx` / `.css` | 个股详情页 `/stock/{symbol}` 的价值投资基本面卡片 |
 | `backend/tests/test_value_investing_stock_profile.py` | 个股画像 == 全市场扫描同一行的逐字段回归测试（DuckDB fixture） |
+| `backend/tests/test_value_investing_ttm.py` | TTM 口径的累计报表滚动、比率置空、退回年报的回归测试（数据取自长电科技真实报告） |
 | `backend/tests/test_value_investing_scanner.py` | 第 9 节 5 个问题的回归测试（合成数据） |
 | `backend/tests/test_analytics_schema_upgrade.py` | 旧窄表 → 自动补列 → 已有行保留 的升级测试 |
 
@@ -701,3 +702,76 @@ ROE_隐含 = r + (当前P/B − 1) / Σ(1+g)^(t-1)/(1+r)^t
 **未验证**：本地没有生产分析库，单股查询在真实数据量下的耗时没有实测过。DuckDB 对
 `a_stock_market_daily` 这种大表的 `ts_code IN (?)` 过滤是否走上索引/zonemap，上线后要看一眼
 详情页的接口耗时。
+
+---
+
+## 14. TTM 口径（2026-09-10）
+
+### 14.1 问题：纯年报口径最多滞后 9 个月
+
+扫描器此前只取年报（`_annual_rows` 里硬编码 `strftime(end_date,'%m-%d')='12-31'`）。A 股年报
+4 月才披露，所以每年 5 月到次年 4 月之间，模型看到的都是一份最多滞后 9 个月的基本面。
+
+长电科技（600584.SH）是个刻度清晰的例子：
+
+| 口径 | 归母净利 |
+|---|---|
+| 2025 年报 | 15.65 亿 |
+| TTM（2025H2 + 2026H1） | **19.39 亿（+24%）** |
+
+2026 上半年归母净利同比 **+79.4%**、扣非 +84.7%，这个拐点纯年报口径要到 2027 年 4 月才看得见。
+
+**关键事实：季报/半年报本来就已经在库里。** 同步引擎 `_sync_statement_data` 按 `ann_date`
+拉取、不按 period 过滤，`report_type` 也在 `_STATEMENT_REPORT_KEY_COLUMNS` 主键里。
+所以这次改动**没有新增任何同步**，只改了扫描器的取数口径。
+
+### 14.2 做法：只换最后一期，且按科目性质分别处理
+
+A 股定期报告的利润表/现金流量表是**年初至今累计**口径，所以
+
+```
+TTM 流量 = 最新累计 + 上一年年报 − 上一年同期累计
+```
+
+`_ttm_overlay()` 把年报序列的最后一期换成这个 TTM 行，前面的年报历史原样保留。三类科目
+分别处理（`STATEMENT_FLOW_COLUMNS` / `STATEMENT_STOCK_COLUMNS`）：
+
+| 科目 | 例子 | 处理 |
+|---|---|---|
+| 流量 | 营收、净利、经营现金流、EBIT、资本开支 | 按上式滚动 |
+| 存量（时点数） | 总资产、有息负债、少数股东权益、投入资本 | 直接取最新一期 |
+| 比率 | ROE、ROIC、资产负债率、tax_to_ebt | **置空**，让下游按分量重算 |
+
+比率那一条是最容易写错的地方：半年的 ROE 2.92% 不是年化值，年报的 5.5% 不是最新值，
+两个都不能放进 TTM 行。置空之后 `debt_to_assets` 会从最新资产负债表重算、`roic` 会退回
+`NOPAT/投入资本` 自算——那才是真正的 TTM 值。
+
+**滚不出来就退回年报**：缺上一年年报或去年同期报告时 `applied=False`，整个 overlay 放弃。
+特别是流量列滚不出来时**不会只换时点数**——年报的 EBIT 配最新的投入资本会算出一个假 ROIC。
+
+### 14.3 边界：闸门和"内在价值同比"仍然只看年报
+
+只有**估值**换成 TTM。这几项继续走年报序列，因为它们本来就是多年期判断：
+
+- 近 5 年平均 ROIC/ROE（混进一个滚动窗口，"平均"就说不清是几年）
+- 近 5 年 FCFF 为正的年数、经营现金流/净利润比
+- **内在价值同比**：要回答"这一年公司创造的价值是升是降"，拿一个和上一年重叠半年的
+  滚动窗口去比，差值里一半是重叠期，没有意义。所以 `_snapshot()` 现在被调用三次：
+  TTM 一次（出估值），年报两次（出同比）。
+
+输出新增两个字段，前端两个页面都会显示：`valuation_basis`（`ttm`/`annual`）和
+`valuation_period_end`。`use_ttm=False` 可退回全年报口径做对照。
+
+### 14.4 顺带修掉的两个坑
+
+- `pd.concat` 拼 TTM 行时，全是 NA 的比率列会退化出对不上的 dtype（pandas 已就此告警）。
+  现在按年报序列的列顺序 `reindex` 并对数值列 `to_numeric`。
+- `datetime`（以及 `pandas.Timestamp`）本身是 `date` 的子类，`isinstance(value, date)`
+  会把带时分秒的值原样放过去，`isoformat()` 就带出 `T00:00:00`。`_as_date()` 先判 `datetime`。
+
+### 14.5 仍未做
+
+- 三季报的滚动没有单独验证过（逻辑上和半年报一致，`_ttm_overlay` 按 (月,日) 匹配去年同期，
+  9-30 一样成立），但缺一个真实用例。
+- 未在生产分析库上跑过全市场，不知道有多少只股票能成功滚出 TTM、多少只会退回年报。
+  上线后应该看一眼 `valuation_basis` 的分布。
