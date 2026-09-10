@@ -111,6 +111,11 @@ const StockValueInvestingCard = ({ symbol }) => {
                 {(record.quality_notes || []).map(note => (
                   <Tag key={note}>{note}</Tag>
                 ))}
+                {record.in_capex_cycle && (
+                  <Tooltip title={`资本开支为折旧摊销的 ${formatNumber(record.capex_to_daa)} 倍、经营现金流 ${record.ocf_positive_years} 年为正、收入未萎缩，判定为扩产期：自由现金流为负是被在建产能吃掉的，不是经营失血。DCF 本来就用 g/ROIC 给增长计价、不减实际资本开支，所以这一项不参与淘汰；其余闸门照旧。`}>
+                    <Tag color="gold">扩产期</Tag>
+                  </Tooltip>
+                )}
                 {record.industry && <Tag color="blue">{record.industry}</Tag>}
                 {isFinancial && <Tag color="purple">金融口径(合理市净率)</Tag>}
               </Space>
@@ -146,6 +151,23 @@ const StockValueInvestingCard = ({ symbol }) => {
                 )}
                 value={record.value_growth_pct == null ? '-' : formatPercent(record.value_growth_pct)}
               />
+              {!isFinancial && (
+                <Statistic
+                  title={(
+                    <Tooltip title="把DCF倒过来解：按模型的现金流假设，以当前价买入能拿到的年化回报率。它和模型估的WACC之间的差就是分歧所在——低于WACC说明市场比模型乐观。增速和ROIC的反推都有天花板（受再投资约束），只有这一项在任何价位都解得出来。">
+                      市场隐含贴现率
+                    </Tooltip>
+                  )}
+                  value={record.implied_discount_rate_pct == null
+                    ? '-'
+                    : formatPercent(record.implied_discount_rate_pct, 2)}
+                  suffix={record.implied_discount_rate_gap_pct == null ? null : (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      vs WACC {formatPercent(record.implied_discount_rate_gap_pct, 2)}
+                    </Text>
+                  )}
+                />
+              )}
             </div>
 
             {record.expected_return_pct != null
@@ -191,7 +213,21 @@ const StockValueInvestingCard = ({ symbol }) => {
                 hint="近5年均值，检验利润是不是真的收到了现金"
                 value={formatNumber(record.ocf_to_net_profit)}
               />
-              <Metric label="近5年FCFF为正年数" value={record.fcf_positive_years == null ? '-' : `${record.fcf_positive_years} / 5`} />
+              <Metric
+                label="近5年FCFF为正年数"
+                hint={record.in_capex_cycle ? '该股处于扩产期，此项不参与质量闸门淘汰' : undefined}
+                value={record.fcf_positive_years == null ? '-' : `${record.fcf_positive_years} / 5`}
+              />
+              <Metric
+                label="资本开支/折旧摊销"
+                hint="明显大于1说明支出不是用来维持现有资产，而是在铺新产能"
+                value={formatNumber(record.capex_to_daa)}
+              />
+              <Metric
+                label="经营现金流为正年数"
+                hint="扩产与失血的分水岭：经营现金流常年为负就不是在扩产，是在烧钱"
+                value={record.ocf_positive_years == null ? '-' : `${record.ocf_positive_years} / 5`}
+              />
               <Metric label="Beta" value={formatNumber(record.beta)} />
               <Metric label="营收5年复合增速" value={formatPercent(record.revenue_cagr_pct)} />
               <Metric label="归母净利5年复合增速" value={formatPercent(record.profit_cagr_pct)} />

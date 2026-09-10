@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import dayjs from 'dayjs';
+import { formatChineseAmount as formatChinese } from '../utils/format';
 
 const toNumber = value => {
   if (value === null || value === undefined || value === '') return null;
@@ -10,16 +11,6 @@ const toNumber = value => {
 const formatFixed = (value, digits = 2) => {
   const number = toNumber(value);
   return number === null ? '--' : number.toFixed(digits);
-};
-
-const formatChinese = (value, unit = '') => {
-  const number = toNumber(value);
-  if (number === null) return '--';
-  const absolute = Math.abs(number);
-  if (absolute >= 1e12) return `${(number / 1e12).toFixed(2)}万亿${unit}`;
-  if (absolute >= 1e8) return `${(number / 1e8).toFixed(2)}亿${unit}`;
-  if (absolute >= 1e4) return `${(number / 1e4).toFixed(2)}万${unit}`;
-  return `${number.toFixed(2)}${unit}`;
 };
 
 const formatTickTime = value => {

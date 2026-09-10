@@ -6,6 +6,7 @@ import StockKlineChart from '../components/StockKlineChart';
 import XueqiuStockLink from '../components/XueqiuStockLink';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
+import StockFinancialsCard from '../components/StockFinancialsCard';
 import StockValueInvestingCard from '../components/StockValueInvestingCard';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
@@ -157,6 +158,8 @@ const StockDetail = () => {
           height={600}
         />
       </Card>
+      {/* 先报表本身、再算出来的估值：人得先看见财报长什么样，才谈得上判断估值 */}
+      {isAStock ? <StockFinancialsCard symbol={normalizedSymbol} /> : null}
       {isAStock ? <StockValueInvestingCard symbol={normalizedSymbol} /> : null}
     </div>
   );

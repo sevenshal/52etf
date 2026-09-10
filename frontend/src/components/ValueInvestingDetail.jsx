@@ -158,6 +158,95 @@ const ValueInvestingDetail = ({ record, column = 3 }) => {
         },
         { key: 'ocf_to_np', label: '经营现金流/净利润', children: formatNumber(record.ocf_to_net_profit) },
       ];
+  // 反推项：解不出来时说清楚是"顶到了哪一头"，而不是显示一个 "-"。
+  // "任何可行的增速都解释不了当前价格"本身就是结论，不该被抹成缺数据。
+  const impliedValue = (value, status, render, { above, below }) => {
+    if (value !== null && value !== undefined) return render(value);
+    if (status === 'above_range') return <Text type="warning">{above}</Text>;
+    if (status === 'below_range') return <Text type="warning">{below}</Text>;
+    return '-';
+  };
+
+  const impliedItems = record.is_financial
+    ? [
+        {
+          key: 'implied_coe',
+          label: '市场隐含股权成本',
+          children: record.implied_cost_of_equity_pct == null
+            ? '-'
+            : `${formatPercent(record.implied_cost_of_equity_pct, 2)}（模型CAPM ${formatPercent(record.cost_of_equity_pct, 2)}）`,
+        },
+      ]
+    : [
+        {
+          key: 'implied_growth',
+          label: '市场隐含近端增速',
+          children: impliedValue(
+            record.implied_near_term_growth_pct,
+            record.implied_growth_status,
+            value => (
+              <span>
+                {formatPercent(value)}
+                <Text type="secondary">
+                  {` （模型采用 ${formatPercent(record.near_term_growth_pct)}，差 `}
+                </Text>
+                <Text className={signedClassName(record.implied_growth_gap_pct)}>
+                  {formatPercent(record.implied_growth_gap_pct)}
+                </Text>
+                <Text type="secondary">）</Text>
+              </span>
+            ),
+            {
+              above: '再高的增速也解释不了当前价格——本模型的增长要靠再投资买单，g 受 ROIC 上限约束',
+              below: '再低的增速也对不上当前价格',
+            },
+          ),
+        },
+        {
+          key: 'implied_roic',
+          label: '市场隐含ROIC',
+          children: impliedValue(
+            record.implied_roic_pct,
+            record.implied_roic_status,
+            value => (
+              <span>
+                {formatPercent(value, 2)}
+                <Text type="secondary">
+                  {` （模型采用 ${formatPercent(record.dcf_roic_pct, 2)}，差 `}
+                </Text>
+                <Text className={signedClassName(record.implied_roic_gap_pct)}>
+                  {formatPercent(record.implied_roic_gap_pct, 2)}
+                </Text>
+                <Text type="secondary">）</Text>
+              </span>
+            ),
+            {
+              above: '即便资本回报率高到 100%，也解释不了当前价格',
+              below: '再低的资本回报率也对不上当前价格',
+            },
+          ),
+        },
+        {
+          key: 'implied_discount',
+          label: '市场隐含贴现率（以当前价买入的隐含年化回报）',
+          children: impliedValue(
+            record.implied_discount_rate_pct,
+            record.implied_discount_rate_status,
+            value => (
+              <span>
+                {formatPercent(value, 2)}
+                <Text type="secondary">{` （模型WACC ${formatPercent(record.wacc_pct, 2)}，差 `}</Text>
+                <Text className={signedClassName(record.implied_discount_rate_gap_pct)}>
+                  {formatPercent(record.implied_discount_rate_gap_pct, 2)}
+                </Text>
+                <Text type="secondary">）</Text>
+              </span>
+            ),
+            { above: '隐含回报率高于60%，已超出求解区间', below: '当前价格已贵到隐含回报率低于永续增长率+150bp' },
+          ),
+        },
+      ];
+
   const basisItem = {
     key: 'basis',
     label: '估值口径',
@@ -184,7 +273,7 @@ const ValueInvestingDetail = ({ record, column = 3 }) => {
         size="small"
         column={column}
         className="value-investing-detail"
-        items={[basisItem, ...items, ...crossCheckItems]}
+        items={[basisItem, ...items, ...crossCheckItems, ...impliedItems]}
       />
     </div>
   );
