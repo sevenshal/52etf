@@ -24,7 +24,10 @@ from ..database import (
     ETFFearGreedCloneHistory,
     Session,
 )
-from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
+from ...robot.a_stock_base_data_config import (
+    A_STOCK_INDEX_FEAR_GREED_TARGETS,
+    A_STOCK_OPTION_PROXY_UNDERLYINGS,
+)
 
 
 # option_underlyings 里放这个哨兵，表示「不限标的，用全市场所有期权」。
@@ -32,16 +35,30 @@ from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
 # 中证全指这种覆盖全部A股的指数对应的正是这个口径，而且新上市的期权品种会自动纳入。
 ALL_A_STOCK_OPTIONS = "*"
 
+# 每个期权标的实际跟踪的指数。put/call 分项按「跟踪指数」分组：同组的成交量直接
+# 加总（它们本来就是同一条指数的期权），组间再按成分股重叠度加权平均。
+# 只有一个组时权重恒为 1，等价于原来的成交量加总口径。
+OPTION_UNDERLYING_TRACKED_INDEX: Dict[str, str] = {
+    "OP000016.SH": "000016.SH",   # 中金所上证50股指期权 HO
+    "OP510050.SH": "000016.SH",   # 50ETF期权
+    "OP000300.SH": "000300.SH",   # 中金所沪深300股指期权 IO
+    "OP510300.SH": "000300.SH",   # 300ETF期权（沪）
+    "OP159919.SZ": "000300.SH",   # 300ETF期权（深）
+    "OP000852.SH": "000852.SH",   # 中金所中证1000股指期权 MO
+    "OP510500.SH": "000905.SH",   # 500ETF期权（沪）
+    "OP159922.SZ": "000905.SH",   # 500ETF期权（深）
+    "OP588000.SH": "000688.SH",   # 科创50ETF期权
+    "OP588080.SH": "000688.SH",   # 科创板50ETF期权
+    "OP159915.SZ": "399006.SZ",   # 创业板ETF期权
+    "OP159901.SZ": "399330.SZ",   # 深证100ETF期权
+}
+
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_FEAR_SYMBOL
 A_STOCK_INNO100_SAFE_HAVEN_INDEX = "H11006.CSI"
-A_STOCK_INNO100_OPTION_UNDERLYINGS = (
-    "OP588000.SH",
-    "OP588080.SH",
-    "OP159915.SZ",
-    "OP510500.SH",
-    "OP159922.SZ",
-)
+# 自算指数同样没有自己的期权，用统一的代理候选集；权重按各自的成分快照算，
+# 微盘400 会自然落到中证1000/中证500 一侧，A创100 会落到科创/创业板一侧。
+A_STOCK_INNO100_OPTION_UNDERLYINGS = tuple(A_STOCK_OPTION_PROXY_UNDERLYINGS)
 A_STOCK_INNO100_TARGET = {
     "symbol": A_STOCK_INNO100_FEAR_SYMBOL,
     "ticker": "A创100",
@@ -51,12 +68,7 @@ A_STOCK_INNO100_TARGET = {
 }
 
 A_STOCK_MICRO400_FEAR_SYMBOL = "MICRO400.CN"
-# 微盘股没有自己的场内期权，借中证500/创业板 ETF 期权的 PCR 当风险偏好代理，和 A创100 同样处理。
-A_STOCK_MICRO400_OPTION_UNDERLYINGS = (
-    "OP510500.SH",
-    "OP159922.SZ",
-    "OP159915.SZ",
-)
+A_STOCK_MICRO400_OPTION_UNDERLYINGS = tuple(A_STOCK_OPTION_PROXY_UNDERLYINGS)
 A_STOCK_MICRO400_TARGET = {
     "symbol": A_STOCK_MICRO400_FEAR_SYMBOL,
     "ticker": "微盘400",
@@ -118,10 +130,13 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "put_call_options": ComponentSpec(
         key="put_call_options",
-        name="A-share ETF Put/Call Options",
-        raw_label="-5-day average related ETF option put/call volume ratio",
+        name="A-share Put/Call Options",
+        raw_label="-5-day average related option put/call volume ratio",
         source="Tushare opt_basic + opt_daily in DuckDB",
-        proxy_note="Uses related A-share ETF option volume PCR as target-index option-sentiment proxy.",
+        proxy_note=(
+            "Option PCR per tracked index, blended by how much of the target index's "
+            "constituent weight each option's underlying index covers."
+        ),
     ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
@@ -193,7 +208,10 @@ class AStockInnovation100FearGreedCloneCalculator:
 
         index = pd.DatetimeIndex(levels.index, name="date")
         holdings_by_date, holdings_as_of_by_date = self._build_holdings_by_date(index)
-        raw = self._build_raw_signals(levels, holdings_by_date, calc_start, end_value)
+        raw = self._build_raw_signals(
+            levels, holdings_by_date, calc_start, end_value,
+            holdings_as_of_by_date=holdings_as_of_by_date,
+        )
         score_df = self._score_raw_signals(raw, score_window, min_periods)
 
         score_columns = [f"{key}_score" for key in A_STOCK_COMPONENTS]
@@ -444,7 +462,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         )
 
         raw = self._build_raw_signals(
-            levels, holdings_by_date, calc_start, end_value, market_frames=market_frames
+            levels, holdings_by_date, calc_start, end_value,
+            market_frames=market_frames,
+            holdings_as_of_by_date=holdings_as_of_by_date,
         )
         score_df = self._score_raw_signals(raw, score_window, min_periods)
         score_columns = [f"{key}_score" for key in A_STOCK_COMPONENTS]
@@ -923,6 +943,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         start_date: date,
         end_date: date,
         market_frames: Optional[Dict[str, pd.DataFrame]] = None,
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
     ) -> pd.DataFrame:
         index = pd.DatetimeIndex(levels.index, name="date")
         level = levels["level"].astype(float).reindex(index).ffill()
@@ -932,7 +953,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         if market_frames is None:
             market_frames = self._load_constituent_market_frames(holdings_by_date, index, start_date, end_date)
         bond_close = self._load_index_close(A_STOCK_INNO100_SAFE_HAVEN_INDEX, start_date, end_date).reindex(index).ffill()
-        option_pcr = self._load_option_volume_pcr(start_date, end_date).reindex(index).ffill(limit=3)
+        option_pcr = self._load_option_volume_pcr(
+            start_date, end_date, holdings_by_date, holdings_as_of_by_date,
+        ).reindex(index).ffill(limit=3)
         credit_spread = self._load_credit_spread(start_date, end_date).reindex(index).ffill(limit=3)
 
         df = pd.DataFrame(index=index)
@@ -1035,17 +1058,17 @@ class AStockInnovation100FearGreedCloneCalculator:
         frame["date"] = pd.to_datetime(frame["date"])
         return pd.to_numeric(frame.set_index("date")["close"], errors="coerce").sort_index()
 
-    def _load_option_volume_pcr(self, start_date: date, end_date: date) -> pd.Series:
-        if not self.option_underlyings:
-            return pd.Series(dtype=float)
+    def _load_option_pcr_by_tracked_index(self, start_date: date, end_date: date) -> pd.DataFrame:
+        """按「期权标的跟踪的指数」分组，返回每组各自的 put/call 成交量比。
 
+        同一条指数的多只期权（例如沪深300 的中金所 IO 和沪深两市的两只 300ETF 期权）
+        成交量直接加总再算比值；不同指数之间不在这里合并，由调用方按成分重叠度加权。
+        """
+        use_all_options = ALL_A_STOCK_OPTIONS in self.option_underlyings
         params: Dict[str, Any] = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
         }
-        # 全市场口径：期权库里本来就只有沪深两市的 ETF 期权和中金所的股指期权，
-        # 去掉 opt_code 过滤即为「全部A股期权」。
-        use_all_options = ALL_A_STOCK_OPTIONS in self.option_underlyings
         opt_code_filter = ""
         if not use_all_options:
             placeholders = []
@@ -1054,6 +1077,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                 placeholders.append(f":{key}")
                 params[key] = opt_code
             opt_code_filter = f"AND b.opt_code IN ({', '.join(placeholders)})"
+
         analytics_db = AnalyticsSession()
         try:
             rows = analytics_db.execute(
@@ -1061,6 +1085,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                     f"""
                     SELECT
                         d.trade_date,
+                        b.opt_code,
                         b.call_put,
                         SUM(COALESCE(d.vol, 0)) AS volume
                     FROM a_stock_option_daily d
@@ -1069,7 +1094,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                       AND d.trade_date <= :end_date
                       {opt_code_filter}
                       AND b.call_put IN ('C', 'P')
-                    GROUP BY d.trade_date, b.call_put
+                    GROUP BY d.trade_date, b.opt_code, b.call_put
                     ORDER BY d.trade_date
                     """
                 ),
@@ -1078,21 +1103,196 @@ class AStockInnovation100FearGreedCloneCalculator:
         finally:
             AnalyticsSession.remove()
         if not rows:
+            return pd.DataFrame()
+
+        frame = pd.DataFrame(
+            [tuple(row) for row in rows], columns=["date", "opt_code", "call_put", "volume"]
+        )
+        frame["date"] = pd.to_datetime(frame["date"])
+        frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+        # 全市场口径下所有标的归成一组，等价于原来的成交量加总。
+        frame["tracked"] = (
+            ALL_A_STOCK_OPTIONS
+            if use_all_options
+            else frame["opt_code"].map(OPTION_UNDERLYING_TRACKED_INDEX)
+        )
+        frame = frame.dropna(subset=["tracked"])
+        if frame.empty:
+            return pd.DataFrame()
+
+        grouped = frame.pivot_table(
+            index=["date", "tracked"], columns="call_put", values="volume", aggfunc="sum"
+        )
+        for column in ("C", "P"):
+            if column not in grouped.columns:
+                grouped[column] = np.nan
+        ratio = grouped["P"] / grouped["C"].replace(0, np.nan)
+        return ratio.unstack("tracked").sort_index()
+
+    def _option_proxy_weights(
+        self,
+        tracked_indexes: List[str],
+        holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]],
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]],
+        start_date: date,
+        end_date: date,
+    ) -> Optional[pd.DataFrame]:
+        """每个代理指数应占的权重 = 本指数成分权重里落在该代理成分股中的比例。
+
+        期权的成交量分布和指数的成分结构毫无关系（科创50 和创业板期权合计占全市场
+        成交量的一半以上），所以不能靠「把选中标的的成交量加总」来代表某条指数的
+        情绪——那等于让成交量最大的板块说了算。这里按重叠度加权，让混合比例回到
+        真实的成分结构上。权重按成分快照逐段计算，成分调整后会自动跟着变。
+        """
+        if not holdings_by_date or not holdings_as_of_by_date:
+            return None
+
+        membership = self._load_proxy_index_membership(tracked_indexes, start_date, end_date)
+        if not membership:
+            return None
+
+        snapshot_rows: Dict[date, Dict[str, float]] = {}
+        for timestamp, holdings in holdings_by_date.items():
+            as_of = holdings_as_of_by_date.get(timestamp)
+            if as_of is None or as_of in snapshot_rows:
+                continue
+            total = sum(float(item.get("weight") or 0.0) for item in holdings)
+            if total <= 0:
+                continue
+            # 重叠为 0 也要如实记 0，不能跳过：那是「这条代理确实代表不了本指数」，
+            # 和「算不出重叠度」是两回事。全为 0 时该指数就应该没有 put/call 分项
+            # （北证50 就是这种情况），退回等权反而会凭空造出一个信号。
+            row: Dict[str, float] = {}
+            for tracked in tracked_indexes:
+                members = self._membership_as_of(membership.get(tracked), as_of)
+                covered = (
+                    sum(
+                        float(item.get("weight") or 0.0)
+                        for item in holdings
+                        if str(item.get("symbol") or "").upper() in members
+                    )
+                    if members
+                    else 0.0
+                )
+                row[tracked] = covered / total
+            snapshot_rows[as_of] = row
+        if not snapshot_rows:
+            return None
+
+        weights = pd.DataFrame.from_dict(snapshot_rows, orient="index").sort_index()
+        weights.index = pd.DatetimeIndex(weights.index)
+        return weights.reindex(columns=tracked_indexes)
+
+    @staticmethod
+    def _membership_as_of(
+        snapshots: Optional[List[Tuple[date, set]]],
+        as_of: date,
+    ) -> Optional[set]:
+        if not snapshots:
+            return None
+        current = None
+        for snapshot_date, members in snapshots:
+            if snapshot_date > as_of:
+                break
+            current = members
+        # 目标指数的快照可能早于代理指数的第一份成分数据，这时退回最早的一份。
+        return current if current is not None else snapshots[0][1]
+
+    # 代理指数的成分快照对所有目标指数都是同一份，而贪恐回填会在同一个进程里
+    # 依次跑几十条指数。这里按 (代理集合, 区间) 缓存，避免每条指数都重读一遍
+    # a_stock_index_weight（中证1000 一条就有上万行 × 几十期快照）。
+    _proxy_membership_cache: Dict[Tuple, Dict[str, List[Tuple[date, set]]]] = {}
+
+    def _load_proxy_index_membership(
+        self,
+        index_codes: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, List[Tuple[date, set]]]:
+        codes = sorted(code for code in index_codes if code and code != ALL_A_STOCK_OPTIONS)
+        if not codes:
+            return {}
+        # 往前多留一年，保证区间起点当期的那份快照也在结果里。
+        snapshot_start = start_date - timedelta(days=400)
+        cache_key = (tuple(codes), snapshot_start, end_date)
+        cached = self._proxy_membership_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        params: Dict[str, Any] = {
+            "start_date": snapshot_start.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+        placeholders = []
+        for idx, code in enumerate(codes):
+            key = f"index_code_{idx}"
+            placeholders.append(f":{key}")
+            params[key] = code
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(
+                text(
+                    f"""
+                    SELECT index_code, trade_date, con_code
+                    FROM a_stock_index_weight
+                    WHERE index_code IN ({", ".join(placeholders)})
+                      AND trade_date >= :start_date
+                      AND trade_date <= :end_date
+                    ORDER BY index_code, trade_date
+                    """
+                ),
+                params,
+            ).fetchall()
+        finally:
+            AnalyticsSession.remove()
+
+        by_index: Dict[str, Dict[date, set]] = {}
+        for row in rows:
+            index_code = str(row[0] or "").upper()
+            snapshot_date = row[1]
+            con_code = str(row[2] or "").upper()
+            if not index_code or not snapshot_date or not con_code:
+                continue
+            if isinstance(snapshot_date, datetime):
+                snapshot_date = snapshot_date.date()
+            by_index.setdefault(index_code, {}).setdefault(snapshot_date, set()).add(con_code)
+        membership = {
+            index_code: sorted(snapshots.items())
+            for index_code, snapshots in by_index.items()
+        }
+        self._proxy_membership_cache[cache_key] = membership
+        return membership
+
+    def _load_option_volume_pcr(
+        self,
+        start_date: date,
+        end_date: date,
+        holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]] = None,
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
+    ) -> pd.Series:
+        if not self.option_underlyings:
             return pd.Series(dtype=float)
 
-        frame = pd.DataFrame([tuple(row) for row in rows], columns=["date", "call_put", "volume"])
-        frame["date"] = pd.to_datetime(frame["date"])
-        pivot = frame.pivot_table(index="date", columns="call_put", values="volume", aggfunc="sum")
-        call_volume = pd.to_numeric(
-            pivot["C"] if "C" in pivot.columns else pd.Series(index=pivot.index, dtype=float),
-            errors="coerce",
+        pcr = self._load_option_pcr_by_tracked_index(start_date, end_date)
+        if pcr.empty:
+            return pd.Series(dtype=float)
+        if len(pcr.columns) == 1:
+            # 全市场口径，或者只用了一条指数的期权：没有需要加权的东西。
+            return pcr.iloc[:, 0].dropna().sort_index()
+
+        tracked_indexes = list(pcr.columns)
+        weights = self._option_proxy_weights(
+            tracked_indexes, holdings_by_date, holdings_as_of_by_date, start_date, end_date
         )
-        put_volume = pd.to_numeric(
-            pivot["P"] if "P" in pivot.columns else pd.Series(index=pivot.index, dtype=float),
-            errors="coerce",
-        )
-        ratio = put_volume / call_volume.replace(0, np.nan)
-        return ratio.sort_index()
+        if weights is None or weights.empty:
+            # 拿不到成分重叠度时退回等权，至少不会被成交量最大的标的绑架。
+            weights = pd.DataFrame(
+                1.0, index=pcr.index[:1], columns=tracked_indexes
+            )
+        aligned = weights.reindex(pcr.index, method="ffill").fillna(0.0)
+        aligned = aligned.where(pcr.notna(), 0.0)
+        total = aligned.sum(axis=1)
+        blended = (pcr.fillna(0.0) * aligned).sum(axis=1) / total.replace(0, np.nan)
+        return blended.dropna().sort_index()
 
     def _load_credit_spread(self, start_date: date, end_date: date, term: float = 3.0) -> pd.Series:
         analytics_db = AnalyticsSession()

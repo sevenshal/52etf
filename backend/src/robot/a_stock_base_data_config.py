@@ -35,6 +35,21 @@ A_STOCK_FACTOR_INDEX_POOLS = [
     {"index_code": "000015.SH", "name": "上证红利"},
     {"index_code": "H30269.CSI", "name": "红利低波"},
 ]
+# 没有自己期权的指数统一用这一组代理候选，实际权重在运行时按「本指数成分权重里
+# 落在该代理成分股中的比例」计算（见 a_stock_fear_greed_clone_service），所以这里
+# 只需要声明候选，不需要为每条指数手挑：重叠为 0 的候选权重自然是 0，会自动落选，
+# 北证50 这种和所有期权指数零交集的会直接缺失 put/call 分项。
+#
+# 只放沪深300/中证500/中证1000 这条互斥的规模档，外加科创50、创业板指两个板块口径。
+# 不放上证50（它是沪深300 的子集，纯粹重复计数）和深证100（成分权重没有同步）。
+A_STOCK_OPTION_PROXY_UNDERLYINGS = [
+    "OP000300.SH", "OP510300.SH", "OP159919.SZ",   # 沪深300
+    "OP510500.SH", "OP159922.SZ",                  # 中证500
+    "OP000852.SH",                                 # 中证1000
+    "OP588000.SH", "OP588080.SH",                  # 科创50
+    "OP159915.SZ",                                 # 创业板指
+]
+
 A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {
         "symbol": "000300.SH",
@@ -60,7 +75,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证A500",
         "index_name": "中证A500",
         # A500 没有自己的期权，作为大盘宽基借沪深300口径（中金所IO + 沪深两市300ETF期权）。
-        "option_underlyings": ["OP000300.SH", "OP510300.SH", "OP159919.SZ"],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "563360.SH",
     },
     {
@@ -86,7 +101,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "中证2000",
         "index_name": "中证2000指数",
         # 中证2000没有任何自己的期权，借中证500/创业板ETF期权的PCR当风险偏好代理。
-        "option_underlyings": ["OP510500.SH", "OP159922.SZ", "OP159915.SZ"],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "563300.SH",
     },
     {
@@ -105,14 +120,14 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "北证50",
         "label": "北证50",
         "index_name": "北证50",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
     },
     {
         "symbol": "000680.SH",
         "ticker": "科创综指",
         "label": "科创综指",
         "index_name": "上证科创板综合指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "589000.SH",
     },
     {
@@ -128,7 +143,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "科创100",
         "label": "科创100",
         "index_name": "上证科创板100指数",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH"],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "588220.SH",
     },
     {
@@ -136,7 +151,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "科创200",
         "label": "科创200",
         "index_name": "上证科创板200",
-        "option_underlyings": ["OP588000.SH", "OP588080.SH"],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "588230.SH",
     },
     {
@@ -152,7 +167,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "证券公司",
         "label": "证券",
         "index_name": "中证全指证券公司指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512880.SH",
     },
     {
@@ -160,7 +175,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "半导体",
         "label": "半导体",
         "index_name": "中证全指半导体产品与设备指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512480.SH",
     },
     {
@@ -168,7 +183,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "科创芯片设计",
         "label": "芯片设计",
         "index_name": "上证科创板芯片设计主题指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "588780.SH",
     },
     {
@@ -176,7 +191,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "半导体材料设备",
         "label": "材料与设备",
         "index_name": "中证半导体材料设备主题指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "159516.SZ",
     },
     {
@@ -184,7 +199,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "机器人产业",
         "label": "机器人",
         "index_name": "国证机器人产业指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "159530.SZ",
     },
     {
@@ -192,7 +207,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证白酒",
         "label": "白酒",
         "index_name": "中证白酒指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "161725.SZ",
     },
     {
@@ -200,7 +215,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证医疗",
         "label": "医疗",
         "index_name": "中证医疗指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512170.SH",
     },
     {
@@ -208,7 +223,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "有色金属",
         "label": "有色",
         "index_name": "中证申万有色金属指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512400.SH",
     },
     {
@@ -216,7 +231,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证军工",
         "label": "军工",
         "index_name": "中证军工指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512660.SH",
     },
     {
@@ -224,7 +239,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "新能源车",
         "label": "新能源车",
         "index_name": "中证新能源汽车产业指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "515030.SH",
     },
     {
@@ -232,7 +247,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "主要消费",
         "label": "消费",
         "index_name": "中证主要消费指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "159928.SZ",
     },
     {
@@ -240,7 +255,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证银行",
         "label": "银行",
         "index_name": "中证银行指数",
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512800.SH",
     },
     {
@@ -249,7 +264,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "煤炭",
         "index_name": "中证煤炭",
         # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "515220.SH",
     },
     {
@@ -258,7 +273,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "红利",
         "index_name": "上证红利",
         # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "510880.SH",
     },
     {
@@ -267,7 +282,7 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "label": "红利低波",
         "index_name": "中证红利低波动指数",
         # 低波大盘价值风格，和科创板/创业板的期权情绪无关，不借代理（同其余行业与风格指数）。
-        "option_underlyings": [],
+        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
         "proxy_etf": "512890.SH",
     },
 ]
@@ -276,44 +291,44 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
 # 且已有场内 ETF/LOF 的中证或国证指数，不直接使用通达信 880xxx 板块代码。
 ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     # 一级行业
-    {"symbol": "000987.SH", "ticker": "全指原材料", "label": "原材料", "index_name": "中证全指原材料指数", "option_underlyings": [], "proxy_etf": "159944.SZ"},
-    {"symbol": "000989.SH", "ticker": "全指可选消费", "label": "可选消费", "index_name": "中证全指可选消费指数", "option_underlyings": [], "proxy_etf": "159936.SZ"},
-    {"symbol": "000991.SH", "ticker": "全指医药", "label": "医药卫生", "index_name": "中证全指医药卫生指数", "option_underlyings": [], "proxy_etf": "159938.SZ"},
-    {"symbol": "000993.SH", "ticker": "全指信息", "label": "信息技术", "index_name": "中证全指信息技术指数", "option_underlyings": [], "proxy_etf": "159939.SZ"},
-    {"symbol": "000994.CSI", "ticker": "全指通信服务", "label": "通信服务", "index_name": "中证全指通信服务指数", "option_underlyings": [], "proxy_etf": "159511.SZ"},
-    {"symbol": "000995.CSI", "ticker": "全指公用", "label": "公用事业", "index_name": "中证全指公用事业指数", "option_underlyings": [], "proxy_etf": "159301.SZ"},
-    {"symbol": "931775.CSI", "ticker": "房地产", "label": "房地产", "index_name": "中证全指房地产指数", "option_underlyings": [], "proxy_etf": "512200.SH"},
+    {"symbol": "000987.SH", "ticker": "全指原材料", "label": "原材料", "index_name": "中证全指原材料指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159944.SZ"},
+    {"symbol": "000989.SH", "ticker": "全指可选消费", "label": "可选消费", "index_name": "中证全指可选消费指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159936.SZ"},
+    {"symbol": "000991.SH", "ticker": "全指医药", "label": "医药卫生", "index_name": "中证全指医药卫生指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159938.SZ"},
+    {"symbol": "000993.SH", "ticker": "全指信息", "label": "信息技术", "index_name": "中证全指信息技术指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159939.SZ"},
+    {"symbol": "000994.CSI", "ticker": "全指通信服务", "label": "通信服务", "index_name": "中证全指通信服务指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159511.SZ"},
+    {"symbol": "000995.CSI", "ticker": "全指公用", "label": "公用事业", "index_name": "中证全指公用事业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159301.SZ"},
+    {"symbol": "931775.CSI", "ticker": "房地产", "label": "房地产", "index_name": "中证全指房地产指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512200.SH"},
     # 二级行业
-    {"symbol": "H30199.CSI", "ticker": "电力公用", "label": "电力", "index_name": "中证全指电力公用事业指数", "option_underlyings": [], "proxy_etf": "560580.SH"},
-    {"symbol": "931994.CSI", "ticker": "电网设备", "label": "电网设备", "index_name": "中证电网设备主题指数", "option_underlyings": [], "proxy_etf": "159326.SZ"},
-    {"symbol": "H30198.CSI", "ticker": "油气产业", "label": "石油石化", "index_name": "中证油气产业指数", "option_underlyings": [], "proxy_etf": "561360.SH"},
-    {"symbol": "930606.CSI", "ticker": "中证钢铁", "label": "钢铁", "index_name": "中证钢铁指数", "option_underlyings": [], "proxy_etf": "515210.SH"},
-    {"symbol": "000813.CSI", "ticker": "细分化工", "label": "化工", "index_name": "中证细分化工产业主题指数", "option_underlyings": [], "proxy_etf": "516020.SH"},
-    {"symbol": "931009.CSI", "ticker": "建筑材料", "label": "建材", "index_name": "中证全指建筑材料指数", "option_underlyings": [], "proxy_etf": "159745.SZ"},
-    {"symbol": "931752.CSI", "ticker": "工程机械", "label": "工程机械", "index_name": "中证工程机械主题指数", "option_underlyings": [], "proxy_etf": "560280.SH"},
-    {"symbol": "399995.SZ", "ticker": "基建工程", "label": "基建", "index_name": "中证基建工程指数", "option_underlyings": [], "proxy_etf": "516970.SH"},
-    {"symbol": "H30171.CSI", "ticker": "全指运输", "label": "运输物流", "index_name": "中证全指运输指数", "option_underlyings": [], "proxy_etf": "159666.SZ"},
-    {"symbol": "980028.SZ", "ticker": "龙头家电", "label": "家电", "index_name": "国证龙头家电指数", "option_underlyings": [], "proxy_etf": "159730.SZ"},
-    {"symbol": "399971.SZ", "ticker": "中证传媒", "label": "文化传媒", "index_name": "中证传媒指数", "option_underlyings": [], "proxy_etf": "512980.SH"},
-    {"symbol": "930633.CSI", "ticker": "中证旅游", "label": "旅游酒店", "index_name": "中证旅游主题指数", "option_underlyings": [], "proxy_etf": "562510.SH"},
-    {"symbol": "000933.SH", "ticker": "医药卫生", "label": "综合医药", "index_name": "中证医药卫生指数", "option_underlyings": [], "proxy_etf": "159929.SZ"},
-    {"symbol": "930641.CSI", "ticker": "中证中药", "label": "中药", "index_name": "中证中药指数", "option_underlyings": [], "proxy_etf": "560080.SH"},
-    {"symbol": "931152.CSI", "ticker": "创新药", "label": "化学制药", "index_name": "中证创新药产业指数", "option_underlyings": [], "proxy_etf": "515120.SH"},
-    {"symbol": "930726.CSI", "ticker": "生物医药", "label": "生物制品", "index_name": "中证生物医药指数", "option_underlyings": [], "proxy_etf": "512290.SH"},
-    {"symbol": "H30217.CSI", "ticker": "医疗器械", "label": "医疗器械", "index_name": "中证全指医疗器械指数", "option_underlyings": [], "proxy_etf": "159883.SZ"},
-    {"symbol": "931160.CSI", "ticker": "通信设备", "label": "通信设备", "index_name": "中证全指通信设备指数", "option_underlyings": [], "proxy_etf": "515880.SH"},
-    {"symbol": "H30202.CSI", "ticker": "全指软件", "label": "软件服务", "index_name": "中证全指软件指数", "option_underlyings": [], "proxy_etf": "515230.SH"},
-    {"symbol": "930651.CSI", "ticker": "中证计算机", "label": "电脑设备", "index_name": "中证计算机主题指数", "option_underlyings": [], "proxy_etf": "512720.SH"},
-    {"symbol": "000949.CSI", "ticker": "中证农业", "label": "农林牧渔", "index_name": "中证农业主题指数", "option_underlyings": [], "proxy_etf": "159825.SZ"},
-    {"symbol": "930707.CSI", "ticker": "畜牧养殖", "label": "农林牧渔", "index_name": "中证畜牧养殖指数", "option_underlyings": [], "proxy_etf": "516670.SH"},
-    {"symbol": "930618.CSI", "ticker": "中证保险", "label": "保险", "index_name": "中证保险主题指数", "option_underlyings": [], "proxy_etf": "167301.SZ"},
-    {"symbol": "H30588.CSI", "ticker": "中证证保", "label": "证券保险", "index_name": "中证证券保险指数", "option_underlyings": [], "proxy_etf": "515630.SH"},
+    {"symbol": "H30199.CSI", "ticker": "电力公用", "label": "电力", "index_name": "中证全指电力公用事业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "560580.SH"},
+    {"symbol": "931994.CSI", "ticker": "电网设备", "label": "电网设备", "index_name": "中证电网设备主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159326.SZ"},
+    {"symbol": "H30198.CSI", "ticker": "油气产业", "label": "石油石化", "index_name": "中证油气产业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "561360.SH"},
+    {"symbol": "930606.CSI", "ticker": "中证钢铁", "label": "钢铁", "index_name": "中证钢铁指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515210.SH"},
+    {"symbol": "000813.CSI", "ticker": "细分化工", "label": "化工", "index_name": "中证细分化工产业主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "516020.SH"},
+    {"symbol": "931009.CSI", "ticker": "建筑材料", "label": "建材", "index_name": "中证全指建筑材料指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159745.SZ"},
+    {"symbol": "931752.CSI", "ticker": "工程机械", "label": "工程机械", "index_name": "中证工程机械主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "560280.SH"},
+    {"symbol": "399995.SZ", "ticker": "基建工程", "label": "基建", "index_name": "中证基建工程指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "516970.SH"},
+    {"symbol": "H30171.CSI", "ticker": "全指运输", "label": "运输物流", "index_name": "中证全指运输指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159666.SZ"},
+    {"symbol": "980028.SZ", "ticker": "龙头家电", "label": "家电", "index_name": "国证龙头家电指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159730.SZ"},
+    {"symbol": "399971.SZ", "ticker": "中证传媒", "label": "文化传媒", "index_name": "中证传媒指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512980.SH"},
+    {"symbol": "930633.CSI", "ticker": "中证旅游", "label": "旅游酒店", "index_name": "中证旅游主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "562510.SH"},
+    {"symbol": "000933.SH", "ticker": "医药卫生", "label": "综合医药", "index_name": "中证医药卫生指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159929.SZ"},
+    {"symbol": "930641.CSI", "ticker": "中证中药", "label": "中药", "index_name": "中证中药指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "560080.SH"},
+    {"symbol": "931152.CSI", "ticker": "创新药", "label": "化学制药", "index_name": "中证创新药产业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515120.SH"},
+    {"symbol": "930726.CSI", "ticker": "生物医药", "label": "生物制品", "index_name": "中证生物医药指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512290.SH"},
+    {"symbol": "H30217.CSI", "ticker": "医疗器械", "label": "医疗器械", "index_name": "中证全指医疗器械指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159883.SZ"},
+    {"symbol": "931160.CSI", "ticker": "通信设备", "label": "通信设备", "index_name": "中证全指通信设备指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515880.SH"},
+    {"symbol": "H30202.CSI", "ticker": "全指软件", "label": "软件服务", "index_name": "中证全指软件指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515230.SH"},
+    {"symbol": "930651.CSI", "ticker": "中证计算机", "label": "电脑设备", "index_name": "中证计算机主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512720.SH"},
+    {"symbol": "000949.CSI", "ticker": "中证农业", "label": "农林牧渔", "index_name": "中证农业主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159825.SZ"},
+    {"symbol": "930707.CSI", "ticker": "畜牧养殖", "label": "农林牧渔", "index_name": "中证畜牧养殖指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "516670.SH"},
+    {"symbol": "930618.CSI", "ticker": "中证保险", "label": "保险", "index_name": "中证保险主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "167301.SZ"},
+    {"symbol": "H30588.CSI", "ticker": "中证证保", "label": "证券保险", "index_name": "中证证券保险指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515630.SH"},
     # 三级细分行业
-    {"symbol": "931151.CSI", "ticker": "光伏产业", "label": "新型电力", "index_name": "中证光伏产业指数", "option_underlyings": [], "proxy_etf": "515790.SH"},
-    {"symbol": "930598.CSI", "ticker": "稀土产业", "label": "小金属", "index_name": "中证稀土产业指数", "option_underlyings": [], "proxy_etf": "516780.SH"},
-    {"symbol": "930901.CSI", "ticker": "动漫游戏", "label": "文化传媒", "index_name": "中证动漫游戏指数", "option_underlyings": [], "proxy_etf": "159869.SZ"},
-    {"symbol": "930851.CSI", "ticker": "云计算", "label": "软件服务", "index_name": "中证云计算与大数据主题指数", "option_underlyings": [], "proxy_etf": "516510.SH"},
-    {"symbol": "931230.CSI", "ticker": "汽车零部件", "label": "汽车零部件", "index_name": "中证汽车零部件主题指数", "option_underlyings": [], "proxy_etf": "562700.SH"},
+    {"symbol": "931151.CSI", "ticker": "光伏产业", "label": "新型电力", "index_name": "中证光伏产业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515790.SH"},
+    {"symbol": "930598.CSI", "ticker": "稀土产业", "label": "小金属", "index_name": "中证稀土产业指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "516780.SH"},
+    {"symbol": "930901.CSI", "ticker": "动漫游戏", "label": "文化传媒", "index_name": "中证动漫游戏指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159869.SZ"},
+    {"symbol": "930851.CSI", "ticker": "云计算", "label": "软件服务", "index_name": "中证云计算与大数据主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "516510.SH"},
+    {"symbol": "931230.CSI", "ticker": "汽车零部件", "label": "汽车零部件", "index_name": "中证汽车零部件主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "562700.SH"},
 ]
 
 A_STOCK_INDEX_FEAR_GREED_TARGETS.extend(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS)
