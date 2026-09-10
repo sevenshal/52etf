@@ -59,7 +59,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
@@ -196,6 +196,27 @@ FINA_INDICATOR_SCAN_COLUMNS = (
     "netdebt",
 )
 
+# --- TTM 口径需要的字段分类 ---
+# A股定期报告的利润表/现金流量表都是**年初至今累计**口径，所以
+#     TTM = 最新累计 + 上一年年报 − 上一年同期累计
+# 只对流量科目成立。存量科目(资产负债表时点数)直接取最新一期，比率科目(ROE/ROIC/
+# 资产负债率这类)既不能相加也不能相减，只能置空让下游按分量重算——绝不能把年报的
+# 比率原样搬到TTM行上冒充最新值。
+STATEMENT_FLOW_COLUMNS = {
+    "a_stock_income": set(INCOME_SCAN_COLUMNS),
+    "a_stock_cashflow": set(CASHFLOW_SCAN_COLUMNS),
+    "a_stock_fina_indicator": {"ebit", "daa", "fcff"},
+    "a_stock_balancesheet": set(),
+}
+STATEMENT_STOCK_COLUMNS = {
+    "a_stock_income": set(),
+    "a_stock_cashflow": set(),
+    "a_stock_fina_indicator": {"invest_capital", "interestdebt", "netdebt"},
+    "a_stock_balancesheet": set(BALANCESHEET_SCAN_COLUMNS),
+}
+# 取最近 8 期(约两年，覆盖年报+去年同期)，够拼出一个 TTM 就行
+TTM_LOOKBACK_PERIODS = 8
+
 
 def _latest_risk_free_rate(connection, curve_id: str, term_years: float) -> Optional[float]:
     """取中债国债收益率曲线最新一个交易日、最接近 term_years 期限的利率(转成小数)。
@@ -278,6 +299,143 @@ def _annual_rows(
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) <= {int(periods)}
     """
     return connection.execute(query, symbol_params).fetchdf()
+
+
+def _as_date(value) -> Optional[date]:
+    """把 DuckDB 取回来的 Timestamp/date 统一成 `datetime.date`。
+
+    直接对 Timestamp 调 isoformat() 会带出 "T00:00:00"，报告期是天粒度，不该有时间。
+    """
+    if value is None:
+        return None
+    # 注意 datetime(以及 pandas.Timestamp)本身就是 date 的子类，只判 isinstance(value, date)
+    # 会把带时分秒的值原样放过去，isoformat() 就带出 "T00:00:00" 了。
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return value.date() if hasattr(value, "date") else value
+
+
+def _recent_period_rows(
+    connection,
+    table: str,
+    columns: Sequence[str],
+    periods: int = TTM_LOOKBACK_PERIODS,
+    symbols: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    """取最近 `periods` 期定期报告，**不限于年报**，用来拼 TTM。
+
+    和 `_annual_rows` 唯一的区别就是不过滤 12-31：季报/半年报本来就已经同步在库里
+    (同步引擎按 ann_date 拉取，不按 period 过滤)，只是扫描器此前一直没用。
+    """
+    if not duckdb_table_exists(connection, table):
+        return pd.DataFrame()
+    selected = ["ts_code", "end_date", "ann_date", *columns]
+    available = {
+        row[0]
+        for row in connection.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            [table],
+        ).fetchall()
+    }
+    projection = ", ".join(f'"{name}"' for name in dict.fromkeys(selected) if name in available)
+    symbol_clause, symbol_params = _symbol_filter(symbols)
+    query = f"""
+        WITH deduped AS (
+            SELECT {projection},
+                   ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS _dedup_rn
+            FROM {table}
+            WHERE end_date IS NOT NULL{symbol_clause}
+        )
+        SELECT * EXCLUDE (_dedup_rn)
+        FROM deduped
+        WHERE _dedup_rn = 1
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) <= {int(periods)}
+    """
+    return connection.execute(query, symbol_params).fetchdf()
+
+
+def _ttm_overlay(
+    annual_slice: Optional[pd.DataFrame],
+    period_slice: Optional[pd.DataFrame],
+    table: str,
+) -> Dict[str, Any]:
+    """把年报序列的最后一期换成 TTM(或最新时点数)，返回新序列和口径说明。
+
+    A股的利润表/现金流量表是年初至今**累计**口径，所以
+        TTM流量 = 最新累计 + 上一年年报 − 上一年同期累计
+    资产负债表是时点数，直接取最新一期。比率科目置空(NaN)，让下游按分量重算：
+    `debt_to_assets` 会从资产负债表算、`roic` 会退回 NOPAT/投入资本自算，
+    这正是我们想要的 TTM 值；把年报的比率搬过来才是错的。
+
+    条件不满足(没有中期报告、缺去年同期或去年年报)时原样返回年报序列，
+    `applied=False`——宁可退回年报口径，也不能拿一个半年的流量当成一年。
+    """
+    result = {"frame": annual_slice, "applied": False, "end_date": None, "reason": None}
+    if annual_slice is None or annual_slice.empty:
+        result["reason"] = "没有年报数据"
+        return result
+    if period_slice is None or period_slice.empty:
+        result["reason"] = "没有定期报告数据"
+        return result
+
+    periods = period_slice.sort_values("end_date")
+    latest = periods.iloc[-1]
+    latest_end = latest["end_date"]
+    annual_latest_end = annual_slice.iloc[-1]["end_date"]
+    if latest_end <= annual_latest_end:
+        result["reason"] = "最新一期就是年报，无需滚动"
+        result["end_date"] = annual_latest_end
+        return result
+
+    flow_columns = STATEMENT_FLOW_COLUMNS.get(table, set())
+    stock_columns = STATEMENT_STOCK_COLUMNS.get(table, set())
+    ttm_row = dict(latest)
+
+    if flow_columns:
+        prior_year = latest_end.year - 1
+        prior_fy = periods[
+            (periods["end_date"].map(lambda d: d.year) == prior_year)
+            & (periods["end_date"].map(lambda d: (d.month, d.day)) == (12, 31))
+        ]
+        prior_same = periods[
+            periods["end_date"].map(lambda d: (d.year, d.month, d.day))
+            == (prior_year, latest_end.month, latest_end.day)
+        ]
+        if prior_fy.empty or prior_same.empty:
+            result["reason"] = "缺少上一年年报或去年同期报告，无法滚动出完整12个月"
+            return result
+        prior_fy_row, prior_same_row = prior_fy.iloc[-1], prior_same.iloc[-1]
+        for column in flow_columns:
+            if column not in periods.columns:
+                continue
+            latest_value = safe_float(latest.get(column))
+            fy_value = safe_float(prior_fy_row.get(column))
+            same_value = safe_float(prior_same_row.get(column))
+            ttm_row[column] = (
+                latest_value + fy_value - same_value
+                if None not in (latest_value, fy_value, same_value)
+                else None
+            )
+
+    # 比率科目：既不能加也不能减，一律置空由下游按分量重算
+    for column in periods.columns:
+        if column in ("ts_code", "end_date", "ann_date", "comp_type"):
+            continue
+        if column not in flow_columns and column not in stock_columns:
+            ttm_row[column] = None
+
+    frame = annual_slice.iloc[:-1] if len(annual_slice) > 1 else annual_slice.iloc[0:0]
+    # 按年报序列的列顺序和数值类型构造这一行：置空的比率列如果留成 object dtype，
+    # concat 会因为"整列都是 NA"退化出对不上的 dtype（pandas 已就此告警）。
+    ttm_frame = pd.DataFrame([ttm_row]).reindex(columns=annual_slice.columns)
+    for column in annual_slice.columns:
+        if pd.api.types.is_numeric_dtype(annual_slice[column]):
+            ttm_frame[column] = pd.to_numeric(ttm_frame[column], errors="coerce")
+    frame = pd.concat([frame, ttm_frame], ignore_index=True)
+    result.update({"frame": frame, "applied": True, "end_date": _as_date(latest_end)})
+    return result
 
 
 def _latest_market_row(connection, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
@@ -1253,6 +1411,7 @@ def screen_value_investing_candidates(
     terminal_growth_rate: float = DEFAULT_TERMINAL_GROWTH_RATE,
     symbols: Optional[Sequence[str]] = None,
     force_valuation: bool = False,
+    use_ttm: bool = True,
 ) -> Dict[str, Any]:
     """跑一次全市场价值投资扫描，返回按 DCF/合理估值测算的潜在 return% 排序的候选列表。
 
@@ -1264,6 +1423,11 @@ def screen_value_investing_candidates(
     质量闸门的股票也照样跑完估值。两个开关是给个股详情页用的：详情页要展示的是
     "这只股票在同一套价值投资口径下长什么样"，闸门没过恰恰是最需要看到数字的
     情形——只给一句"未通过"没法判断差多少。全市场扫描保持原行为不变。
+
+    `use_ttm` 让**估值**用最新的 TTM 口径（最新中期报告滚动12个月）而不是最近一期
+    年报。A股年报4月才披露，到下半年纯年报口径最多能滞后9个月，中间的拐点完全看
+    不见。质量闸门和"内在价值同比"仍然走年报序列：那两项本来就是多年期判断，
+    换成滚动窗口只会引入噪声。传 False 可退回全年报口径做对照。
     """
     thresholds = dict(DEFAULT_QUALITY_THRESHOLDS)
     if quality_overrides:
@@ -1286,6 +1450,15 @@ def screen_value_investing_candidates(
         balancesheet_annual = _annual_rows(connection, "a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS, symbols=symbols)
         cashflow_annual = _annual_rows(connection, "a_stock_cashflow", CASHFLOW_SCAN_COLUMNS, symbols=symbols)
         fina_annual = _annual_rows(connection, "a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS, symbols=symbols)
+        period_frames = {}
+        if use_ttm:
+            for table, scan_columns in (
+                ("a_stock_income", INCOME_SCAN_COLUMNS),
+                ("a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS),
+                ("a_stock_cashflow", CASHFLOW_SCAN_COLUMNS),
+                ("a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS),
+            ):
+                period_frames[table] = _recent_period_rows(connection, table, scan_columns, symbols=symbols)
         market_latest = _latest_market_row(connection, symbols=symbols)
         valuation_history = _valuation_history(connection, history_start, symbols=symbols)
         beta_by_symbol = _beta_by_symbol(connection, beta_lookback_start, MARKET_INDEX_CODE, symbols=symbols)
@@ -1355,6 +1528,9 @@ def screen_value_investing_candidates(
     cashflow_by_symbol = _annual_group(cashflow_annual)
     fina_by_symbol = _annual_group(fina_annual)
     balancesheet_by_symbol = _annual_group(balancesheet_annual)
+    period_by_symbol = {
+        table: _annual_group(frame) for table, frame in period_frames.items()
+    }
 
     candidates: List[Dict[str, Any]] = []
     universe_size = 0
@@ -1379,21 +1555,55 @@ def screen_value_investing_candidates(
         market_cap_yuan = total_mv * 10000.0 if total_mv else None
 
         balancesheet_history = balancesheet_by_symbol.get(ts_code)
+
+        # --- TTM 覆盖层 ---
+        # 年报序列(`*_history`)继续喂质量闸门和"内在价值同比"这类多年期判断；
+        # TTM 序列(`*_ttm`)只把最后一期换成滚动12个月/最新时点数，喂估值。
+        def _overlay(table: str, annual_slice):
+            return _ttm_overlay(annual_slice, period_by_symbol.get(table, {}).get(ts_code), table)
+
+        income_history = income_by_symbol.get(ts_code)
+        cashflow_history = cashflow_by_symbol.get(ts_code)
+        fina_history_annual = fina_by_symbol.get(ts_code)
+        income_ttm_info = _overlay("a_stock_income", income_history)
+        cashflow_ttm_info = _overlay("a_stock_cashflow", cashflow_history)
+        fina_ttm_info = _overlay("a_stock_fina_indicator", fina_history_annual)
+        balancesheet_ttm_info = _overlay("a_stock_balancesheet", balancesheet_history)
+        income_ttm = income_ttm_info["frame"]
+        cashflow_ttm = cashflow_ttm_info["frame"]
+        fina_ttm = fina_ttm_info["frame"]
+        balancesheet_ttm = balancesheet_ttm_info["frame"]
+        ttm_applied = any(
+            info["applied"]
+            for info in (income_ttm_info, cashflow_ttm_info, fina_ttm_info, balancesheet_ttm_info)
+        )
+        ttm_end_dates = [
+            info["end_date"]
+            for info in (income_ttm_info, cashflow_ttm_info, fina_ttm_info, balancesheet_ttm_info)
+            if info["applied"] and info["end_date"] is not None
+        ]
+        ttm_end_date = max(ttm_end_dates) if ttm_end_dates else None
+
+        # 资产负债表取最新时点数：净债务、少数股东权益、有息负债都该是"现在"的，
+        # 不是去年12月31日的。
         bs_row = (
-            balancesheet_history.iloc[-1].to_dict()
-            if balancesheet_history is not None and not balancesheet_history.empty
+            balancesheet_ttm.iloc[-1].to_dict()
+            if balancesheet_ttm is not None and not balancesheet_ttm.empty
             else {}
         )
         comp_type = str(bs_row.get("comp_type") or "")
         is_financial = comp_type in FINANCIAL_COMP_TYPES
 
-        fina_history = fina_by_symbol.get(ts_code)
+        # 近5年平均 ROE/ROIC 是多年期判断，必须走年报序列：把一个滚动窗口混进来
+        # 只会让"平均"变成一个说不清是几年的数。
+        fina_history = fina_history_annual
         avg_roe = safe_float(fina_history["roe"].mean()) if fina_history is not None and "roe" in fina_history else None
         avg_roic = safe_float(fina_history["roic"].mean()) if fina_history is not None and "roic" in fina_history else None
         years_available = 0 if fina_history is None else int(fina_history["end_date"].nunique())
-        fina_latest_row = fina_history.iloc[-1].to_dict() if fina_history is not None and not fina_history.empty else {}
+        # 资产负债率取最新一期：TTM 行的比率科目被置空，这里会落到下面按最新
+        # 资产负债表重算的分支，正是想要的结果。
+        fina_latest_row = fina_ttm.iloc[-1].to_dict() if fina_ttm is not None and not fina_ttm.empty else {}
 
-        cashflow_history = cashflow_by_symbol.get(ts_code)
         ocf_to_np_values: List[float] = []
         if cashflow_history is not None:
             for _, row in cashflow_history.iterrows():
@@ -1413,15 +1623,14 @@ def screen_value_investing_candidates(
         # --- WACC（金融、非金融都要用到股权成本，非金融还要用债权成本）——放在质量
         # 闸门判断之前，因为闸门本身现在也要用到"内在价值同比是否增长"这个判据，
         # 而算内在价值需要先有WACC/股权成本。
-        income_history = income_by_symbol.get(ts_code)
-        income_latest_row = income_history.iloc[-1].to_dict() if income_history is not None and not income_history.empty else {}
+        income_latest_row = income_ttm.iloc[-1].to_dict() if income_ttm is not None and not income_ttm.empty else {}
         beta = beta_by_symbol.get(ts_code)
         # 实际税率和有息负债都先独立算好再喂给 WACC：这两个量在 WACC 之外还要被
         # FCFF 的税后利息加回用到，绑在 _wacc_components 里就会出现"市值缺失导致
         # WACC 算不出来、连带税率也退回默认值"这种没道理的连锁。
-        tax_info = _effective_tax_rate(fina_history, income_history)
+        tax_info = _effective_tax_rate(fina_ttm, income_ttm)
         effective_tax_rate = tax_info["rate"]
-        debt_info = _interest_bearing_debt(fina_history, balancesheet_history)
+        debt_info = _interest_bearing_debt(fina_ttm, balancesheet_ttm)
         wacc_info = _wacc_components(
             beta=beta,
             market_cap=market_cap_yuan,
@@ -1434,34 +1643,40 @@ def screen_value_investing_candidates(
         wacc_pct = safe_float(wacc_info["wacc"] * 100.0) if wacc_info else None
         cost_of_equity = wacc_info["cost_of_equity"] if wacc_info else None
 
-        # --- 内在价值：分别用"截止最新年报"和"截止去年年报(去掉最新一期)"两个
-        # 切片走同一套公式各算一次，差值就是基本面本身是在变好还是变差，不依赖
-        # 估值倍数是否重估。
-        def _snapshot(drop_latest: bool) -> Dict[str, Any]:
+        # --- 内在价值 ---
+        # 估值本身用 TTM 序列(最后一期是滚动12个月/最新时点数)；"内在价值同比"仍然
+        # 用年报序列各算一次再比——那一项要回答的是"这一年公司创造的价值是升是降"，
+        # 拿一个和上一年重叠半年的滚动窗口去比，差值里一半是重叠期，没有意义。
+        def _snapshot(frames, drop_latest: bool = False) -> Dict[str, Any]:
             def _slice(frame: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
                 if frame is None or frame.empty:
                     return frame
                 return frame.iloc[:-1] if drop_latest and len(frame) > 1 else frame
 
+            fina_slice, income_slice, cashflow_slice, balancesheet_slice = frames
             return _intrinsic_value_snapshot(
                 is_financial=is_financial,
-                fina_slice=_slice(fina_history),
-                income_slice=_slice(income_history),
-                cashflow_slice=_slice(cashflow_history),
-                balancesheet_slice=_slice(balancesheet_history),
+                fina_slice=_slice(fina_slice),
+                income_slice=_slice(income_slice),
+                cashflow_slice=_slice(cashflow_slice),
+                balancesheet_slice=_slice(balancesheet_slice),
                 cost_of_equity=cost_of_equity,
                 wacc=wacc_info["wacc"] if wacc_info else None,
                 effective_tax_rate=effective_tax_rate,
                 terminal_growth_rate=effective_terminal_growth,
             )
 
-        current_snapshot = _snapshot(drop_latest=False)
-        prior_snapshot = _snapshot(drop_latest=True)
-        value_growth_pct = _value_growth_pct(is_financial, current_snapshot, prior_snapshot)
+        ttm_frames = (fina_ttm, income_ttm, cashflow_ttm, balancesheet_ttm)
+        annual_frames = (fina_history, income_history, cashflow_history, balancesheet_history)
+        current_snapshot = _snapshot(ttm_frames)
+        value_growth_pct = _value_growth_pct(
+            is_financial, _snapshot(annual_frames), _snapshot(annual_frames, drop_latest=True)
+        )
 
         # 质量闸门的"FCFF为正年数"和交叉验证的"FCFF收益率"都必须走 DCF 采用的同一条
         # 序列（现在默认是现金流量表口径），否则闸门看的是 tushare 那条数、估值用的是
-        # 另一条，两者结论可以完全相反。
+        # 另一条，两者结论可以完全相反。闸门数的是"近5年有几年为正"，只能用年报；
+        # 收益率要的是最新一年的现金流，用 TTM。
         canonical_fcff = _fcff_history(
             fina_slice=fina_history,
             cashflow_slice=cashflow_history,
@@ -1469,6 +1684,12 @@ def screen_value_investing_candidates(
             effective_tax_rate=effective_tax_rate,
         )["values"]
         fcf_positive_years = int(sum(1 for value in canonical_fcff if value > 0))
+        ttm_fcff = _fcff_history(
+            fina_slice=fina_ttm,
+            cashflow_slice=cashflow_ttm,
+            income_slice=income_ttm,
+            effective_tax_rate=effective_tax_rate,
+        )["values"]
 
         quality = _quality_assessment(
             is_financial=is_financial,
@@ -1524,10 +1745,10 @@ def screen_value_investing_candidates(
         earnings_yield_pct = (100.0 / pe_ttm) if pe_ttm and pe_ttm > 0 else None
 
         profit_cagr_pct = None
-        if income_history is not None and len(income_history) >= 2 and "n_income_attr_p" in income_history:
-            oldest_profit = safe_float(income_history.iloc[0]["n_income_attr_p"])
-            latest_profit = safe_float(income_history.iloc[-1]["n_income_attr_p"])
-            years_span = income_history.iloc[-1]["end_date"].year - income_history.iloc[0]["end_date"].year
+        if income_ttm is not None and len(income_ttm) >= 2 and "n_income_attr_p" in income_ttm:
+            oldest_profit = safe_float(income_ttm.iloc[0]["n_income_attr_p"])
+            latest_profit = safe_float(income_ttm.iloc[-1]["n_income_attr_p"])
+            years_span = income_ttm.iloc[-1]["end_date"].year - income_ttm.iloc[0]["end_date"].year
             profit_cagr_pct = _cagr_pct(latest_profit, oldest_profit, years_span)
 
         expected_return_pct = None
@@ -1565,8 +1786,8 @@ def screen_value_investing_candidates(
                     expected_return_pct_bull = (bull_pb / pb - 1.0) * 100.0 if bull_pb is not None else None
         else:
             near_term_growth = current_snapshot["near_term_growth"]
-            if canonical_fcff and market_cap_yuan:
-                fcf_yield_pct = canonical_fcff[-1] / market_cap_yuan * 100.0
+            if ttm_fcff and market_cap_yuan:
+                fcf_yield_pct = ttm_fcff[-1] / market_cap_yuan * 100.0
 
             if wacc_info is not None and dcf_equity_value is not None and market_cap_yuan and market_cap_yuan > 0:
                 wacc = wacc_info["wacc"]
@@ -1618,6 +1839,8 @@ def screen_value_investing_candidates(
                 "quality_passed": quality["passes"],
                 "quality_reasons": quality["reasons"],
                 "quality_notes": quality["notes"],
+                "valuation_basis": "ttm" if ttm_applied else "annual",
+                "valuation_period_end": ttm_end_date.isoformat() if ttm_end_date else None,
                 "avg_roe_pct": avg_roe,
                 "avg_roic_pct": avg_roic,
                 "ocf_to_net_profit": ocf_to_np,
