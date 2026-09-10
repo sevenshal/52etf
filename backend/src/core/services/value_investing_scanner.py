@@ -137,6 +137,14 @@ DEFAULT_QUALITY_THRESHOLDS = {
 }
 
 # tushare comp_type: 1=一般工商业 2=银行 3=保险 4=证券
+# --- 扩产期识别 ---
+# FCFF 为负有两种完全相反的原因：在建产能吃掉了现金(扩产)，还是经营本身在失血。
+# 前者不该被质量闸门淘汰——DCF 用 `再投资率 = g/ROIC` 给增长计价，本来就没有减实际
+# 资本开支，闸门再用实际 FCFF 卡一次，等于为同一笔增长罚了两次。
+CAPEX_CYCLE_MIN_CAPEX_TO_DAA = 1.5      # 资本开支/折旧摊销：明显超过维持性支出
+CAPEX_CYCLE_MIN_OCF_POSITIVE_YEARS = 3  # 经营现金流为正的年数：证明是扩产不是失血
+CAPEX_CYCLE_MIN_REVENUE_CAGR_PCT = 0.0  # 收入不能萎缩，否则是在给衰退的生意加杠杆
+
 FINANCIAL_COMP_TYPES = {"2", "3", "4"}
 
 # 4 张财务报表按 tushare 官方字段全集建表(97~170列)，扫描器只需要下面这十几列。
@@ -890,6 +898,179 @@ def _residual_income_pb(
     return 1.0 + present_value
 
 
+def _solve_monotone(
+    fn: Any,
+    low: float,
+    high: float,
+    target: float,
+    *,
+    max_iterations: int = 80,
+    tolerance_ratio: float = 1e-6,
+) -> Dict[str, Any]:
+    """在 [low, high] 上二分求解单调函数 fn(x) == target。
+
+    方向不写死，由两个端点自己决定是增函数还是减函数。这不是过度设计：本模型里价值
+    对增长率的单调方向取决于 ROIC、再投资率上限、以及 `min(g, ROIC×0.9)` 这个夹子在
+    哪里生效，实测既有增也有减(而且和教科书"ROIC<WACC 时增长毁灭价值"的直觉未必一致
+    ——近端增速降下来的同时 NOPAT 基数本身也在缩，两个效应方向相反)。与其论证方向，
+    不如让端点说话。
+
+    目标落在区间外时返回 `status` 说明落在哪一侧，而不是硬夹到端点冒充一个解：
+    "任何可行的增速都解释不了当前价格"本身就是结论，夹回上限反而把这个信息抹掉。
+    """
+    f_low, f_high = fn(low), fn(high)
+    if f_low is None or f_high is None:
+        return {"value": None, "status": "unsolvable"}
+    if f_low == f_high:
+        return {"value": None, "status": "flat"}
+    lo_target_side = target - f_low
+    hi_target_side = target - f_high
+    if lo_target_side == 0:
+        return {"value": low, "status": "solved"}
+    if hi_target_side == 0:
+        return {"value": high, "status": "solved"}
+    if lo_target_side * hi_target_side > 0:
+        # 同号意味着 target 在两端点的同一侧，即区间内无解
+        ascending = f_high > f_low
+        beyond_high = (target > f_high) if ascending else (target < f_high)
+        return {"value": None, "status": "above_range" if beyond_high else "below_range"}
+
+    ascending = f_high > f_low
+    for _ in range(max_iterations):
+        mid = (low + high) / 2.0
+        f_mid = fn(mid)
+        if f_mid is None:
+            return {"value": None, "status": "unsolvable"}
+        if abs(f_mid - target) <= abs(target) * tolerance_ratio:
+            return {"value": mid, "status": "solved"}
+        if (f_mid < target) == ascending:
+            low = mid
+        else:
+            high = mid
+    return {"value": (low + high) / 2.0, "status": "solved"}
+
+
+def _implied_cost_of_equity(
+    current_pb: Optional[float],
+    roe: Optional[float],
+    growth: float,
+    fade_years: int = FINANCIAL_EXCESS_RETURN_FADE_YEARS,
+) -> Optional[float]:
+    """金融股：给定财报 ROE，从当前市净率反推市场要求的股权成本(小数)。
+
+    和 `_implied_sustainable_roe` 是同一个公式的另一种解法——那个固定 r 解 ROE，
+    这个固定 ROE 解 r。两个一起看才完整：市场要么是不信这个 ROE，要么是对这家银行
+    要求了更高的风险补偿，P/B 一个数分不出是哪一种，但两个隐含值分别对照财报 ROE
+    和 CAPM 股权成本，就能看出市场的分歧到底压在哪一边。
+    """
+    if current_pb is None or current_pb <= 0 or roe is None:
+        return None
+    solved = _solve_monotone(
+        lambda rate: _residual_income_pb(roe, rate, growth, fade_years),
+        growth + MIN_WACC_TERMINAL_SPREAD,
+        0.60,
+        current_pb,
+    )
+    return solved["value"]
+
+
+def _market_implied_assumptions(
+    *,
+    is_financial: bool,
+    market_cap: Optional[float],
+    pb: Optional[float],
+    snapshot: Dict[str, Any],
+    wacc: Optional[float],
+    cost_of_equity: Optional[float],
+    terminal_growth: float,
+) -> Dict[str, Any]:
+    """反推：要让模型算出的价值等于当前市值，输入得是多少。
+
+    这是给"模型说贵/便宜"这句话补上可证伪的那一半。正向的 return% 只回答"按我们的
+    假设值多少"，而使用者真正要判断的是"市场的假设合不合理"——把公式倒过来解出
+    **市场隐含的增速和贴现率**，再和我们自己估的那两个数对照，分歧就落在明面上，
+    可以拿行业常识去证伪。金融股的隐含 ROE 早就是这么做的，这里把它推广到全市场。
+    """
+    result: Dict[str, Any] = {
+        "implied_near_term_growth": None,
+        "implied_growth_status": None,
+        "implied_roic": None,
+        "implied_roic_status": None,
+        "implied_discount_rate": None,
+        "implied_discount_rate_status": None,
+        "implied_cost_of_equity": None,
+    }
+    if is_financial:
+        result["implied_cost_of_equity"] = _implied_cost_of_equity(
+            pb, snapshot.get("financial_roe"), terminal_growth
+        )
+        return result
+
+    base_nopat = snapshot.get("base_nopat")
+    roic = snapshot.get("roic")
+    net_debt = snapshot.get("net_debt")
+    if not market_cap or market_cap <= 0 or base_nopat is None or roic is None or net_debt is None:
+        return result
+    book_minority = snapshot.get("book_minority") or 0.0
+    parent_share = snapshot.get("parent_profit_share")
+    applied_terminal_growth = snapshot.get("applied_terminal_growth")
+    if applied_terminal_growth is None:
+        applied_terminal_growth = terminal_growth
+
+    def _equity_at(
+        growth: float, discount_rate: Optional[float], capital_return: Optional[float] = None
+    ) -> Optional[float]:
+        if discount_rate is None:
+            return None
+        valuation = _two_stage_reinvestment_value(
+            base_nopat, capital_return if capital_return is not None else roic,
+            growth, applied_terminal_growth, discount_rate
+        )
+        if valuation is None:
+            return None
+        return _parent_equity_value(
+            valuation["enterprise_value"], net_debt, book_minority, parent_share
+        )["equity_value"]
+
+    if wacc is not None:
+        # 隐含增速：贴现率按我们估的 WACC 固定，解出市场在假设的近端增长率。
+        # 上界给到 100% 而不是模型自己的 30% 上限——解出来落在界外恰恰是最有用的
+        # 信号("市场的假设已经超出任何合理增速")，夹回 30% 反而把信息抹掉了。
+        growth_solution = _solve_monotone(
+            lambda growth: _equity_at(growth, wacc), -0.50, 1.00, market_cap
+        )
+        result["implied_near_term_growth"] = growth_solution["value"]
+        result["implied_growth_status"] = growth_solution["status"]
+
+        # 隐含 ROIC：增速按模型采用值固定，解出市场在假设的资本回报率。
+        # 这一项在贵的股票上比隐含增速有用得多——本模型里增速被 `g <= ROIC×0.9` 的
+        # 再投资约束卡死，ROIC 18% 的公司哪怕顶格长到 16.2%，价值也只比基准高一成
+        # 出头，所以稍贵一点隐含增速就 above_range 了。这时候市场要的其实不是"长得
+        # 更快"，而是"这门生意的资本回报率比我们估的高"，解 ROIC 才问到了点子上。
+        applied_growth = snapshot.get("near_term_growth")
+        if applied_growth is not None:
+            roic_solution = _solve_monotone(
+                lambda capital_return: _equity_at(applied_growth, wacc, capital_return),
+                0.01, 1.00, market_cap,
+            )
+            result["implied_roic"] = roic_solution["value"]
+            result["implied_roic_status"] = roic_solution["status"]
+
+    # 隐含贴现率：增长按模型采用的近端增速固定，解出市场要求的资本成本。
+    # 它就是"如果模型的现金流假设是对的，以当前价买入能拿到的年化回报率"。
+    near_term_growth = snapshot.get("near_term_growth")
+    if near_term_growth is not None:
+        rate_solution = _solve_monotone(
+            lambda rate: _equity_at(near_term_growth, rate),
+            applied_terminal_growth + MIN_WACC_TERMINAL_SPREAD,
+            0.60,
+            market_cap,
+        )
+        result["implied_discount_rate"] = rate_solution["value"]
+        result["implied_discount_rate_status"] = rate_solution["status"]
+    return result
+
+
 def _implied_sustainable_roe(
     current_pb: Optional[float],
     cost_of_equity: Optional[float],
@@ -1333,6 +1514,52 @@ def _value_growth_pct(is_financial: bool, current: Dict[str, Any], prior: Dict[s
     return (current_value / prior_value - 1.0) * 100.0
 
 
+def _capex_cycle_assessment(
+    *,
+    cashflow_slice: Optional[pd.DataFrame],
+    fina_slice: Optional[pd.DataFrame],
+    revenue_cagr_pct: Optional[float],
+) -> Dict[str, Any]:
+    """判断自由现金流为负是因为在扩产，还是因为经营在失血。
+
+    三个条件同时成立才算扩产期：
+
+    1. **资本开支显著超过折旧摊销**——支出不是用来维持现有资产的，是在铺新产能；
+    2. **经营现金流常年为正**——生意本身在造血，只是被资本开支吃掉了。这一条是
+       扩产和失血的分水岭：经营现金流都是负的，那不是在扩产，是在烧钱；
+    3. **收入没有萎缩**——否则是在给一门正在衰退的生意加杠杆。
+
+    这不是放宽闸门：不满足这三条的公司，FCFF 为负照样是淘汰理由。满足的公司也只是
+    把"FCFF 为正年数不足"从淘汰理由降级成提示，其余闸门(ROIC-WACC 价差、经营现金流/
+    净利润、资产负债率、内在价值同比)一条都不放过。
+    """
+    result: Dict[str, Any] = {
+        "in_capex_cycle": False,
+        "capex_to_daa": None,
+        "ocf_positive_years": 0,
+        "revenue_cagr_pct": safe_float(revenue_cagr_pct, 1),
+    }
+    capex = _annual_values_by_year(cashflow_slice, "c_pay_acq_const_fiolta")
+    operating_cash = _annual_values_by_year(cashflow_slice, "n_cashflow_act")
+    daa = _annual_values_by_year(fina_slice, "daa")
+
+    result["ocf_positive_years"] = int(sum(1 for value in operating_cash.values() if value > 0))
+
+    overlap = sorted(set(capex) & set(daa))
+    ratios = [capex[year] / daa[year] for year in overlap if daa[year] and daa[year] > 0]
+    if ratios:
+        result["capex_to_daa"] = safe_float(sum(ratios) / len(ratios), 2)
+
+    result["in_capex_cycle"] = bool(
+        result["capex_to_daa"] is not None
+        and result["capex_to_daa"] >= CAPEX_CYCLE_MIN_CAPEX_TO_DAA
+        and result["ocf_positive_years"] >= CAPEX_CYCLE_MIN_OCF_POSITIVE_YEARS
+        and revenue_cagr_pct is not None
+        and revenue_cagr_pct >= CAPEX_CYCLE_MIN_REVENUE_CAGR_PCT
+    )
+    return result
+
+
 def _quality_assessment(
     *,
     is_financial: bool,
@@ -1345,6 +1572,7 @@ def _quality_assessment(
     debt_to_assets: Optional[float],
     value_growth_pct: Optional[float],
     thresholds: Dict[str, float],
+    capex_cycle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     reasons: List[str] = []
     notes: List[str] = []
@@ -1389,10 +1617,20 @@ def _quality_assessment(
             f"低于阈值 {thresholds['min_ocf_to_np']}，盈利质量存疑"
         )
     if fcf_positive_years < thresholds["min_fcf_positive_years"]:
-        reasons.append(
+        shortfall = (
             f"近{years_available}年FCFF为正的年份仅 {fcf_positive_years} 年，"
             f"低于阈值 {thresholds['min_fcf_positive_years']}"
         )
+        if capex_cycle and capex_cycle.get("in_capex_cycle"):
+            # 扩产期：现金是被在建产能吃掉的，不是经营失血。DCF 用 g/ROIC 给增长
+            # 计价、并不减实际资本开支，这里再卡一次就是对同一笔增长重复罚分。
+            notes.append(
+                f"{shortfall}；但资本开支为折旧摊销的 {capex_cycle['capex_to_daa']} 倍、"
+                f"经营现金流 {capex_cycle['ocf_positive_years']} 年为正、收入未萎缩，"
+                "判定为扩产期，该项不参与淘汰"
+            )
+        else:
+            reasons.append(shortfall)
     if debt_to_assets is not None and debt_to_assets > thresholds["max_debt_to_assets"]:
         reasons.append(f"资产负债率 {debt_to_assets} 高于阈值 {thresholds['max_debt_to_assets']}")
 
@@ -1684,6 +1922,13 @@ def screen_value_investing_candidates(
             effective_tax_rate=effective_tax_rate,
         )["values"]
         fcf_positive_years = int(sum(1 for value in canonical_fcff if value > 0))
+        # 扩产期判定用年报序列：capex/D&A 和经营现金流为正的年数都是多年期特征，
+        # 和 FCFF 为正年数看的是同一段窗口，两者必须同源才对得上。
+        capex_cycle = _capex_cycle_assessment(
+            cashflow_slice=cashflow_history,
+            fina_slice=fina_history,
+            revenue_cagr_pct=current_snapshot["revenue_cagr_pct"],
+        )
         ttm_fcff = _fcff_history(
             fina_slice=fina_ttm,
             cashflow_slice=cashflow_ttm,
@@ -1702,6 +1947,7 @@ def screen_value_investing_candidates(
             debt_to_assets=debt_to_assets,
             value_growth_pct=value_growth_pct,
             thresholds=thresholds,
+            capex_cycle=capex_cycle,
         )
 
         if not quality["passes"] and not force_valuation:
@@ -1718,6 +1964,9 @@ def screen_value_investing_candidates(
                     "avg_roic_pct": avg_roic,
                     "wacc_pct": wacc_pct,
                     "value_growth_pct": safe_float(value_growth_pct, 1),
+                    "in_capex_cycle": capex_cycle["in_capex_cycle"],
+                    "capex_to_daa": capex_cycle["capex_to_daa"],
+                    "ocf_positive_years": capex_cycle["ocf_positive_years"],
                     "expected_return_pct": None,
                 }
             )
@@ -1830,6 +2079,26 @@ def screen_value_investing_candidates(
                 expected_return_pct_bear = _scenario_return_pct(bear_valuation)
                 expected_return_pct_bull = _scenario_return_pct(bull_valuation)
 
+        implied = _market_implied_assumptions(
+            is_financial=is_financial,
+            market_cap=market_cap_yuan,
+            pb=pb,
+            snapshot=current_snapshot,
+            wacc=wacc_info["wacc"] if wacc_info else None,
+            cost_of_equity=cost_of_equity,
+            terminal_growth=effective_terminal_growth,
+        )
+        implied_growth_pct = (
+            safe_float(implied["implied_near_term_growth"] * 100.0, 1)
+            if implied["implied_near_term_growth"] is not None
+            else None
+        )
+        implied_discount_pct = (
+            safe_float(implied["implied_discount_rate"] * 100.0, 2)
+            if implied["implied_discount_rate"] is not None
+            else None
+        )
+
         candidates.append(
             {
                 "ts_code": ts_code,
@@ -1845,6 +2114,9 @@ def screen_value_investing_candidates(
                 "avg_roic_pct": avg_roic,
                 "ocf_to_net_profit": ocf_to_np,
                 "fcf_positive_years": fcf_positive_years,
+                "in_capex_cycle": capex_cycle["in_capex_cycle"],
+                "capex_to_daa": capex_cycle["capex_to_daa"],
+                "ocf_positive_years": capex_cycle["ocf_positive_years"],
                 "debt_to_assets_pct": debt_to_assets,
                 "value_growth_pct": safe_float(value_growth_pct, 1),
                 "close": safe_float(market_row.get("close")),
@@ -1942,6 +2214,37 @@ def screen_value_investing_candidates(
                     else None
                 ),
                 "excess_return_fade_years": FINANCIAL_EXCESS_RETURN_FADE_YEARS if is_financial else None,
+                # --- 反推：要让模型算出的价值等于当前市值，市场得在假设什么 ---
+                "implied_near_term_growth_pct": implied_growth_pct,
+                "implied_growth_status": implied["implied_growth_status"],
+                "implied_growth_gap_pct": (
+                    safe_float(implied_growth_pct - current_snapshot["near_term_growth"] * 100.0, 1)
+                    if implied_growth_pct is not None and current_snapshot["near_term_growth"] is not None
+                    else None
+                ),
+                "implied_roic_pct": (
+                    safe_float(implied["implied_roic"] * 100.0, 2)
+                    if implied["implied_roic"] is not None
+                    else None
+                ),
+                "implied_roic_status": implied["implied_roic_status"],
+                "implied_roic_gap_pct": (
+                    safe_float(implied["implied_roic"] * 100.0 - current_snapshot["roic"] * 100.0, 2)
+                    if implied["implied_roic"] is not None and current_snapshot["roic"] is not None
+                    else None
+                ),
+                "implied_discount_rate_pct": implied_discount_pct,
+                "implied_discount_rate_status": implied["implied_discount_rate_status"],
+                "implied_discount_rate_gap_pct": (
+                    safe_float(implied_discount_pct - wacc_pct, 2)
+                    if implied_discount_pct is not None and wacc_pct is not None
+                    else None
+                ),
+                "implied_cost_of_equity_pct": (
+                    safe_float(implied["implied_cost_of_equity"] * 100.0, 2)
+                    if implied["implied_cost_of_equity"] is not None
+                    else None
+                ),
                 "market_cap_yi": safe_float(market_cap_yuan / 1e8, 2) if market_cap_yuan else None,
                 "dcf_unavailable_reason": dcf_unavailable_reason,
                 "expected_return_pct": safe_float(expected_return_pct, 1),

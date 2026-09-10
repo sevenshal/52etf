@@ -1,0 +1,48 @@
+.stock-financials {
+  margin-top: 20px;
+}
+
+.stock-financials__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+
+.stock-financials__period {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.3;
+}
+
+.stock-financials__period-date {
+  font-size: 11px;
+  font-weight: 400;
+  color: #8c8c8c;
+}
+
+.stock-financials__label {
+  white-space: nowrap;
+}
+
+.stock-financials__cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stock-financials__cell.is-up {
+  color: #cf1322;
+}
+
+.stock-financials__cell.is-down {
+  color: #389e0d;
+}
+
+.stock-financials__note {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+}

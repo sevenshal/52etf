@@ -13,6 +13,7 @@ from ...core.services.szdt import SZDTService
 from ...core.static_info import get_static_info_snapshot_map
 from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
+from ...core.services.a_stock_financials import DEFAULT_PERIOD_COUNT, load_a_stock_financials
 from ...core.services.tushare import TushareService
 from sqlalchemy.orm import Session
 
@@ -208,6 +209,22 @@ def get_a_stock_summary(
         "dv_ratio": _safe_quote_number(latest.get("dv_ratio")) if latest else None,
         "dv_ttm": _safe_quote_number(latest.get("dv_ttm")) if latest else None,
     }
+
+
+@router.get("/a-stock/financials/{symbol}")
+def get_a_stock_financials(
+    symbol: str,
+    periods: int = Query(default=DEFAULT_PERIOD_COUNT, ge=1, le=20, description="返回最近几期报告"),
+    annual_only: bool = Query(default=False, description="只看年报"),
+    _: str = Depends(valid_account),
+):
+    """返回个股最近若干报告期的三张表核心数据与盈利能力指标。
+
+    注意口径：A股定期报告的利润表/现金流量表是**年初至今累计**，非年报那几列是当期
+    累计数而非全年；财务指标里的比率同理是该报告期口径，不是年化值。需要滚动12个月
+    口径的估值走 /api/value-investing/stock/{ts_code}。
+    """
+    return load_a_stock_financials(symbol, periods=periods, annual_only=annual_only)
 
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])

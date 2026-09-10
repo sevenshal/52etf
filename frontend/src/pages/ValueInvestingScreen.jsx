@@ -71,10 +71,17 @@ const buildColumns = () => [
   {
     title: '股票',
     key: 'name',
-    width: 160,
+    width: 170,
     render: (_, record) => (
       <Space direction="vertical" size={0}>
-        <Text strong>{record.name || record.ts_code}</Text>
+        <Space size={4}>
+          <Text strong>{record.name || record.ts_code}</Text>
+          {record.in_capex_cycle && (
+            <Tooltip title={`资本开支为折旧摊销的 ${formatNumber(record.capex_to_daa)} 倍、经营现金流 ${record.ocf_positive_years} 年为正、收入未萎缩：自由现金流为负是被在建产能吃掉的，不是经营失血，FCFF 那一项不参与淘汰`}>
+              <Tag color="gold" style={{ marginInlineEnd: 0 }}>扩产</Tag>
+            </Tooltip>
+          )}
+        </Space>
         <XueqiuStockLink symbol={record.ts_code}>{record.ts_code}</XueqiuStockLink>
       </Space>
     ),
