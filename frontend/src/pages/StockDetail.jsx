@@ -210,6 +210,7 @@ const StockDetail = () => {
           valuationFillMode={isAStock ? 'forward' : 'exact'}
           valuationDateOffsetDays={isAStock ? 0 : -1}
           realtimeQuote={isAStock ? quotes[normalizedSymbol] : null}
+          eventsUrl={isAStock ? `/api/stock/a-stock/chart-events/${normalizedSymbol}` : undefined}
           onKlinesChange={setKlines}
           height={600}
         />

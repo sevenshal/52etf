@@ -12,6 +12,8 @@ import {
 } from '../utils/klines';
 import { appendNineTurnAtr } from '../utils/nineTurn';
 import { DEFAULT_MACD_PARAMS, calculateMacd } from '../utils/macd';
+import { buildEventMarkers } from '../utils/klineEvents';
+import KlineEventDrawer from './KlineEventDrawer';
 
 const POC_WINDOW_OPTIONS = [
   { label: '125', value: 125 },
@@ -25,6 +27,48 @@ const UP_COLOR = '#ef232a';
 const DOWN_COLOR = '#14b143';
 const DIF_COLOR = '#f5a623';
 const DEA_COLOR = '#1890ff';
+const RESEARCH_SERIES_NAME = '研报';
+const FINANCIAL_SERIES_NAME = '财报';
+const RESEARCH_COLOR = '#f0a54a';
+const FINANCIAL_COLOR = '#7b61c9';
+const EMPTY_EVENTS = { research_days: [], financial_reports: [] };
+// 副图图例：放在各自副图正上方的缝隙里，只管本副图的系列，不和主图的 K线/MA20 混在一起
+const SUB_LEGEND_STYLE = { left: '10%', itemWidth: 12, itemHeight: 8, itemGap: 12, textStyle: { fontSize: 11 } };
+
+/** 在 K 线最高价上方画一个圆形标记，数量 >1 时右上角加红色角标（像券商 App 那样） */
+const buildEventSeries = (name, markers, highs, color, glyph) => ({
+  name,
+  type: 'custom',
+  xAxisIndex: 0,
+  yAxisIndex: 0,
+  z: 20,
+  itemStyle: { color },
+  tooltip: { show: false },
+  data: markers.map(marker => [marker.index, highs[marker.index] ?? 0, marker.slot, marker.count]),
+  encode: { x: 0, y: 1 },
+  renderItem: (params, api) => {
+    const [x, y] = api.coord([api.value(0), api.value(1)]);
+    const cy = y - 16 - api.value(2) * 24;
+    const count = api.value(3);
+    const children = [
+      { type: 'circle', shape: { cx: x, cy, r: 9 }, style: { fill: color, stroke: '#fff', lineWidth: 1.5 } },
+      {
+        type: 'text',
+        style: { text: glyph, x, y: cy, fill: '#fff', fontSize: 11, fontWeight: 'bold', align: 'center', verticalAlign: 'middle' },
+      },
+    ];
+    if (count > 1) {
+      children.push(
+        { type: 'circle', shape: { cx: x + 8, cy: cy - 8, r: 6.5 }, style: { fill: '#f5222d', stroke: '#fff', lineWidth: 1 } },
+        {
+          type: 'text',
+          style: { text: count > 99 ? '99+' : String(count), x: x + 8, y: cy - 8, fill: '#fff', fontSize: 9, align: 'center', verticalAlign: 'middle' },
+        },
+      );
+    }
+    return { type: 'group', children, cursor: 'pointer' };
+  },
+});
 
 const toPositiveNumber = (value) => {
   if (value === null || value === undefined || value === '') return null;
@@ -131,6 +175,7 @@ const StockKlineChart = ({
   valuationDateOffsetDays = -1,
   onKlinesChange,
   realtimeQuote,
+  eventsUrl,
   height = 600,
 }) => {
   const [loading, setLoading] = useState(true);
@@ -142,7 +187,34 @@ const StockKlineChart = ({
   const [enableTurnoverDecay, setEnableTurnoverDecay] = useState(true);
   const [macdParams, setMacdParams] = useState(DEFAULT_MACD_PARAMS);
   const [chartOption, setChartOption] = useState({});
+  const [chartEvents, setChartEvents] = useState(EMPTY_EVENTS);
+  const [activeEvent, setActiveEvent] = useState(null);
   const zoomRef = useRef(null);
+  // 图表点击回调在 onChartReady 时只绑定一次，最新的标记和日期经 ref 传进去
+  const eventMarkersRef = useRef({ dates: [], research: [], financial: [] });
+
+  useEffect(() => {
+    setChartEvents(EMPTY_EVENTS);
+    setActiveEvent(null);
+    if (!eventsUrl) return undefined;
+    let cancelled = false;
+    request.get(eventsUrl, {
+      params: {
+        start_date: dayjs().subtract(5, 'year').format('YYYY-MM-DD'),
+        end_date: dayjs().format('YYYY-MM-DD'),
+      },
+    })
+      .then(({ data }) => {
+        if (!cancelled) {
+          setChartEvents({
+            research_days: data?.research_days || [],
+            financial_reports: data?.financial_reports || [],
+          });
+        }
+      })
+      .catch(error => console.error('获取K线事件标记失败:', error));
+    return () => { cancelled = true; };
+  }, [eventsUrl]);
 
   const fetchKlines = useCallback(async () => {
     setLoading(true);
@@ -343,6 +415,7 @@ const StockKlineChart = ({
         type: 'bar',
         xAxisIndex: 1,
         yAxisIndex: 1,
+        itemStyle: { color: UP_COLOR },
         data: volumeData
       },
       {
@@ -406,6 +479,7 @@ const StockKlineChart = ({
         xAxisIndex: 2,
         yAxisIndex: 2,
         data: macdHistogramData,
+        itemStyle: { color: UP_COLOR },
         barWidth: '60%',
         tooltip: { show: false },
         markLine: {
@@ -424,6 +498,7 @@ const StockKlineChart = ({
         data: dif,
         symbol: 'none',
         connectNulls: false,
+        itemStyle: { color: DIF_COLOR },
         lineStyle: { color: DIF_COLOR, width: 1 },
         tooltip: { show: false },
       },
@@ -435,10 +510,25 @@ const StockKlineChart = ({
         data: dea,
         symbol: 'none',
         connectNulls: false,
+        itemStyle: { color: DEA_COLOR },
         lineStyle: { color: DEA_COLOR, width: 1 },
         tooltip: { show: false },
       },
     );
+
+    // 研报/财报标记：画在当天 K 线最高价上方，点击打开侧栏
+    const eventMarkers = buildEventMarkers(dates, chartEvents.research_days, chartEvents.financial_reports);
+    eventMarkersRef.current = { dates, ...eventMarkers };
+    const highs = processedKlines.map(item => toFiniteNumber(item.high));
+    const eventLegendNames = [];
+    if (eventMarkers.financial.length) {
+      eventLegendNames.push(FINANCIAL_SERIES_NAME);
+      series.push(buildEventSeries(FINANCIAL_SERIES_NAME, eventMarkers.financial, highs, FINANCIAL_COLOR, '财'));
+    }
+    if (eventMarkers.research.length) {
+      eventLegendNames.push(RESEARCH_SERIES_NAME);
+      series.push(buildEventSeries(RESEARCH_SERIES_NAME, eventMarkers.research, highs, RESEARCH_COLOR, '研'));
+    }
 
     const indicatorLegendNames = [];
     const getSegmentPrice = value => (value && typeof value === 'object' ? value.price : value);
@@ -740,17 +830,16 @@ const StockKlineChart = ({
           return result;
         }
       },
-      legend: {
+      legend: [{
+        type: 'scroll',
+        left: '10%',
+        right: '8%',
         data: [
           'K线',
           'MA20',
-          '成交量',
-          VOLUME_BASELINE_SERIES_NAME,
-          MACD_HISTOGRAM_SERIES_NAME,
-          'DIF',
-          'DEA',
           '连续走强',
           '连续走弱',
+          ...eventLegendNames,
           ...indicatorLegendNames,
           ...(hasFairValueHi ? ['估值上限'] : []),
           ...(hasFairValueLo ? ['估值下限'] : []),
@@ -762,12 +851,24 @@ const StockKlineChart = ({
         selected: {
           '最近支撑': false,
           '最近压力': false,
+          // 估值线默认不画：主图上一共六条估值线，全开会把 K 线本身淹没，需要时再点开
+          '估值上限': false,
+          '估值下限': false,
           '下财年估值上限': false,
           '下财年估值下限': false,
           '下下财年估值上限': false,
           '下下财年估值下限': false,
         }
-      },
+      }, {
+        ...SUB_LEGEND_STYLE,
+        top: '53.5%',
+        data: ['成交量', VOLUME_BASELINE_SERIES_NAME],
+      }, {
+        ...SUB_LEGEND_STYLE,
+        top: '70.5%',
+        data: [MACD_HISTOGRAM_SERIES_NAME, 'DIF', 'DEA'],
+        formatter: name => (name === MACD_HISTOGRAM_SERIES_NAME ? `${macdLabel} 柱` : name),
+      }],
       // 三个 grid 上下叠放：主图 / 成交量 / MACD，日期标签只留在最下面那个副图上，
       // 中间两处重复的日期轴纯属噪声。
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
@@ -816,6 +917,9 @@ const StockKlineChart = ({
       yAxis: [
         {
           scale: true,
+          // 有研报/财报标记时给顶部留白：标记画在最高价上方(叠两层时约 50px)，
+          // 不留白的话窗口里最高那根 K 线上的标记会顶出主图、压到图例上
+          boundaryGap: ['3%', eventLegendNames.length ? '20%' : '3%'],
           splitArea: { show: true }
         },
         {
@@ -855,6 +959,7 @@ const StockKlineChart = ({
       series
     };
   }, [
+    chartEvents,
     macdParams,
     processedKlines,
     showSupportResistance,
@@ -879,6 +984,12 @@ const StockKlineChart = ({
     chart.on('click', params => {
       if (params?.seriesName !== 'K线') {
         chart.dispatchAction({ type: 'hideTip' });
+      }
+      if (params?.seriesName === RESEARCH_SERIES_NAME || params?.seriesName === FINANCIAL_SERIES_NAME) {
+        const { dates, research, financial } = eventMarkersRef.current;
+        const kind = params.seriesName === RESEARCH_SERIES_NAME ? 'research' : 'financial';
+        const marker = (kind === 'research' ? research : financial)[params.dataIndex];
+        if (marker) setActiveEvent({ kind, tradeDate: dates[marker.index], items: marker.items });
       }
     });
     chart.on('datazoom', () => {
@@ -1014,6 +1125,7 @@ const StockKlineChart = ({
           style={{ height }}
         />
       )}
+      <KlineEventDrawer event={activeEvent} onClose={() => setActiveEvent(null)} />
     </div>
   );
 };

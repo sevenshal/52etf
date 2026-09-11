@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
 import math
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+from datetime import date as calendar_date
 from ...core.database import StockFavorite, StockEVC, get_db, LongPortAccount
 from .account import valid_account
 from sqlalchemy import func, text
@@ -14,6 +15,7 @@ from ...core.static_info import get_static_info_snapshot_map
 from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
 from ...core.services.a_stock_financials import DEFAULT_PERIOD_COUNT, load_a_stock_financials
+from ...core.services.a_stock_chart_events import load_a_stock_chart_events
 from ...core.services.tushare import TushareService
 from sqlalchemy.orm import Session
 
@@ -225,6 +227,28 @@ def get_a_stock_financials(
     口径的估值走 /api/value-investing/stock/{ts_code}。
     """
     return load_a_stock_financials(symbol, periods=periods, annual_only=annual_only)
+
+
+@router.get("/a-stock/chart-events/{symbol}")
+def get_a_stock_chart_events(
+    symbol: str,
+    start_date: Optional[calendar_date] = Query(default=None, description="默认近5年"),
+    end_date: Optional[calendar_date] = Query(default=None, description="默认今天"),
+    _: str = Depends(valid_account),
+):
+    """K 线图事件标记：区间内的卖方研报(按日分组)与定期报告首次披露。
+
+    研报目标价/EPS 已按写研报时的复权因子换算到前复权口径，和 K 线同一口径；
+    财报数值里非年报期是年初至今累计。
+    """
+    end = end_date or calendar_date.today()
+    start = start_date or (end - timedelta(days=365 * 5 + 2))
+    analytics_db = AnalyticsSession()
+    try:
+        return load_a_stock_chart_events(analytics_db, symbol, start=start, end=end)
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
 
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])

@@ -91,6 +91,7 @@ const TABS = [
       row('income_tax', '所得税费用', pick('income', 'income_tax'), 'amount'),
       row('n_income', '净利润', pick('income', 'n_income'), 'amount'),
       row('n_income_attr_p', '归母净利润', pick('income', 'n_income_attr_p'), 'amount', { strong: true }),
+      row('profit_dedt', '扣非归母净利润', pick('indicator', 'profit_dedt'), 'amount'),
       row('minority_gain', '少数股东损益', pick('income', 'minority_gain'), 'amount'),
       row('ebitda', 'EBITDA', pick('income', 'ebitda'), 'amount'),
     ],
