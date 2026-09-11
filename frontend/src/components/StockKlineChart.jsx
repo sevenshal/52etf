@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Form, InputNumber, Popover, Segmented, Space, Spin, Switch } from 'antd';
 import { InfoCircleOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -13,6 +13,8 @@ import {
 import { appendNineTurnAtr } from '../utils/nineTurn';
 import { DEFAULT_MACD_PARAMS, calculateMacd } from '../utils/macd';
 import { buildEventMarkers } from '../utils/klineEvents';
+import { buildKlinePaneLayout } from '../utils/klineLayout';
+import { XUEQIU_DIRECTIONS, XUEQIU_DIRECTION_META, alignXueqiuHistory } from '../utils/xueqiuHoldings';
 import KlineEventDrawer from './KlineEventDrawer';
 
 const POC_WINDOW_OPTIONS = [
@@ -32,6 +34,11 @@ const FINANCIAL_SERIES_NAME = '财报';
 const RESEARCH_COLOR = '#f0a54a';
 const FINANCIAL_COLOR = '#7b61c9';
 const EMPTY_EVENTS = { research_days: [], financial_reports: [] };
+const XUEQIU_WEIGHT_SERIES_NAME = '雪球综合权重';
+const XUEQIU_DIRECTION_SERIES_NAME = '5日权价比方向';
+const XUEQIU_WEIGHT_COLOR = '#1677ff';
+// 雪球历史接口一次最多 2000 条；5 年 K 线约 1250 个交易日，1300 足够覆盖
+const XUEQIU_HISTORY_LIMIT = 1300;
 // 副图图例：放在各自副图正上方的缝隙里，只管本副图的系列，不和主图的 K线/MA20 混在一起
 const SUB_LEGEND_STYLE = { left: '10%', itemWidth: 12, itemHeight: 8, itemGap: 12, textStyle: { fontSize: 11 } };
 
@@ -176,6 +183,7 @@ const StockKlineChart = ({
   onKlinesChange,
   realtimeQuote,
   eventsUrl,
+  xueqiuHistoryUrl,
   height = 600,
 }) => {
   const [loading, setLoading] = useState(true);
@@ -188,6 +196,7 @@ const StockKlineChart = ({
   const [macdParams, setMacdParams] = useState(DEFAULT_MACD_PARAMS);
   const [chartOption, setChartOption] = useState({});
   const [chartEvents, setChartEvents] = useState(EMPTY_EVENTS);
+  const [xueqiuHistory, setXueqiuHistory] = useState([]);
   const [activeEvent, setActiveEvent] = useState(null);
   const zoomRef = useRef(null);
   // 图表点击回调在 onChartReady 时只绑定一次，最新的标记和日期经 ref 传进去
@@ -215,6 +224,19 @@ const StockKlineChart = ({
       .catch(error => console.error('获取K线事件标记失败:', error));
     return () => { cancelled = true; };
   }, [eventsUrl]);
+
+  // 雪球持仓历史：与「雪球持仓」模块同一个接口、同一默认口径(只统计主理人活跃组合)
+  useEffect(() => {
+    setXueqiuHistory([]);
+    if (!xueqiuHistoryUrl) return undefined;
+    let cancelled = false;
+    request.get(xueqiuHistoryUrl, { params: { active_only: true, limit: XUEQIU_HISTORY_LIMIT } })
+      .then(({ data }) => {
+        if (!cancelled) setXueqiuHistory(data?.history || []);
+      })
+      .catch(error => console.error('获取雪球持仓历史失败:', error));
+    return () => { cancelled = true; };
+  }, [xueqiuHistoryUrl]);
 
   const fetchKlines = useCallback(async () => {
     setLoading(true);
@@ -298,6 +320,17 @@ const StockKlineChart = ({
       onKlinesChange(processedKlines);
     }
   }, [processedKlines, onKlinesChange]);
+
+  // 雪球副图只在这只股票真的被雪球组合持有过时才出现，整张图随之加高
+  const xueqiuPoints = useMemo(
+    () => alignXueqiuHistory(processedKlines.map(item => formatDateKey(item.timestamp)), xueqiuHistory),
+    [processedKlines, xueqiuHistory],
+  );
+  const hasXueqiuPane = useMemo(() => xueqiuPoints.some(point => point && point.weight !== null), [xueqiuPoints]);
+  const paneLayout = useMemo(
+    () => buildKlinePaneLayout(height, hasXueqiuPane ? ['volume', 'macd', 'xueqiu'] : ['volume', 'macd']),
+    [height, hasXueqiuPane],
+  );
 
   const getChartOption = useCallback(() => {
     const dates = processedKlines.map(item => formatDateKey(item.timestamp));
@@ -515,6 +548,61 @@ const StockKlineChart = ({
         tooltip: { show: false },
       },
     );
+
+    // 雪球持仓副图：综合权重曲线 + 每个快照日的 5 日权价比方向（新/平/加/吸/抛/减）
+    const xueqiuPaneIndex = paneLayout.indexOf('xueqiu');
+    if (xueqiuPaneIndex >= 0) {
+      series.push(
+        {
+          name: XUEQIU_WEIGHT_SERIES_NAME,
+          type: 'line',
+          xAxisIndex: xueqiuPaneIndex,
+          yAxisIndex: xueqiuPaneIndex,
+          data: xueqiuPoints.map(point => (point ? point.weight : null)),
+          connectNulls: true,
+          symbol: 'none',
+          itemStyle: { color: XUEQIU_WEIGHT_COLOR },
+          lineStyle: { color: XUEQIU_WEIGHT_COLOR, width: 1.5 },
+          areaStyle: { color: XUEQIU_WEIGHT_COLOR, opacity: 0.08 },
+          tooltip: { show: false },
+        },
+        {
+          name: XUEQIU_DIRECTION_SERIES_NAME,
+          type: 'custom',
+          xAxisIndex: xueqiuPaneIndex,
+          yAxisIndex: xueqiuPaneIndex,
+          z: 10,
+          itemStyle: { color: XUEQIU_DIRECTION_META['逆势吸筹'].color },
+          tooltip: { show: false },
+          data: xueqiuPoints
+            .map((point, index) => (point && point.direction && point.weight !== null
+              ? [index, point.weight, XUEQIU_DIRECTIONS.indexOf(point.direction), point.changed ? 1 : 0]
+              : null))
+            .filter(Boolean),
+          encode: { x: 0, y: 1 },
+          renderItem: (params, api) => {
+            const meta = XUEQIU_DIRECTION_META[XUEQIU_DIRECTIONS[api.value(2)]];
+            if (!meta) return null;
+            const [x, y] = api.coord([api.value(0), api.value(1)]);
+            // 缩得很小时每天写一个字会糊成一片：一根 K 线不到 14px 宽时，
+            // 非转折日只画小圆点，方向转折的那天才写字
+            if (api.size([1, 0])[0] < 14 && !api.value(3)) {
+              return { type: 'circle', shape: { cx: x, cy: y, r: 2 }, style: { fill: meta.color } };
+            }
+            return {
+              type: 'group',
+              children: [
+                { type: 'circle', shape: { cx: x, cy: y, r: 7 }, style: { fill: meta.color, stroke: '#fff', lineWidth: 1 } },
+                {
+                  type: 'text',
+                  style: { text: meta.glyph, x, y, fill: '#fff', fontSize: 9, fontWeight: 'bold', align: 'center', verticalAlign: 'middle' },
+                },
+              ],
+            };
+          },
+        },
+      );
+    }
 
     // 研报/财报标记：画在当天 K 线最高价上方，点击打开侧栏
     const eventMarkers = buildEventMarkers(dates, chartEvents.research_days, chartEvents.financial_reports);
@@ -773,6 +861,20 @@ const StockKlineChart = ({
                 </div>
               `;
             }
+            const xueqiuPoint = xueqiuPoints[dataIndex];
+            if (xueqiuPoint && xueqiuPoint.weight !== null) {
+              const meta = XUEQIU_DIRECTION_META[xueqiuPoint.direction];
+              const multiples = xueqiuPoint.weightMultiple !== null && xueqiuPoint.momentumMultiple !== null
+                ? `（权×${formatNumber(xueqiuPoint.weightMultiple, 3)} / 价×${formatNumber(xueqiuPoint.momentumMultiple, 3)}）`
+                : '';
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color: #666;">雪球综合权重：</span><span style="color: ${XUEQIU_WEIGHT_COLOR};">${formatNumber(xueqiuPoint.weight, 2)}%</span>
+                  ${xueqiuPoint.ratio !== null ? `<span style="color:#999;margin-left:8px;">5日权价比 ${formatNumber(xueqiuPoint.ratio, 2)}${multiples}</span>` : ''}
+                  ${meta ? `<span style="color:${meta.color};margin-left:8px;font-weight:bold;">${xueqiuPoint.direction}</span>` : ''}
+                </div>
+              `;
+            }
             if ([2, 3, 4].includes(currentKline.lowCount) && Number.isFinite(currentKline.latestRisingClose)) {
               result += `
                 <div style="margin-bottom: 4px;">
@@ -861,59 +963,41 @@ const StockKlineChart = ({
         }
       }, {
         ...SUB_LEGEND_STYLE,
-        top: '53.5%',
+        top: paneLayout.legendTops.volume,
         data: ['成交量', VOLUME_BASELINE_SERIES_NAME],
       }, {
         ...SUB_LEGEND_STYLE,
-        top: '70.5%',
+        top: paneLayout.legendTops.macd,
         data: [MACD_HISTOGRAM_SERIES_NAME, 'DIF', 'DEA'],
         formatter: name => (name === MACD_HISTOGRAM_SERIES_NAME ? `${macdLabel} 柱` : name),
-      }],
-      // 三个 grid 上下叠放：主图 / 成交量 / MACD，日期标签只留在最下面那个副图上，
-      // 中间两处重复的日期轴纯属噪声。
+      }, ...(xueqiuPaneIndex >= 0 ? [{
+        ...SUB_LEGEND_STYLE,
+        top: paneLayout.legendTops.xueqiu,
+        data: [XUEQIU_WEIGHT_SERIES_NAME, XUEQIU_DIRECTION_SERIES_NAME],
+        formatter: name => (name === XUEQIU_DIRECTION_SERIES_NAME
+          ? `${name}（新进/持平/顺势加仓/逆势吸筹/借涨减仓/减仓）`
+          : name),
+      }] : [])],
+      // 窗格上下叠放：主图 / 成交量 / MACD / (雪球持仓)，像素位置由 buildKlinePaneLayout 统一给出。
+      // 日期标签只留在最下面那个窗格上，中间几处重复的日期轴纯属噪声。
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
-      grid: [
-        { left: '10%', right: '8%', top: '8%', height: '44%' },
-        { left: '10%', right: '8%', top: '57%', height: '12%' },
-        { left: '10%', right: '8%', top: '74%', height: '12%' }
-      ],
-      xAxis: [
-        {
+      grid: paneLayout.grids.map(grid => ({ left: '10%', right: '8%', top: grid.top, height: grid.height })),
+      xAxis: paneLayout.grids.map((grid, index) => {
+        const isLast = index === paneLayout.grids.length - 1;
+        return {
           type: 'category',
-          data: dates,
-          scale: true,
-          boundaryGap: false,
-          axisLine: { onZero: false },
-          axisTick: { show: false },
-          axisLabel: { show: false },
-          splitLine: { show: false },
-          splitNumber: 20,
-          min: 'dataMin',
-          max: 'dataMax'
-        },
-        {
-          type: 'category',
-          gridIndex: 1,
+          gridIndex: index,
           data: dates,
           scale: true,
           boundaryGap: false,
           axisLine: { onZero: false },
           axisTick: { show: false },
           splitLine: { show: false },
-          axisLabel: { show: false }
-        },
-        {
-          type: 'category',
-          gridIndex: 2,
-          data: dates,
-          scale: true,
-          boundaryGap: false,
-          axisLine: { onZero: false },
-          axisTick: { show: false },
-          splitLine: { show: false },
-          splitNumber: 20
-        }
-      ],
+          axisLabel: { show: isLast },
+          ...(index === 0 ? { min: 'dataMin', max: 'dataMax' } : {}),
+          ...(index === 0 || isLast ? { splitNumber: 20 } : {}),
+        };
+      }),
       yAxis: [
         {
           scale: true,
@@ -939,20 +1023,31 @@ const StockKlineChart = ({
           axisTick: { show: false },
           splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
           axisLabel: { fontSize: 10, formatter: value => formatNumber(value, 2) }
-        }
+        },
+        ...(xueqiuPaneIndex >= 0 ? [{
+          scale: true,
+          gridIndex: xueqiuPaneIndex,
+          splitNumber: 2,
+          // 上下各留 15%：方向标记半径 7px，贴着窗格边缘的点会被切掉一半
+          boundaryGap: ['15%', '15%'],
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
+          axisLabel: { fontSize: 10, formatter: value => `${formatNumber(value, 2)}%` }
+        }] : []),
       ],
       dataZoom: [
         {
           type: 'inside',
-          xAxisIndex: [0, 1, 2],
+          xAxisIndex: paneLayout.grids.map((_, index) => index),
           ...zoomRange,
         },
         {
           show: true,
-          xAxisIndex: [0, 1, 2],
+          xAxisIndex: paneLayout.grids.map((_, index) => index),
           type: 'slider',
-          top: '92%',
-          height: 18,
+          top: paneLayout.sliderTop,
+          height: paneLayout.sliderHeight,
           ...zoomRange,
         }
       ],
@@ -961,6 +1056,8 @@ const StockKlineChart = ({
   }, [
     chartEvents,
     macdParams,
+    paneLayout,
+    xueqiuPoints,
     processedKlines,
     showSupportResistance,
     valuationDateOffsetDays,
@@ -1118,11 +1215,11 @@ const StockKlineChart = ({
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}-${macdParams.fast}-${macdParams.slow}-${macdParams.signal}`}
+          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}-${macdParams.fast}-${macdParams.slow}-${macdParams.signal}-${hasXueqiuPane}`}
           option={chartOption}
           notMerge={false}
           onChartReady={handleChartReady}
-          style={{ height }}
+          style={{ height: paneLayout.totalHeight }}
         />
       )}
       <KlineEventDrawer event={activeEvent} onClose={() => setActiveEvent(null)} />
