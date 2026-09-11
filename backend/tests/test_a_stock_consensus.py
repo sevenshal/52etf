@@ -6,6 +6,7 @@ from src.core.services.a_stock_consensus import (
     CONSENSUS_POOL_T,
     CONSENSUS_POOL_T1,
     DisclosureCutoffs,
+    _PriceFactors,
     _aggregate_report_rows,
     _disclosure_cutoffs_as_of,
     _normalize_org_name,
@@ -14,6 +15,7 @@ from src.core.services.a_stock_consensus import (
     build_a_stock_rolling_consensus_history,
     load_a_stock_consensus_detail,
     load_a_stock_consensus_valuation_history_map,
+    load_a_stock_price_factors,
     normalize_a_stock_symbol,
     search_a_stock_consensus_candidates,
 )
@@ -355,6 +357,8 @@ def _search_fake_db(report_rows, captured):
             sql = str(statement)
             if "MAX(trade_date)" in sql:
                 return _Result(scalar=AS_OF)
+            if "a_stock_adj_factor" in sql:
+                return _Result([])
             if "a_stock_income" in sql:
                 captured.setdefault("income_params", params)
                 return _Result(_disclosure_rows(report_rows[0]["ts_code"]))
@@ -469,10 +473,12 @@ def test_valuation_history_map_forward_fills_missing_days_up_to_365_days():
     assert date(2026, 11, 2) not in history
 
 
-def _detail_fake_db(report_rows, disclosures=DISCLOSURES):
+def _detail_fake_db(report_rows, disclosures=DISCLOSURES, factor_rows=()):
     class FakeDb:
         def execute(self, statement, params=None):
             sql = str(statement)
+            if "a_stock_adj_factor" in sql:
+                return _Result(list(factor_rows))
             if "a_stock_income" in sql:
                 return _Result(_disclosure_rows("600612.SH", disclosures))
             if "a_stock_report_rc" in sql:
@@ -509,3 +515,132 @@ def test_consensus_detail_reports_why_valuation_is_unavailable():
     assert detail["status"] == "unavailable"
     assert detail["reason"] == "no_target_price_in_pool"
     assert detail["t1_disclosure_date"] == "2026-04-24"
+
+
+def _factors(*points):
+    return _PriceFactors([day for day, _ in points], [value for _, value in points])
+
+
+# 2026-06-20 除权：10 送 10，复权因子翻倍。
+TEN_FOR_TEN = _factors((date(2025, 1, 2), 1.0), (date(2026, 6, 20), 2.0))
+
+
+def test_price_factors_step_function():
+    assert TEN_FOR_TEN.on_or_before(date(2026, 6, 19)) == 1.0
+    assert TEN_FOR_TEN.on_or_before(date(2026, 6, 20)) == 2.0
+    assert TEN_FOR_TEN.on_or_before(date(2024, 12, 31)) is None
+    assert TEN_FOR_TEN.latest == 2.0
+
+
+def test_load_price_factors_keeps_change_points_per_symbol():
+    captured = {}
+
+    class FakeDb:
+        def execute(self, statement, params=None):
+            captured["sql"] = str(statement)
+            return _Result([
+                {"ts_code": "600612.SH", "trade_date": date(2026, 6, 20), "adj_factor": 2.0},
+                {"ts_code": "600612.SH", "trade_date": date(2025, 1, 2), "adj_factor": 1.0},
+                {"ts_code": "000001.SZ", "trade_date": date(2025, 1, 2), "adj_factor": None},
+            ])
+
+    result = load_a_stock_price_factors(FakeDb(), ["600612.SH", "000001.SZ"], start=date(2025, 1, 1))
+
+    assert "LAG(adj_factor)" in captured["sql"]
+    assert result["600612.SH"] == TEN_FOR_TEN
+    assert "000001.SZ" not in result
+
+
+def test_target_prices_written_before_ex_rights_are_restated_to_current_prices():
+    rows = _report("机构A", date(2026, 5, 10), 40.0, {2026: 2.0, 2027: 2.4})
+    rows += _report("机构B", date(2026, 7, 1), 22.0, {2026: 1.0, 2027: 1.2})
+
+    result = _aggregate_report_rows(rows, AS_OF, _cutoffs(), price_factors=TEN_FOR_TEN, include_details=True)
+
+    current, following, _ = result["horizons"]
+    # 机构 A 的 40 元写在 10 送 10 之前，换算到除权后是 20 元。
+    assert current["lo"] == pytest.approx(20.0)
+    assert current["lo_org"] == "机构A"
+    assert current["hi"] == pytest.approx(22.0)
+    assert following["lo"] == pytest.approx(20.0 * 2.4 / 2.0)
+    assert result["target_price_min"] == pytest.approx(20.0)
+    # 共识 EPS 也换到同一股本口径：A 的 2.0 元对应除权后 1.0 元。
+    assert result["consensus_eps"] == pytest.approx(1.0)
+    view = next(item for item in result["organizations"] if item["org_name"] == "机构A")
+    assert view["target_price_low_raw"] == 40.0
+    assert view["price_adjustment"] == pytest.approx(0.5)
+    assert view["forecasts"][0]["eps"] == 2.0
+    assert view["forecasts"][0]["eps_adjusted"] == pytest.approx(1.0)
+
+
+def test_report_published_on_ex_rights_day_uses_previous_close_basis():
+    rows = _report("机构A", date(2026, 6, 20), 40.0, {2026: 2.0})
+
+    result = _aggregate_report_rows(rows, AS_OF, _cutoffs(), price_factors=TEN_FOR_TEN)
+
+    assert result["target_price_min"] == pytest.approx(20.0)
+
+
+def test_rolling_history_is_expressed_in_forward_adjusted_prices():
+    rows = _report("机构A", date(2026, 5, 10), 40.0, {2026: 2.0, 2027: 2.4})
+
+    history = build_a_stock_rolling_consensus_history(
+        rows,
+        [date(2026, 6, 1), date(2026, 7, 2)],
+        disclosures=DISCLOSURES,
+        price_factors=TEN_FOR_TEN,
+    )
+
+    # K 线是以最新复权因子为锚的前复权价，除权前后估值线都应落在同一口径 20 元上。
+    assert [point["fair_value_lo"] for point in history] == pytest.approx([20.0, 20.0])
+
+
+def test_valuation_history_map_restates_forward_filled_values_across_ex_rights():
+    disclosures = [
+        (date(2024, 10, 30), date(2024, 9, 30)),
+        (date(2025, 4, 25), date(2025, 3, 31)),
+        (date(2025, 8, 28), date(2025, 6, 30)),
+        (date(2025, 10, 30), date(2025, 9, 30)),
+    ]
+    report_rows = _report("机构A", date(2025, 5, 10), 30.0, {2025: 1.0, 2026: 1.2}, symbol="600519.SH")
+    requested = [date(2025, 6, 2), date(2025, 10, 29), date(2025, 11, 3)]
+    market_rows = [{"ts_code": "600519.SH", "trade_date": day, "close": 20.0} for day in requested]
+    factor_rows = [
+        {"ts_code": "600519.SH", "trade_date": date(2024, 1, 2), "adj_factor": 1.0},
+        {"ts_code": "600519.SH", "trade_date": date(2025, 11, 3), "adj_factor": 2.0},
+    ]
+
+    class FakeDb:
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            if "a_stock_adj_factor" in sql:
+                return _Result(factor_rows)
+            if "a_stock_income" in sql:
+                return _Result(_disclosure_rows("600519.SH", disclosures))
+            if "a_stock_report_rc" in sql:
+                return _Result(report_rows)
+            return _Result(market_rows)
+
+    history = load_a_stock_consensus_valuation_history_map(FakeDb(), ["600519.SH"], requested)
+
+    assert history[date(2025, 10, 29)]["600519.SH"]["fair_value_lo"] == pytest.approx(30.0)
+    # 11-03 沿用 10-29 的估值，但当天 10 送 10 除权，旧估值要换到除权后口径。
+    ffilled = history[date(2025, 11, 3)]["600519.SH"]
+    assert ffilled["is_ffilled"] is True
+    assert ffilled["fair_value_lo"] == pytest.approx(15.0)
+
+
+def test_consensus_detail_shows_raw_and_restated_target_prices():
+    rows = _report("机构A", date(2026, 5, 10), 40.0, {2026: 2.0})
+    factor_rows = [
+        {"ts_code": "600612.SH", "trade_date": date(2025, 1, 2), "adj_factor": 1.0},
+        {"ts_code": "600612.SH", "trade_date": date(2026, 6, 20), "adj_factor": 2.0},
+    ]
+
+    detail = load_a_stock_consensus_detail(_detail_fake_db(rows, factor_rows=factor_rows), "600612.SH")
+
+    organization = detail["organizations"][0]
+    assert organization["target_price_low"] == pytest.approx(20.0)
+    assert organization["target_price_low_raw"] == 40.0
+    assert organization["price_adjustment"] == pytest.approx(0.5)
+    assert detail["horizons"][0]["lo"] == pytest.approx(20.0)

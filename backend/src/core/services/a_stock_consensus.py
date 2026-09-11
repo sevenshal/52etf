@@ -4,7 +4,7 @@ import re
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from sqlalchemy import text
 
@@ -23,6 +23,8 @@ FORECAST_HORIZON_LABELS = ("当前财年", "下财年", "下下财年")
 REPORT_FETCH_LOOKBACK_DAYS = 400
 # 取财报披露日时往回拉的天数：要能覆盖最早一个交易日的 T、T-1 两期。
 DISCLOSURE_FETCH_LOOKBACK_DAYS = 800
+# 复权因子比研报多往前取几天，保证最早一篇研报的前一交易日也有因子。
+PRICE_FACTOR_PADDING_DAYS = 10
 # 指数估值里成分股缺估值时沿用上一次估值的最长天数，超过视为无人覆盖。
 VALUATION_FFILL_MAX_DAYS = 365
 
@@ -245,6 +247,86 @@ def load_a_stock_disclosure_dates(
     return {symbol: sorted(set(values)) for symbol, values in disclosures.items()}
 
 
+class _PriceFactors(NamedTuple):
+    """复权因子的阶梯序列(只保留变化点)，用来把不同时点的价格换算到同一口径。
+
+    tushare 的 adj_factor 在每次除权(送转、分红)后变大，原始价格 × 复权因子 即后复权价，
+    所以某天的原始价格 P 换算到 basis 那天的口径 = P × 因子(那天) / 因子(basis)。
+    """
+
+    dates: List[date]
+    values: List[float]
+
+    def on_or_before(self, day: Optional[date]) -> Optional[float]:
+        if day is None:
+            return None
+        index = bisect_right(self.dates, day)
+        return self.values[index - 1] if index else None
+
+    @property
+    def latest(self) -> Optional[float]:
+        return self.values[-1] if self.values else None
+
+
+def _price_scale(source_factor: Optional[float], basis_factor: Optional[float]) -> float:
+    """source 时点的价格换算到 basis 时点口径的系数；缺复权因子时不换算。"""
+    if source_factor is None or basis_factor is None:
+        return 1.0
+    return source_factor / basis_factor
+
+
+def load_a_stock_price_factors(
+    db: Any,
+    symbols: Sequence[str],
+    *,
+    start: date,
+    end: Optional[date] = None,
+) -> Dict[str, _PriceFactors]:
+    """按股票加载复权因子，只取变化点(区间第一天 + 每次除权当天)。"""
+    normalized_symbols = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+    if not normalized_symbols:
+        return {}
+    end_filter = "AND trade_date <= :end" if end is not None else ""
+    points: Dict[str, List[Tuple[date, float]]] = defaultdict(list)
+    for offset in range(0, len(normalized_symbols), 500):
+        chunk = normalized_symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        rows = db.execute(
+            text(
+                f"""
+                SELECT ts_code, trade_date, adj_factor
+                FROM (
+                    SELECT
+                        ts_code,
+                        trade_date,
+                        adj_factor,
+                        LAG(adj_factor) OVER (PARTITION BY ts_code ORDER BY trade_date) AS previous_factor
+                    FROM a_stock_adj_factor
+                    WHERE ts_code IN ({placeholders})
+                      AND trade_date >= :start
+                      {end_filter}
+                      AND adj_factor > 0
+                )
+                WHERE previous_factor IS NULL OR adj_factor <> previous_factor
+                ORDER BY ts_code, trade_date
+                """
+            ),
+            {**symbol_params, "start": start, "end": end},
+        ).mappings().all()
+        for row in rows:
+            symbol = str(row.get("ts_code") or "").strip().upper()
+            day = _row_to_date(row.get("trade_date"))
+            factor = _positive_float(row.get("adj_factor"))
+            if symbol and day is not None and factor is not None:
+                points[symbol].append((day, factor))
+    result: Dict[str, _PriceFactors] = {}
+    for symbol, values in points.items():
+        values.sort()
+        result[symbol] = _PriceFactors([day for day, _ in values], [factor for _, factor in values])
+    return result
+
+
 class _ForecastRow(NamedTuple):
     report_date: date
     org_name: str
@@ -260,6 +342,8 @@ class _ForecastRow(NamedTuple):
     rating: str
     target_low: Optional[float]
     target_high: Optional[float]
+    # 写研报时(前一交易日收盘)的复权因子；目标价、EPS 都是按这个股价口径给的。
+    price_factor: Optional[float] = None
 
     @property
     def report_key(self) -> Tuple[date, str, str, str]:
@@ -270,11 +354,15 @@ class _ForecastRow(NamedTuple):
         return (self.report_date, self.order_key)
 
 
-def _normalize_forecast_rows(rows: Iterable[Mapping[str, Any]]) -> List[_ForecastRow]:
+def _normalize_forecast_rows(
+    rows: Iterable[Mapping[str, Any]],
+    price_factors: Optional[_PriceFactors] = None,
+) -> List[_ForecastRow]:
     """把研报明细行规整成全年预测记录，按研报日期升序。
 
     丢掉：quarter 不是 YYYYQ4 的行、没有机构名或研报日期的行。机构名先按别名归一，
-    后面的机构计数和"同机构取最新"才不会被同一家券商的两个名字骗过。
+    后面的机构计数和"同机构取最新"才不会被同一家券商的两个名字骗过。研报通常引用
+    发布前一交易日的收盘价，所以记下那天的复权因子，供之后按除权换算。
     """
     records: List[_ForecastRow] = []
     for row in rows:
@@ -299,6 +387,9 @@ def _normalize_forecast_rows(rows: Iterable[Mapping[str, Any]]) -> List[_Forecas
             rating=str(row.get("rating") or "").strip(),
             target_low=bounds[0] if bounds else None,
             target_high=bounds[1] if bounds else None,
+            price_factor=(
+                price_factors.on_or_before(report_date - timedelta(days=1)) if price_factors else None
+            ),
         ))
     records.sort(key=lambda record: record.recency)
     return records
@@ -351,6 +442,7 @@ def _forecast_ratio(
 def _organization_views(
     pool: Sequence[_ForecastRow],
     fiscal_years: Sequence[int],
+    basis_factor: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """每家机构取它在池子里最新的一篇带目标价研报，按该研报自己的盈利预测展开财年估值。
 
@@ -377,8 +469,12 @@ def _organization_views(
             latest_by_org[org_name] = (recency, report_rows, bounds)
 
     views: List[Dict[str, Any]] = []
-    for org_name, (_, report_rows, (target_low, target_high)) in latest_by_org.items():
+    for org_name, (_, report_rows, (raw_low, raw_high)) in latest_by_org.items():
         head = report_rows[0]
+        # 目标价按写研报时的股价口径给出；之后送转、分红除权的，按复权因子换算到估值口径，
+        # 否则除权后股价机械下跌、旧目标价不动，会凭空多出"低估"空间。
+        price_adjustment = _price_scale(head.price_factor, basis_factor)
+        target_low, target_high = raw_low * price_adjustment, raw_high * price_adjustment
         by_year: Dict[int, _ForecastRow] = {}
         for row in report_rows:
             by_year[row.fiscal_year] = row
@@ -412,11 +508,15 @@ def _organization_views(
             "rating": next((row.rating for row in report_rows if row.rating), None),
             "target_price_low": target_low,
             "target_price_high": target_high,
+            "target_price_low_raw": raw_low,
+            "target_price_high_raw": raw_high,
+            "price_adjustment": price_adjustment,
             "forecasts": [
                 {
                     "quarter": row.quarter,
                     "fiscal_year": row.fiscal_year,
                     "eps": row.eps,
+                    "eps_adjusted": row.eps * price_adjustment if row.eps is not None else None,
                     "np": row.np,
                     "pe": row.pe,
                 }
@@ -469,18 +569,29 @@ def _horizon_summary(
 def _consensus_forecasts(
     pool: Sequence[_ForecastRow],
     fiscal_years: Sequence[int],
+    basis_factor: Optional[float] = None,
 ) -> Dict[int, Dict[str, Optional[float]]]:
-    """共识盈利预测：同一机构 + 同一 quarter 只用它最新的那条预测，再对机构取均值。"""
+    """共识盈利预测：同一机构 + 同一 quarter 只用它最新的那条预测，再对机构取均值。
+
+    研报 EPS = 预测归母净利 ÷ 写研报时的总股本，送转后旧研报不会重算，所以 EPS 和
+    目标价一样按复权因子换算到同一口径再平均；净利润、市盈率与股本无关，不用换算。
+    """
     latest: Dict[Tuple[str, int], _ForecastRow] = {}
     for record in pool:
         key = (record.org_name, record.fiscal_year)
         current = latest.get(key)
         if current is None or record.recency >= current.recency:
             latest[key] = record
+    def adjusted(record: _ForecastRow, field: str) -> Optional[float]:
+        value = getattr(record, field)
+        if field == "eps" and value is not None:
+            return value * _price_scale(record.price_factor, basis_factor)
+        return value
+
     return {
         fiscal_year: {
             field: _avg(
-                getattr(record, field)
+                adjusted(record, field)
                 for (_, year), record in latest.items()
                 if year == fiscal_year
             )
@@ -495,21 +606,23 @@ def _aggregate_forecast_records(
     as_of: date,
     cutoffs: DisclosureCutoffs,
     *,
+    basis_factor: Optional[float] = None,
     include_details: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """basis_factor 是输出价格口径对应的复权因子：取估值日当天的就是当天原始价格口径。"""
     selected = _select_consensus_pool(records, as_of, cutoffs)
     if selected is None:
         return None
     pool_name, pool_start, pool = selected
     fiscal_years = tuple(as_of.year + offset for offset in range(len(FORECAST_HORIZON_LABELS)))
-    views = _organization_views(pool, fiscal_years)
+    views = _organization_views(pool, fiscal_years, basis_factor)
     if not views:
         return None
     horizons = [
         _horizon_summary(views, offset, fiscal_year)
         for offset, fiscal_year in enumerate(fiscal_years)
     ]
-    forecasts = _consensus_forecasts(pool, fiscal_years)
+    forecasts = _consensus_forecasts(pool, fiscal_years, basis_factor)
     current, following, after_next = (forecasts[year] for year in fiscal_years)
     growth_source = "eps"
     growth_pct = _growth_pct(current["eps"], following["eps"])
@@ -561,12 +674,15 @@ def _aggregate_report_rows(
     as_of: date,
     cutoffs: DisclosureCutoffs,
     *,
+    price_factors: Optional[_PriceFactors] = None,
     include_details: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    """输出按估值日当天的原始价格口径，和当天收盘价直接可比。"""
     return _aggregate_forecast_records(
-        _normalize_forecast_rows(rows),
+        _normalize_forecast_rows(rows, price_factors),
         as_of,
         cutoffs,
+        basis_factor=price_factors.on_or_before(as_of) if price_factors else None,
         include_details=include_details,
     )
 
@@ -589,10 +705,12 @@ def _iter_point_in_time_aggregates(
     records: Sequence[_ForecastRow],
     disclosures: Sequence[Tuple[date, date]],
     trade_dates: Sequence[date],
+    basis_for_day: Optional[Callable[[date], Optional[float]]] = None,
 ):
     """逐个交易日回放共识：只看当天及以前的研报、当天已披露的财报。
 
-    研报集合、财报截面、当前年份都没变时复用上一次的结果，避免每天重算。
+    basis_for_day 给出每天输出价格口径对应的复权因子。研报集合、财报截面、当前年份、
+    价格口径都没变时复用上一次的结果，避免每天重算。产出 (交易日, 聚合结果, 口径因子)。
     """
     report_dates = [record.report_date for record in records]
     cache_key = None
@@ -600,11 +718,14 @@ def _iter_point_in_time_aggregates(
     for trade_day in trade_dates:
         visible = bisect_right(report_dates, trade_day)
         cutoffs = _disclosure_cutoffs_as_of(disclosures, trade_day)
-        key = (visible, cutoffs, trade_day.year)
+        basis = basis_for_day(trade_day) if basis_for_day else None
+        key = (visible, cutoffs, trade_day.year, basis)
         if key != cache_key:
             cache_key = key
-            aggregate = _aggregate_forecast_records(records[:visible], trade_day, cutoffs)
-        yield trade_day, aggregate
+            aggregate = _aggregate_forecast_records(
+                records[:visible], trade_day, cutoffs, basis_factor=basis,
+            )
+        yield trade_day, aggregate, basis
 
 
 def build_a_stock_consensus_candidates(
@@ -612,6 +733,7 @@ def build_a_stock_consensus_candidates(
     latest_trade_date: Optional[date],
     *,
     disclosures: Optional[Mapping[str, Sequence[Tuple[date, date]]]] = None,
+    price_factors: Optional[Mapping[str, _PriceFactors]] = None,
     search_symbol: str = "",
     has_search: bool = False,
     min_market_cap_100m: Optional[float] = 100.0,
@@ -624,6 +746,7 @@ def build_a_stock_consensus_candidates(
     if latest_trade_date is None:
         return []
     disclosures = disclosures or {}
+    price_factors = price_factors or {}
     grouped: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         symbol = str(row.get("ts_code") or "").strip().upper()
@@ -653,6 +776,7 @@ def build_a_stock_consensus_candidates(
             symbol_rows,
             latest_trade_date,
             _disclosure_cutoffs_as_of(disclosures.get(symbol, []), latest_trade_date),
+            price_factors=price_factors.get(symbol),
         )
         if aggregate is None:
             continue
@@ -755,15 +879,23 @@ def build_a_stock_rolling_consensus_history(
     trade_dates: Iterable[date],
     *,
     disclosures: Sequence[Tuple[date, date]] = (),
+    price_factors: Optional[_PriceFactors] = None,
 ) -> List[Dict[str, Any]]:
-    """逐个交易日的共识估值。某天没有估值(T-1 池也空)就不出点，前端按前值填充画线。"""
+    """逐个交易日的共识估值。某天没有估值(T-1 池也空)就不出点，前端按前值填充画线。
+
+    个股 K 线画的是前复权价(a_stock_market_daily_qfq，锚点是最新复权因子)，估值线统一
+    换算到同一个锚点，除权前后的线才能和 K 线对齐。
+    """
     normalized_dates = sorted(set(day for day in trade_dates if day))
-    records = _normalize_forecast_rows(rows)
+    records = _normalize_forecast_rows(rows, price_factors)
     if not normalized_dates or not records:
         return []
+    anchor = price_factors.latest if price_factors else None
     return [
         _history_point(trade_day, aggregate)
-        for trade_day, aggregate in _iter_point_in_time_aggregates(records, disclosures, normalized_dates)
+        for trade_day, aggregate, _ in _iter_point_in_time_aggregates(
+            records, disclosures, normalized_dates, basis_for_day=lambda _day: anchor,
+        )
         if aggregate is not None
     ]
 
@@ -800,6 +932,7 @@ def load_a_stock_consensus_history(
     if not trade_dates:
         return []
     earliest_trade_date = min(trade_dates)
+    report_start = earliest_trade_date - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS)
     rows = db.execute(
         text(
             f"""
@@ -812,7 +945,7 @@ def load_a_stock_consensus_history(
         ),
         {
             "symbol": normalized_symbol,
-            "report_start": earliest_trade_date - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS),
+            "report_start": report_start,
         },
     ).mappings().all()
     disclosures = load_a_stock_disclosure_dates(
@@ -820,10 +953,14 @@ def load_a_stock_consensus_history(
         [normalized_symbol],
         since=earliest_trade_date - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
     )
+    price_factors = load_a_stock_price_factors(
+        db, [normalized_symbol], start=report_start - timedelta(days=PRICE_FACTOR_PADDING_DAYS),
+    )
     return build_a_stock_rolling_consensus_history(
         rows,
         trade_dates,
         disclosures=disclosures.get(normalized_symbol, []),
+        price_factors=price_factors.get(normalized_symbol),
     )
 
 
@@ -878,7 +1015,15 @@ def load_a_stock_consensus_detail(db: Any, symbol: str) -> Dict[str, Any]:
         "t1_period_label": _period_label(cutoffs.t1_period),
         "t1_disclosure_date": _date_to_iso(cutoffs.t1_date),
     }
-    aggregate = _aggregate_report_rows(rows, as_of, cutoffs, include_details=True)
+    price_factors = load_a_stock_price_factors(
+        db,
+        [normalized_symbol],
+        start=as_of - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS + PRICE_FACTOR_PADDING_DAYS),
+        end=as_of,
+    ).get(normalized_symbol)
+    aggregate = _aggregate_report_rows(
+        rows, as_of, cutoffs, price_factors=price_factors, include_details=True,
+    )
     if aggregate is None:
         payload.update(
             status="unavailable",
@@ -918,6 +1063,25 @@ def _index_valuation_payload(symbol: str, aggregate: Mapping[str, Any]) -> Dict[
         "organization_count": aggregate.get("organization_count"),
         "pool": aggregate.get("pool"),
         "is_stale": aggregate.get("is_stale"),
+    }
+
+
+_INDEX_PRICE_FIELDS = (
+    "fair_value_lo", "fair_value_mid", "fair_value_hi",
+    "forward_next_fy_lo", "forward_next_fy_mid", "forward_next_fy_hi",
+)
+
+
+def _rescale_price_fields(payload: Dict[str, Any], scale: float) -> Dict[str, Any]:
+    if abs(scale - 1.0) < FLOAT_COMPARE_EPSILON:
+        return payload
+    return {
+        **payload,
+        **{
+            field: payload[field] * scale
+            for field in _INDEX_PRICE_FIELDS
+            if payload.get(field) is not None
+        },
     }
 
 
@@ -988,6 +1152,12 @@ def load_a_stock_consensus_valuation_map(
         list(rows_by_symbol),
         since=latest_trade_date - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
     )
+    price_factors = load_a_stock_price_factors(
+        db,
+        list(rows_by_symbol),
+        start=latest_trade_date - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS + PRICE_FACTOR_PADDING_DAYS),
+        end=latest_trade_date,
+    )
     result: Dict[str, Dict[str, Any]] = {}
     for symbol, symbol_rows in rows_by_symbol.items():
         close = closes.get(symbol)
@@ -995,6 +1165,7 @@ def load_a_stock_consensus_valuation_map(
             symbol_rows,
             latest_trade_date,
             _disclosure_cutoffs_as_of(disclosures.get(symbol, []), latest_trade_date),
+            price_factors=price_factors.get(symbol),
         )
         if aggregate is None or close is None:
             continue
@@ -1053,34 +1224,45 @@ def load_a_stock_consensus_valuation_history_map(
         list(rows_by_symbol),
         since=warmup_start - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
     )
+    price_factors = load_a_stock_price_factors(
+        db,
+        list(rows_by_symbol),
+        start=warmup_start - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS + PRICE_FACTOR_PADDING_DAYS),
+        end=end_date,
+    )
     requested = set(requested_dates)
     replay_dates = sorted(requested | {day for day in market_by_date if day <= end_date})
 
     result: Dict[date, Dict[str, Dict[str, Any]]] = defaultdict(dict)
     for symbol, symbol_rows in rows_by_symbol.items():
-        records = _normalize_forecast_rows(symbol_rows)
+        symbol_factors = price_factors.get(symbol)
+        records = _normalize_forecast_rows(symbol_rows, symbol_factors)
         if not records:
             continue
         last_payload: Optional[Dict[str, Any]] = None
         last_valued_day: Optional[date] = None
+        last_basis: Optional[float] = None
         last_aggregate: Optional[Dict[str, Any]] = None
-        for trade_day, aggregate in _iter_point_in_time_aggregates(
+        for trade_day, aggregate, basis in _iter_point_in_time_aggregates(
             records,
             disclosures.get(symbol, []),
             replay_dates,
+            basis_for_day=symbol_factors.on_or_before if symbol_factors else None,
         ):
             if aggregate is not None:
                 if aggregate is not last_aggregate:
                     last_aggregate = aggregate
                     last_payload = _index_valuation_payload(symbol, aggregate)
-                last_valued_day = trade_day
+                last_valued_day, last_basis = trade_day, basis
                 payload, is_ffilled = last_payload, False
             elif (
                 last_payload is not None
                 and last_valued_day is not None
                 and (trade_day - last_valued_day).days <= VALUATION_FFILL_MAX_DAYS
             ):
-                payload, is_ffilled = last_payload, True
+                # 沿用期间发生了除权的，把旧估值换算到当天的价格口径。
+                payload = _rescale_price_fields(last_payload, _price_scale(last_basis, basis))
+                is_ffilled = True
             else:
                 continue
             if trade_day not in requested:
@@ -1217,15 +1399,23 @@ def search_a_stock_consensus_candidates(
             "name_pattern": f"%{name_search}%",
         },
     ).mappings().all()
+    symbols = sorted({str(row.get("ts_code") or "").strip().upper() for row in rows})
     disclosures = load_a_stock_disclosure_dates(
         db,
-        sorted({str(row.get("ts_code") or "").strip().upper() for row in rows}),
+        symbols,
         since=latest_trade_date - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
+    )
+    price_factors = load_a_stock_price_factors(
+        db,
+        symbols,
+        start=latest_trade_date - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS + PRICE_FACTOR_PADDING_DAYS),
+        end=latest_trade_date,
     )
     return build_a_stock_consensus_candidates(
         rows,
         latest_trade_date,
         disclosures=disclosures,
+        price_factors=price_factors,
         search_symbol=search_symbol,
         has_search=has_search,
         min_market_cap_100m=min_market_cap_100m,

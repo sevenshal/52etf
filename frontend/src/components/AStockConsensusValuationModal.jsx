@@ -98,8 +98,21 @@ const AStockConsensusValuationModal = ({
     {
       title: '目标价',
       key: 'target_price',
-      width: 110,
-      render: (_, record) => formatRange(record.target_price_low, record.target_price_high),
+      width: 160,
+      render: (_, record) => {
+        const restated = formatRange(record.target_price_low, record.target_price_high);
+        const adjustment = toNumber(record.price_adjustment);
+        if (adjustment === null || Math.abs(adjustment - 1) < 0.005) return restated;
+        const raw = formatRange(record.target_price_low_raw, record.target_price_high_raw);
+        return (
+          <Tooltip title={`研报原始目标价 ${raw}；研报发布后发生了除权（送转/分红），已按复权因子 ×${adjustment.toFixed(4)} 换算到当前股价口径`}>
+            <span>
+              {restated}
+              <Text type="secondary" style={{ fontSize: 12, marginLeft: 4 }}>（原 {raw}）</Text>
+            </span>
+          </Tooltip>
+        );
+      },
     },
     {
       title: '盈利预测指引',
@@ -182,7 +195,8 @@ const AStockConsensusValuationModal = ({
       />
       <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         每家机构只取它在研报池里最新一篇带目标价的研报；当前财年估值 = 目标价，下财年 / 下下财年
-        = 目标价 × 该研报对应财年 EPS ÷ 当前财年 EPS（缺 EPS 时用净利润之比）。上下限分别取各家机构的最低 / 最高值。
+        = 目标价 × 该研报对应财年 EPS ÷ 当前财年 EPS（缺 EPS 时用净利润之比）。研报发布后发生除权的，目标价按复权因子
+        换算到当前股价口径；盈利预测指引展示研报原始 EPS。上下限分别取各家机构的最低 / 最高值。
       </Text>
     </Modal>
   );
