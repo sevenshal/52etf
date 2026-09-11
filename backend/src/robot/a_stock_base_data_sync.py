@@ -159,6 +159,15 @@ def _year_chunks(start_date: date, end_date: date) -> Iterable[Tuple[date, date]
         current = chunk_end + timedelta(days=1)
 
 
+def _month_chunks(start_date: date, end_date: date) -> Iterable[Tuple[date, date]]:
+    current = start_date
+    while current <= end_date:
+        next_month = date(current.year + current.month // 12, current.month % 12 + 1, 1)
+        chunk_end = min(next_month - timedelta(days=1), end_date)
+        yield current, chunk_end
+        current = chunk_end + timedelta(days=1)
+
+
 def _quote_duckdb_identifier(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
@@ -2390,7 +2399,9 @@ class AStockBaseDataSyncService:
                 "latest_report_date": latest_report_date.isoformat() if latest_report_date else None,
             }
 
-        jobs = list(_year_chunks(report_start, end_value))
+        # 按月切：tushare report_rc 单次查询最多翻到约 10 万行，一整年有 35~45 万行，
+        # 按年拉只会留下每年最新的 10 万行(7 月以前全丢)。单月峰值(4 月年报季)约 4.5 万行。
+        jobs = list(_month_chunks(report_start, end_value))
         saved_rows = 0
         fetched_rows = 0
         errors: List[Dict[str, str]] = []

@@ -64,6 +64,9 @@ TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_REPORT_RC_MAX_REQUESTS_PER_MINUTE", "120")),
 )
+# report_rc 的 offset 超过 100000 直接报「查询数据失败，请确认参数」(2026-09 实测)，
+# 单次查询最多只能翻到 offset=100000 那一页，再往后的行拿不到。
+TUSHARE_REPORT_RC_MAX_OFFSET = 100000
 TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR = max(
     1,
     int(os.getenv("TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR", "27")),
@@ -929,6 +932,53 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "name"])
 
+    def _fetch_report_rc_pages(
+        self,
+        start_value: date,
+        end_value: date,
+        symbol: Optional[str],
+        limit: int,
+    ):
+        """翻页取一个日期区间，返回 (已取到的页, 中途异常, 是否撞到 offset 上限)。"""
+        fields = (
+            "ts_code,name,report_date,report_title,report_type,classify,org_name,"
+            "author_name,quarter,op_rt,op_pr,tp,np,eps,pe,rd,roe,ev_ebitda,"
+            "rating,max_price,min_price,imp_dg,create_time"
+        )
+        frames = []
+        offset = 0
+        while True:
+            try:
+                self._report_rc_rate_limiter.wait()
+                kwargs = {
+                    "start_date": start_value.strftime("%Y%m%d"),
+                    "end_date": end_value.strftime("%Y%m%d"),
+                    "fields": fields,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                if symbol:
+                    kwargs["ts_code"] = symbol
+                frame = self.pro.report_rc(**kwargs)
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare report_rc fetch failed for %s %s~%s offset=%s: %s",
+                    symbol or "ALL",
+                    start_value,
+                    end_value,
+                    offset,
+                    exc,
+                )
+                return frames, exc, False
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return frames, None, False
+            frames.append(frame)
+            if len(frame) < limit:
+                return frames, None, False
+            offset += limit
+            if offset > TUSHARE_REPORT_RC_MAX_OFFSET:
+                return frames, None, True
+
     def get_a_stock_report_rc_range_frame(
         self,
         start_date: date,
@@ -944,49 +994,38 @@ class TushareService(QuoteProvider):
         if not start_value or not end_value or start_value > end_value:
             return pd.DataFrame()
 
-        fields = (
-            "ts_code,name,report_date,report_title,report_type,classify,org_name,"
-            "author_name,quarter,op_rt,op_pr,tp,np,eps,pe,rd,roe,ev_ebitda,"
-            "rating,max_price,min_price,imp_dg,create_time"
-        )
-        frames = []
-        offset = 0
         limit = max(1, int(limit or 3000))
-        first_error = None
-        while True:
-            try:
-                self._report_rc_rate_limiter.wait()
-                kwargs = {
-                    "start_date": start_value.strftime("%Y%m%d"),
-                    "end_date": end_value.strftime("%Y%m%d"),
-                    "fields": fields,
-                    "limit": limit,
-                    "offset": offset,
-                }
-                if symbol:
-                    kwargs["ts_code"] = symbol
-                frame = self.pro.report_rc(**kwargs)
-            except Exception as exc:
-                first_error = exc
-                self.logger.warning(
-                    "Tushare report_rc fetch failed for %s %s~%s offset=%s: %s",
-                    symbol or "ALL",
-                    start_value,
-                    end_value,
-                    offset,
-                    exc,
+        frames = []
+        pending = [(start_value, end_value)]
+        while pending:
+            range_start, range_end = pending.pop()
+            range_frames, error, capped = self._fetch_report_rc_pages(range_start, range_end, symbol, limit)
+            if capped:
+                # 这段区间的行数超过了 offset 上限能翻到的范围：按日期对半拆开重取，
+                # 已取到的只是区间里最新的那部分，丢掉以免只保留尾部。
+                if range_start < range_end:
+                    middle = range_start + timedelta(days=(range_end - range_start).days // 2)
+                    self.logger.info(
+                        "Tushare report_rc %s %s~%s exceeds offset cap, splitting at %s",
+                        symbol or "ALL",
+                        range_start,
+                        range_end,
+                        middle,
+                    )
+                    pending.append((middle + timedelta(days=1), range_end))
+                    pending.append((range_start, middle))
+                    continue
+                error = RuntimeError(
+                    f"Tushare report_rc {symbol or 'ALL'} {range_start} has more rows than "
+                    f"offset cap {TUSHARE_REPORT_RC_MAX_OFFSET} allows; result is truncated"
                 )
-                break
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
-                break
-            frames.append(frame)
-            if len(frame) < limit:
-                break
-            offset += limit
+                self.logger.error("%s", error)
+            if error is not None and raise_on_error:
+                # 中途失败时手里只有区间最新的若干页，静默返回会让上层误以为这段已经同步完整。
+                raise error
+            frames.extend(range_frames)
 
         if not frames:
-            if raise_on_error and first_error is not None:
-                raise first_error
             return pd.DataFrame()
 
         result = pd.concat(frames, ignore_index=True).drop_duplicates(
