@@ -63,3 +63,33 @@ export const alignXueqiuHistory = (dates, historyRows = []) => {
   });
   return points;
 };
+
+/**
+ * 当前的雪球持仓排行。
+ *
+ * 历史接口只返回这只股票**上榜那些天**的行，最后一行是它"最后一次上榜"，不一定是今天——
+ * 跌出榜单之后那一行里的排名是旧的。所以必须和全局最新快照日比对：
+ *
+ * - onLatest === true：最新一期快照仍在榜上，rank 就是当前排名；
+ * - onLatest === false：已不在最新一期榜上（lastDate 为空表示从没上过榜）；
+ * - onLatest === null：拿不到全局最新快照日，无法确认，只能说"截至 lastDate"。
+ *
+ * 历史为空且也没有全局日期（接口不可用）时返回 null，调用方应不显示这一项。
+ */
+export const resolveXueqiuRank = (historyRows = [], latestSnapshotDate = null) => {
+  const latestDate = latestSnapshotDate ? String(latestSnapshotDate).slice(0, 10) : null;
+  const rows = [...(historyRows || [])]
+    .filter(row => row?.snapshot_date)
+    .sort((a, b) => String(a.snapshot_date).localeCompare(String(b.snapshot_date)));
+  if (!rows.length) {
+    return latestDate ? { rank: null, onLatest: false, lastDate: null, latestSnapshotDate: latestDate } : null;
+  }
+  const last = rows[rows.length - 1];
+  const lastDate = String(last.snapshot_date).slice(0, 10);
+  return {
+    rank: toNumber(last.composite_rank),
+    onLatest: latestDate ? lastDate === latestDate : null,
+    lastDate,
+    latestSnapshotDate: latestDate,
+  };
+};

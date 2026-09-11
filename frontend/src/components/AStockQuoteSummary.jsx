@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import dayjs from 'dayjs';
+import { Tooltip } from 'antd';
 import { Switch } from 'antd';
 import { formatChineseAmount as formatChinese } from '../utils/format';
 
@@ -127,7 +128,24 @@ const ConsensusValuationMetrics = ({ consensus, onOpenConsensus, peBandEnabled, 
   );
 };
 
+
+// 雪球持仓排行：只有最新一期快照仍在榜上才显示 #N；已跌出榜单显示"未上榜"并注明最后一次上榜
+const renderXueqiuRank = (rank) => {
+  if (rank.onLatest === false) {
+    const tip = rank.lastDate
+      ? `最近一次上榜是 ${rank.lastDate}，当时第 ${rank.rank} 名；最新快照（${rank.latestSnapshotDate}）已不在榜上`
+      : '雪球组合持仓快照里没有这只股票';
+    return <Tooltip title={tip}><span style={{ color: '#8c8c8c' }}>未上榜</span></Tooltip>;
+  }
+  const text = rank.rank === null || rank.rank === undefined ? '--' : `#${rank.rank}`;
+  const tip = rank.onLatest === null
+    ? `截至 ${rank.lastDate} 的排名（未能确认最新快照日，不保证是当前排名）`
+    : `最新快照 ${rank.lastDate}，按雪球组合综合持仓权重排名`;
+  return <Tooltip title={tip}><span>{text}</span></Tooltip>;
+};
+
 const AStockQuoteSummary = ({
+  xueqiuRank,
   quote = {},
   summary = {},
   week52 = {},
@@ -200,6 +218,8 @@ const AStockQuoteSummary = ({
     ['52周最高', formatFixed(week52.high)],
     ['52周最低', formatFixed(week52.low)],
     ['货币单位', summary.currency || 'CNY'],
+    // 雪球持仓排行只有管理员拿得到（接口专属），没有就不显示这一项
+    ...(xueqiuRank ? [['雪球持仓排行', renderXueqiuRank(xueqiuRank)]] : []),
   ];
 
   return (

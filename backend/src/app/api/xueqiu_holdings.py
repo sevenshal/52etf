@@ -1530,6 +1530,7 @@ def load_xueqiu_top_holdings_history(
                 "raw_symbol": raw_symbol,
                 "limit": normalized_limit,
                 "latest": None,
+                "latest_snapshot_date": None,
                 "history": [],
             }
 
@@ -1673,6 +1674,9 @@ def load_xueqiu_top_holdings_history(
             "raw_symbol": raw_symbol,
             "limit": normalized_limit,
             "latest": rows[-1] if rows else None,
+            # 全局最新快照日。latest 是这只股票"最后一次上榜"的那一行：若它早于这个日期，
+            # 说明股票已经跌出雪球持仓榜，latest 里的排名是旧排名，不能当成当前排名展示。
+            "latest_snapshot_date": global_snapshot_dates[-1].isoformat() if global_snapshot_dates else None,
             "history": rows,
         }
     finally:

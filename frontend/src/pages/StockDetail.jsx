@@ -6,6 +6,7 @@ import StockKlineChart from '../components/StockKlineChart';
 import XueqiuStockLink from '../components/XueqiuStockLink';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import { useAccount } from '../contexts/AccountContext';
+import { resolveXueqiuRank } from '../utils/xueqiuHoldings';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
 import StockFearIndexStrip from '../components/StockFearIndexStrip';
 import StockFinancialsCard from '../components/StockFinancialsCard';
@@ -13,6 +14,8 @@ import StockValueInvestingCard from '../components/StockValueInvestingCard';
 import AStockConsensusValuationModal from '../components/AStockConsensusValuationModal';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
+// 雪球历史接口一次最多 2000 条；5 年 K 线约 1250 个交易日，1300 足够覆盖
+const XUEQIU_HISTORY_LIMIT = 1300;
 const PE_BAND_STORAGE_KEY = 'stockDetail.peBandEnabled';
 
 const readPeBandPreference = () => {
@@ -47,6 +50,28 @@ const StockDetail = () => {
   // 雪球持仓数据属于管理员专属的因子实验室（接口是 valid_admin_account），
   // 非管理员不请求、K 线上也就不出现雪球副图，维持原有权限不变
   const { isAdmin } = useAccount();
+
+  // 雪球持仓历史只取一次：K 线的雪球副图和行情摘要的「雪球持仓排行」共用这一份。
+  // 与「雪球持仓」模块同一接口、同一默认口径（只统计主理人活跃组合）。
+  const [xueqiuPayload, setXueqiuPayload] = useState(null);
+  useEffect(() => {
+    setXueqiuPayload(null);
+    if (!isAStock || !isAdmin) return undefined;
+    let cancelled = false;
+    request.get('/api/factor-lab/xueqiu-top-holdings/history', {
+      params: { symbol: normalizedSymbol, active_only: true, limit: XUEQIU_HISTORY_LIMIT },
+    })
+      .then(({ data }) => {
+        if (!cancelled) setXueqiuPayload(data || null);
+      })
+      .catch(error => console.error('获取雪球持仓历史失败:', error));
+    return () => { cancelled = true; };
+  }, [isAStock, isAdmin, normalizedSymbol]);
+  const xueqiuHistoryRows = useMemo(() => xueqiuPayload?.history || [], [xueqiuPayload]);
+  const xueqiuRank = useMemo(
+    () => (xueqiuPayload ? resolveXueqiuRank(xueqiuPayload.history, xueqiuPayload.latest_snapshot_date) : null),
+    [xueqiuPayload],
+  );
 
   useEffect(() => {
     register(isAStock ? [normalizedSymbol] : []);
@@ -206,6 +231,7 @@ const StockDetail = () => {
             onOpenConsensus={(offset, bound) => setConsensusModal({ open: true, offset, bound })}
             peBandEnabled={peBandEnabled}
             onTogglePeBand={handlePeBandToggle}
+            xueqiuRank={xueqiuRank}
           />
         ) : null}
         {isAStock ? <StockFearIndexStrip symbol={normalizedSymbol} /> : null}
@@ -217,9 +243,7 @@ const StockDetail = () => {
           valuationDateOffsetDays={isAStock ? 0 : -1}
           realtimeQuote={isAStock ? quotes[normalizedSymbol] : null}
           eventsUrl={isAStock ? `/api/stock/a-stock/chart-events/${normalizedSymbol}` : undefined}
-          xueqiuHistoryUrl={isAStock && isAdmin
-            ? `/api/factor-lab/xueqiu-top-holdings/history?symbol=${normalizedSymbol}`
-            : undefined}
+          xueqiuHistory={xueqiuHistoryRows}
           onKlinesChange={setKlines}
           height={600}
         />

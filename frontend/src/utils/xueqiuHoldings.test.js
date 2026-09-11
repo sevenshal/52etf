@@ -1,4 +1,9 @@
-import { XUEQIU_DIRECTION_META, XUEQIU_DIRECTIONS, alignXueqiuHistory } from './xueqiuHoldings';
+import {
+  XUEQIU_DIRECTION_META,
+  XUEQIU_DIRECTIONS,
+  alignXueqiuHistory,
+  resolveXueqiuRank,
+} from './xueqiuHoldings';
 
 // 2026-09-04 周五、09-07 周一
 const DATES = ['2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07', '2026-09-08'];
@@ -61,4 +66,38 @@ test('未知方向文案按无方向处理；空输入不炸', () => {
   expect(alignXueqiuHistory(DATES, [row('2026-09-02', 1, '乱写的')])[0].direction).toBeNull();
   expect(alignXueqiuHistory([], [row('2026-09-02', 1, '新进')])).toEqual([]);
   expect(alignXueqiuHistory(DATES, null)).toEqual([null, null, null, null, null]);
+});
+
+// ---- 雪球持仓排行 ----
+const ranked = (snapshotDate, rank) => ({ snapshot_date: snapshotDate, composite_rank: rank });
+
+test('最新一期快照仍在榜上：显示当前排名', () => {
+  expect(resolveXueqiuRank([ranked('2026-09-10', 3), ranked('2026-09-11', 1)], '2026-09-11'))
+    .toEqual({ rank: 1, onLatest: true, lastDate: '2026-09-11', latestSnapshotDate: '2026-09-11' });
+});
+
+test('已跌出榜单：最后一次上榜的排名是旧的，onLatest 为 false', () => {
+  // 8 月底还排第 1，之后不再持有——不能把这个 #1 当成今天的排名
+  const rank = resolveXueqiuRank([ranked('2026-08-28', 1)], '2026-09-11');
+  expect(rank.onLatest).toBe(false);
+  expect(rank.rank).toBe(1);
+  expect(rank.lastDate).toBe('2026-08-28');
+});
+
+test('从没上过榜：rank 为空，onLatest 为 false', () => {
+  expect(resolveXueqiuRank([], '2026-09-11'))
+    .toEqual({ rank: null, onLatest: false, lastDate: null, latestSnapshotDate: '2026-09-11' });
+});
+
+test('拿不到全局最新快照日：无法确认是否还在榜上', () => {
+  expect(resolveXueqiuRank([ranked('2026-09-11', 5)], null).onLatest).toBeNull();
+});
+
+test('接口没有任何数据：返回 null，调用方不显示这一项', () => {
+  expect(resolveXueqiuRank([], null)).toBeNull();
+  expect(resolveXueqiuRank(undefined)).toBeNull();
+});
+
+test('历史行乱序时按日期取最后一次上榜', () => {
+  expect(resolveXueqiuRank([ranked('2026-09-11', 2), ranked('2026-09-01', 9)], '2026-09-11').rank).toBe(2);
 });
