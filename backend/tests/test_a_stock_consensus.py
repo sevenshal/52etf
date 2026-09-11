@@ -804,3 +804,46 @@ def test_consensus_detail_computes_pe_band_on_demand():
     # 假库里没有足够的历史股价，通道不可用，估值与不开时一致。
     assert detail["pe_band"]["status"] == "unavailable"
     assert detail["horizons"][0]["lo"] == pytest.approx(42.45)
+
+
+def _stale_filter_rows():
+    fresh_market = _candidate_market("000001.SZ", 10.0, 2_000_000.0, "最新股")
+    stale_market = _candidate_market("000002.SZ", 10.0, 2_000_000.0, "待更新股")
+    rows = []
+    # 000001：半年报(08-27)后两家机构 → T 池。
+    rows += _report("机构A", date(2026, 9, 1), 15.0, {2026: 1.0, 2027: 1.2}, symbol="000001.SZ", market=fresh_market)
+    rows += _report("机构B", date(2026, 9, 2), 16.0, {2026: 1.0, 2027: 1.2}, symbol="000001.SZ", market=fresh_market)
+    # 000002：只有一季报后的研报 → 退到 T-1 池，待更新。
+    rows += _report("机构A", date(2026, 5, 1), 15.0, {2026: 1.0, 2027: 1.2}, symbol="000002.SZ", market=stale_market)
+    return rows
+
+
+@pytest.mark.parametrize("stale_filter, expected", [
+    (None, {"000001.SZ", "000002.SZ"}),
+    ("fresh", {"000001.SZ"}),
+    ("stale", {"000002.SZ"}),
+])
+def test_consensus_candidates_filter_by_stale_status(stale_filter, expected):
+    result = build_a_stock_consensus_candidates(
+        _stale_filter_rows(),
+        AS_OF,
+        disclosures={"000001.SZ": DISCLOSURES, "000002.SZ": DISCLOSURES},
+        min_market_cap_100m=None,
+        min_undervalue_pct=None,
+        min_growth_pct=None,
+        stale_filter=stale_filter,
+    )
+
+    assert {item["symbol"] for item in result} == expected
+
+
+def test_symbol_search_ignores_stale_filter():
+    result = build_a_stock_consensus_candidates(
+        _stale_filter_rows(),
+        AS_OF,
+        disclosures={"000001.SZ": DISCLOSURES, "000002.SZ": DISCLOSURES},
+        search_symbol="000002",
+        stale_filter="fresh",
+    )
+
+    assert "000002.SZ" in {item["symbol"] for item in result}
