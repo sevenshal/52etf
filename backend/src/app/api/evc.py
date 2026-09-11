@@ -11,6 +11,7 @@ from ...core.services.a_stock_consensus import (
     load_a_stock_consensus_history,
     search_a_stock_consensus_candidates,
 )
+from ...core.services.a_stock_consensus_pe_band import load_a_stock_consensus_pe_bands
 
 router = APIRouter(prefix="/api/evc")
 
@@ -32,6 +33,8 @@ class AStockConsensusSearchRequest(BaseModel):
     min_undervalue_pct: Optional[float] = 10.0
     min_growth_pct: Optional[float] = 10.0
     min_organization_count: int = 1
+    # 开启后，没给目标价的机构用前瞻 PE 通道(定时任务预先算好)补估值。
+    use_pe_band: bool = False
     limit: int = 200
 
 async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
@@ -174,6 +177,7 @@ async def a_stock_consensus_search(
             min_undervalue_pct=request.min_undervalue_pct,
             min_growth_pct=request.min_growth_pct,
             min_organization_count=request.min_organization_count,
+            pe_bands=load_a_stock_consensus_pe_bands() if request.use_pe_band else None,
             limit=request.limit,
         )
     except HTTPException:
@@ -249,11 +253,12 @@ def get_stock_evc_history(
 @router.get("/a-stock-consensus/detail/{symbol}")
 def get_a_stock_consensus_detail(
     symbol: str,
+    use_pe_band: bool = Query(False, description="没给目标价的机构用前瞻 PE 通道补估值"),
     account_id: str = Depends(get_account_id),
 ):
     analytics_db = AnalyticsSession()
     try:
-        return load_a_stock_consensus_detail(analytics_db, symbol)
+        return load_a_stock_consensus_detail(analytics_db, symbol, use_pe_band=use_pe_band)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -265,6 +270,7 @@ def get_a_stock_consensus_detail(
 def get_a_stock_consensus_history(
     symbol: str,
     limit: int = Query(1260, description="查询条数"),
+    use_pe_band: bool = Query(False, description="没给目标价的机构用前瞻 PE 通道补估值"),
     account_id: str = Depends(get_account_id),
 ):
     analytics_db = AnalyticsSession()
@@ -273,6 +279,7 @@ def get_a_stock_consensus_history(
             analytics_db,
             symbol,
             limit=max(1, min(int(limit or 1260), 5000)),
+            use_pe_band=use_pe_band,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

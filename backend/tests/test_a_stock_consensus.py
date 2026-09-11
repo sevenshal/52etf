@@ -644,3 +644,163 @@ def test_consensus_detail_shows_raw_and_restated_target_prices():
     assert organization["target_price_low_raw"] == 40.0
     assert organization["price_adjustment"] == pytest.approx(0.5)
     assert detail["horizons"][0]["lo"] == pytest.approx(20.0)
+
+
+# ---- 前瞻 PE 通道 ----
+from datetime import timedelta
+
+from src.core.services import a_stock_consensus as consensus_module
+from src.core.services.a_stock_consensus import (
+    PE_BAND_AVAILABLE,
+    _forward_pe_series,
+    _normalize_forecast_rows,
+    _ntm_weight,
+    _pe_band,
+)
+
+AVAILABLE_BAND = {"status": PE_BAND_AVAILABLE, "low_pe": 10.0, "mid_pe": 15.0, "high_pe": 20.0}
+
+
+def test_ntm_weight_moves_from_current_to_next_fiscal_year():
+    assert _ntm_weight(date(2026, 1, 1)) == 0.0
+    assert _ntm_weight(date(2026, 7, 2)) == pytest.approx(182 / 365)
+
+
+def _series(values, start=date(2024, 1, 1)):
+    return [(start + timedelta(days=index), value) for index, value in enumerate(values)]
+
+
+def test_pe_band_percentiles_and_quality_gates():
+    series = _series([10.0 + index % 11 for index in range(300)])
+    band = _pe_band(series, series[-1][0])
+    assert band["status"] == PE_BAND_AVAILABLE
+    assert band["low_pe"] == pytest.approx(12.0)
+    assert band["high_pe"] == pytest.approx(18.0)
+    assert band["current_pe"] == series[-1][1]
+
+    short = _series([15.0] * 200)
+    assert _pe_band(short, short[-1][0])["reason"] == "insufficient_history"
+
+    gappy = _series([15.0] * 260 + [None] * 60)
+    assert _pe_band(gappy, gappy[-1][0])["reason"] == "unprofitable_or_uncovered"
+
+    unstable = _series([5.0] * 150 + [30.0] * 150)
+    assert _pe_band(unstable, unstable[-1][0])["reason"] == "unstable_multiple"
+
+
+def test_forward_pe_series_divides_price_by_consensus_ntm_eps():
+    records = _normalize_forecast_rows(_report("机构A", date(2026, 5, 10), None, {2026: 1.0, 2027: 2.0}))
+    weight = _ntm_weight(date(2026, 7, 2))
+
+    series = _forward_pe_series(records, DISCLOSURES, [(date(2026, 5, 1), 30.0), (date(2026, 7, 2), 30.0)], None)
+
+    # 05-01 还没有研报，没有一致预期。
+    assert series[0] == (date(2026, 5, 1), None)
+    assert series[1][1] == pytest.approx(30.0 / ((1 - weight) * 1.0 + weight * 2.0))
+
+
+def test_forward_pe_series_is_comparable_across_ex_rights():
+    records = _normalize_forecast_rows(
+        _report("机构A", date(2026, 5, 10), None, {2026: 1.0, 2027: 2.0}), TEN_FOR_TEN,
+    )
+    weight = _ntm_weight(date(2026, 7, 2))
+
+    # 10 送 10 后股价 15 元对应除权前 30 元；旧研报 EPS 按除权前股本给，也要换到同一口径。
+    series = _forward_pe_series(records, DISCLOSURES, [(date(2026, 7, 2), 15.0)], TEN_FOR_TEN)
+
+    assert series[0][1] == pytest.approx(30.0 / ((1 - weight) * 1.0 + weight * 2.0))
+
+
+def _band_rows():
+    rows = _report("机构A", date(2026, 5, 10), 30.0, {2026: 1.0, 2027: 1.2})
+    rows += _report("机构B", date(2026, 5, 20), None, {2026: 2.0, 2027: 2.4})
+    return rows
+
+
+def test_pe_band_values_organizations_without_target_price():
+    weight = _ntm_weight(AS_OF)
+    ntm = (1 - weight) * 2.0 + weight * 2.4
+
+    result = _aggregate_report_rows(_band_rows(), AS_OF, _cutoffs(), pe_band=AVAILABLE_BAND, include_details=True)
+
+    assert result["organization_count"] == 2
+    assert result["target_report_count"] == 1
+    assert result["method_counts"] == {"target_price": 1, "pe_band": 1}
+    current, following, _ = result["horizons"]
+    assert current["lo"] == pytest.approx(10.0 * ntm)
+    assert current["lo_org"] == "机构B"
+    assert current["hi"] == pytest.approx(20.0 * ntm)
+    assert following["hi"] == pytest.approx(20.0 * ntm * 2.4 / 2.0)
+    view = next(item for item in result["organizations"] if item["org_name"] == "机构B")
+    assert view["method"] == "pe_band"
+    assert view["ntm_eps"] == pytest.approx(ntm)
+    assert view["values"][0]["basis"] == "pe_band"
+
+
+def test_without_pe_band_organizations_lacking_target_price_are_not_valued():
+    result = _aggregate_report_rows(_band_rows(), AS_OF, _cutoffs(), include_details=True)
+
+    assert result["organization_count"] == 1
+    assert result["method_counts"] == {"target_price": 1}
+    assert result["pe_band"] is None
+
+
+def test_unavailable_pe_band_is_ignored():
+    band = {**AVAILABLE_BAND, "status": "unavailable", "reason": "unstable_multiple"}
+
+    result = _aggregate_report_rows(_band_rows(), AS_OF, _cutoffs(), pe_band=band)
+
+    assert result["organization_count"] == 1
+    assert result["pe_band"]["reason"] == "unstable_multiple"
+
+
+def test_pe_band_organizations_count_toward_the_two_organization_threshold():
+    rows = _report("机构A", date(2026, 9, 1), 30.0, {2026: 1.0, 2027: 1.2})
+    rows += _report("机构B", date(2026, 9, 2), None, {2026: 2.0, 2027: 2.4})
+    rows += _report("机构C", date(2026, 5, 1), 50.0, {2026: 2.0, 2027: 2.2})
+
+    assert _aggregate_report_rows(rows, AS_OF, _cutoffs())["pool"] == CONSENSUS_POOL_T1
+    with_band = _aggregate_report_rows(rows, AS_OF, _cutoffs(), pe_band=AVAILABLE_BAND)
+    assert with_band["pool"] == CONSENSUS_POOL_T
+    assert with_band["organization_count"] == 2
+
+
+def test_candidates_use_precomputed_pe_bands():
+    market = _candidate_market("600612.SH", 20.0, 1_768_000.0, "老凤祥")
+    rows = [dict(row, **market) for row in _band_rows()]
+
+    result = build_a_stock_consensus_candidates(
+        rows, AS_OF, disclosures={"600612.SH": DISCLOSURES},
+        pe_bands={"600612.SH": AVAILABLE_BAND}, has_search=True,
+    )
+
+    assert result[0]["method_counts"] == {"target_price": 1, "pe_band": 1}
+    assert result[0]["pe_band"]["low_pe"] == 10.0
+
+
+def test_rolling_history_uses_point_in_time_pe_bands(monkeypatch):
+    seen_days = []
+
+    def fake_band(series, as_of):
+        seen_days.append(as_of)
+        return AVAILABLE_BAND
+
+    monkeypatch.setattr(consensus_module, "_pe_band", fake_band)
+    days = [date(2026, 9, 1) + timedelta(days=index) for index in range(7)]
+
+    history = build_a_stock_rolling_consensus_history(
+        _band_rows(), days, disclosures=DISCLOSURES, closes=[(day, 20.0) for day in days],
+    )
+
+    # 每 5 个交易日重算一次通道，只用当天及以前的数据。
+    assert seen_days == [days[0], days[5]]
+    assert all(point["organization_count"] == 2 for point in history)
+
+
+def test_consensus_detail_computes_pe_band_on_demand():
+    detail = load_a_stock_consensus_detail(_detail_fake_db(_laofengxiang_rows()), "600612.SH", use_pe_band=True)
+
+    assert detail["use_pe_band"] is True
+    # 假库里没有足够的历史股价，通道不可用，估值与不开时一致。
+    assert detail["pe_band"]["status"] == "unavailable"
+    assert detail["horizons"][0]["lo"] == pytest.approx(42.45)

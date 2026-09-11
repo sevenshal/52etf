@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import dayjs from 'dayjs';
+import { Switch } from 'antd';
 import { formatChineseAmount as formatChinese } from '../utils/format';
 
 const toNumber = value => {
@@ -35,13 +36,27 @@ const Metric = ({ label, value }) => (
 );
 
 const CONSENSUS_UNAVAILABLE_REASONS = {
-  no_target_price_in_pool: 'T-1期披露日之后没有带目标价的研报，不计算估值',
+  no_target_price_in_pool: 'T-1期披露日之后没有能给出估值的研报，不计算估值',
   disclosure_missing: '缺少定期报告披露日，无法划定研报池',
   market_data_missing: '缺少行情数据',
 };
 
 // 卖方一致预期的三个财年估值上下限；点击某个上下限打开各机构研报明细。
-const ConsensusValuationMetrics = ({ consensus, onOpenConsensus }) => {
+const PE_BAND_UNAVAILABLE_REASONS = {
+  insufficient_history: '前瞻PE有效样本不足一年',
+  unprofitable_or_uncovered: '近3年较多交易日没有正的一致预期EPS（亏损或无人覆盖）',
+  unstable_multiple: '近3年前瞻PE波动过大（80%分位超过20%分位3倍），通道不可信',
+};
+
+const describePeBand = band => {
+  if (!band) return '--';
+  if (band.status !== 'available') return PE_BAND_UNAVAILABLE_REASONS[band.reason] || '不可用';
+  const current = toNumber(band.current_pe);
+  return `${formatFixed(band.low_pe, 1)} ~ ${formatFixed(band.high_pe, 1)}倍`
+    + (current === null ? '' : `（当前 ${current.toFixed(1)}倍）`);
+};
+
+const ConsensusValuationMetrics = ({ consensus, onOpenConsensus, peBandEnabled, onTogglePeBand }) => {
   if (!consensus) return null;
   const available = consensus.status === 'available';
   const renderBound = (horizon, bound, color) => {
@@ -76,10 +91,25 @@ const ConsensusValuationMetrics = ({ consensus, onOpenConsensus }) => {
         '估值研报池',
         <span title={poolTip} style={{ color: consensus.pool === 'T' ? '#389e0d' : '#d46b08' }}>
           {consensus.pool === 'T' ? 'T池' : 'T-1池（待更新）'} · {consensus.organization_count}家机构
+          {consensus.method_counts?.pe_band ? `（${consensus.method_counts.pe_band}家用PE通道）` : ''}
         </span>,
       ],
     ]
     : [['一致预期估值', <span title={poolTip}>--</span>]];
+  if (onTogglePeBand) {
+    metrics.push([
+      'PE通道补估值',
+      <Switch
+        size="small"
+        checked={Boolean(peBandEnabled)}
+        onChange={onTogglePeBand}
+        title="开启后，没给目标价的机构用该股近3年前瞻PE的20%~80%分位 × 该机构未来12个月EPS估值"
+      />,
+    ]);
+    if (peBandEnabled) {
+      metrics.push(['前瞻PE通道(近3年)', <span>{describePeBand(consensus.pe_band)}</span>]);
+    }
+  }
 
   return (
     <div style={{
@@ -103,6 +133,8 @@ const AStockQuoteSummary = ({
   week52 = {},
   consensus = null,
   onOpenConsensus,
+  peBandEnabled = false,
+  onTogglePeBand,
 }) => {
   const values = useMemo(() => {
     const last = toNumber(quote.last_px);
@@ -195,7 +227,12 @@ const AStockQuoteSummary = ({
       }}>
         {metrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
       </div>
-      <ConsensusValuationMetrics consensus={consensus} onOpenConsensus={onOpenConsensus} />
+      <ConsensusValuationMetrics
+        consensus={consensus}
+        onOpenConsensus={onOpenConsensus}
+        peBandEnabled={peBandEnabled}
+        onTogglePeBand={onTogglePeBand}
+      />
     </div>
   );
 };

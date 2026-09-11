@@ -11,6 +11,15 @@ import StockValueInvestingCard from '../components/StockValueInvestingCard';
 import AStockConsensusValuationModal from '../components/AStockConsensusValuationModal';
 
 const FIVE_YEAR_TRADING_BARS = 1260;
+const PE_BAND_STORAGE_KEY = 'stockDetail.peBandEnabled';
+
+const readPeBandPreference = () => {
+  try {
+    return window.localStorage.getItem(PE_BAND_STORAGE_KEY) === '1';
+  } catch (error) {
+    return false;
+  }
+};
 
 const StockDetail = () => {
   const { symbol } = useParams();
@@ -25,6 +34,11 @@ const StockDetail = () => {
   const [klines, setKlines] = useState([]);
   const [consensusDetail, setConsensusDetail] = useState(null);
   const [consensusModal, setConsensusModal] = useState({ open: false, offset: 0, bound: 'lo' });
+  // 没给目标价的机构是否用前瞻 PE 通道补估值；影响估值线和估值上下限，记在本地。
+  const [peBandEnabled, setPeBandEnabled] = useState(readPeBandPreference);
+  const peBandEnabledRef = useRef(peBandEnabled);
+  const historyRequestSequence = useRef(0);
+  const consensusRequestSequence = useRef(0);
   const symbolSearchTimer = useRef(null);
   const symbolSearchSequence = useRef(0);
   const { quotes, register } = useRealtimeQuotes('stock_detail_page');
@@ -64,12 +78,14 @@ const StockDetail = () => {
     else symbolSearchTimer.current = window.setTimeout(runSearch, 250);
   }, [isAStock, normalizedSymbol]);
 
-  const fetchEvcHistory = useCallback(async () => {
+  const fetchEvcHistory = useCallback(async (usePeBand = false) => {
+    const sequence = ++historyRequestSequence.current;
     try {
       const historyUrl = isAStock
-        ? `/api/evc/a-stock-consensus/history/${normalizedSymbol}?limit=${FIVE_YEAR_TRADING_BARS}`
+        ? `/api/evc/a-stock-consensus/history/${normalizedSymbol}?limit=${FIVE_YEAR_TRADING_BARS}&use_pe_band=${usePeBand}`
         : `/api/evc/stock-evc/history/${normalizedSymbol}?limit=${FIVE_YEAR_TRADING_BARS}`;
       const { data } = await request.get(historyUrl);
+      if (sequence !== historyRequestSequence.current) return;
       setEvcHistory(data || []);
     } catch (error) {
       console.error('获取估值历史失败:', error);
@@ -91,13 +107,17 @@ const StockDetail = () => {
     }
   }, [isAStock, normalizedSymbol]);
 
-  const fetchConsensusDetail = useCallback(async () => {
+  const fetchConsensusDetail = useCallback(async (usePeBand = false) => {
     if (!isAStock) {
       setConsensusDetail(null);
       return;
     }
+    const sequence = ++consensusRequestSequence.current;
     try {
-      const { data } = await request.get(`/api/evc/a-stock-consensus/detail/${normalizedSymbol}`);
+      const { data } = await request.get(`/api/evc/a-stock-consensus/detail/${normalizedSymbol}`, {
+        params: { use_pe_band: usePeBand },
+      });
+      if (sequence !== consensusRequestSequence.current) return;
       setConsensusDetail(data || null);
     } catch (error) {
       console.error('获取一致预期估值失败:', error);
@@ -124,10 +144,22 @@ const StockDetail = () => {
     setConsensusDetail(null);
     setConsensusModal(previous => ({ ...previous, open: false }));
     if (isAStock) searchSymbols(normalizedSymbol, true);
-    fetchEvcHistory();
+    fetchEvcHistory(peBandEnabledRef.current);
     fetchStockSummary();
-    fetchConsensusDetail();
+    fetchConsensusDetail(peBandEnabledRef.current);
   }, [fetchConsensusDetail, fetchEvcHistory, fetchStockSummary, isAStock, normalizedSymbol, searchSymbols]);
+
+  const handlePeBandToggle = useCallback(checked => {
+    peBandEnabledRef.current = checked;
+    setPeBandEnabled(checked);
+    try {
+      window.localStorage.setItem(PE_BAND_STORAGE_KEY, checked ? '1' : '0');
+    } catch (error) {
+      // 浏览器禁用本地存储时，开关只在本次打开的页面里生效。
+    }
+    fetchEvcHistory(checked);
+    fetchConsensusDetail(checked);
+  }, [fetchConsensusDetail, fetchEvcHistory]);
 
   useEffect(() => () => {
     if (symbolSearchTimer.current) window.clearTimeout(symbolSearchTimer.current);
@@ -167,6 +199,8 @@ const StockDetail = () => {
             week52={week52}
             consensus={consensusDetail}
             onOpenConsensus={(offset, bound) => setConsensusModal({ open: true, offset, bound })}
+            peBandEnabled={peBandEnabled}
+            onTogglePeBand={handlePeBandToggle}
           />
         ) : null}
         <StockKlineChart

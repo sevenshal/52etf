@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Tag, Tooltip } from 'antd';
+import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Switch, Tag, Tooltip } from 'antd';
 import { FilterOutlined, SearchOutlined, StarFilled, StarOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import request from '../utils/request';
@@ -22,6 +22,7 @@ const A_STOCK_DEFAULT_VALUES = {
     min_undervalue_pct: 10,
     min_growth_pct: 10,
     min_organization_count: 1,
+    use_pe_band: false,
     limit: 200
 };
 
@@ -377,6 +378,23 @@ const EVCValuation = () => {
         );
     };
 
+    // 开启"PE通道补估值"后，没给目标价的机构用前瞻 PE 通道估值，这里标出来，避免和纯目标价口径混淆。
+    const renderPeBandTag = (record) => {
+        const count = record?.method_counts?.pe_band || 0;
+        if (!count) {
+            return null;
+        }
+        const band = record.pe_band || {};
+        const range = band.low_pe && band.high_pe
+            ? `${Number(band.low_pe).toFixed(1)}~${Number(band.high_pe).toFixed(1)}倍`
+            : '-';
+        return (
+            <Tooltip title={`${count}家机构未给目标价，用前瞻PE通道（近3年20%~80%分位 ${range}）× 该机构未来12个月EPS估值`}>
+                <Tag color="purple" style={{ marginLeft: 4 }}>PE通道</Tag>
+            </Tooltip>
+        );
+    };
+
     const aStockColumns = [
         {
             title: '股票代码',
@@ -399,6 +417,7 @@ const EVCValuation = () => {
                 <span className="evc-stock-name">
                     {value || '-'}
                     {renderStaleTag(record)}
+                    {renderPeBandTag(record)}
                 </span>
             )
         },
@@ -542,6 +561,14 @@ const EVCValuation = () => {
             <Form.Item label="最少机构数" name="min_organization_count">
                 <InputNumber min={1} max={50} step={1} />
             </Form.Item>
+            <Form.Item
+                label="PE通道补估值"
+                name="use_pe_band"
+                valuePropName="checked"
+                tooltip="开启后，没给目标价的机构用该股近3年前瞻PE的20%~80%分位 × 该机构未来12个月EPS估值（通道每天收盘后预先算好）"
+            >
+                <Switch />
+            </Form.Item>
             {!compact && (
                 <Form.Item className="evc-filter-form__submit">
                     <Button type="primary" htmlType="submit" loading={aStockSearching}>
@@ -642,6 +669,7 @@ const EVCValuation = () => {
                                 </Link>
                                 <span>{record.name || '-'}</span>
                                 {renderStaleTag(record)}
+                                {renderPeBandTag(record)}
                             </div>
                             <Tag>{record.rating || '未评级'}</Tag>
                         </div>

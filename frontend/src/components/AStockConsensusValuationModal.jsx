@@ -27,9 +27,13 @@ const formatRange = (low, high) => {
 const describePeriod = (label, disclosedAt) => (label ? `${label}（${disclosedAt || '-'} 披露）` : '--');
 
 // 下财年 / 下下财年估值 = 目标价 × 该研报对应财年预测 ÷ 当前财年预测，把推算过程原样摆出来。
-const describeBasis = (value, record) => {
+const describeBasis = (value, record, band) => {
   if (!value) return null;
   if (value.basis === 'target_price') return `目标价本身（${value.quarter}）`;
+  if (value.basis === 'pe_band') {
+    return `前瞻PE ${formatFixed(band?.low_pe, 1)}~${formatFixed(band?.high_pe, 1)}倍`
+      + ` × 未来12个月EPS ${formatFixed(record.ntm_eps)}`;
+  }
   const field = value.basis === 'np' ? 'np' : 'eps';
   const name = value.basis === 'np' ? '净利润' : 'EPS';
   const forecastOf = quarter => (record.forecasts || []).find(item => item.quarter === quarter);
@@ -75,6 +79,7 @@ const AStockConsensusValuationModal = ({
             <Tooltip title={aliases.length ? `数据源中的名称：${aliases.join('、')}` : null}>
               <span>{name}</span>
             </Tooltip>
+            {record.method === 'pe_band' ? <Tag color="purple">PE通道</Tag> : null}
             {horizon.lo_org === name ? <Tag color="blue">下限</Tag> : null}
             {horizon.hi_org === name ? <Tag color="red">上限</Tag> : null}
           </Space>
@@ -93,13 +98,14 @@ const AStockConsensusValuationModal = ({
       title: '推算依据',
       key: 'basis',
       width: 280,
-      render: (_, record) => describeBasis(record.value, record) || '--',
+      render: (_, record) => describeBasis(record.value, record, detail.pe_band) || '--',
     },
     {
       title: '目标价',
       key: 'target_price',
       width: 160,
       render: (_, record) => {
+        if (record.method === 'pe_band') return <Text type="secondary">未给目标价</Text>;
         const restated = formatRange(record.target_price_low, record.target_price_high);
         const adjustment = toNumber(record.price_adjustment);
         if (adjustment === null || Math.abs(adjustment - 1) < 0.005) return restated;
@@ -175,12 +181,21 @@ const AStockConsensusValuationModal = ({
         <span>T期：{describePeriod(detail.t_period_label, detail.t_disclosure_date)}</span>
         <span>T-1期：{describePeriod(detail.t1_period_label, detail.t1_disclosure_date)}</span>
       </Space>
+      {detail.use_pe_band ? (
+        <div style={{ color: '#666', marginBottom: 12 }}>
+          前瞻PE通道（近3年20%/80%分位）：
+          {detail.pe_band?.status === 'available'
+            ? `${formatFixed(detail.pe_band.low_pe, 1)} ~ ${formatFixed(detail.pe_band.high_pe, 1)}倍，`
+              + `中位 ${formatFixed(detail.pe_band.mid_pe, 1)}倍，当前 ${formatFixed(detail.pe_band.current_pe, 1)}倍`
+            : '不可用，没给目标价的机构不参与估值'}
+        </div>
+      ) : null}
       {detail.pool === 'T-1' ? (
         <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message={`T期披露后给出目标价的机构不足${detail.min_pool_organizations || 2}家，已退到T-1期披露日之后的研报，估值待更新。`}
+          message={`T期披露后能给出估值的机构不足${detail.min_pool_organizations || 2}家，已退到T-1期披露日之后的研报，估值待更新。`}
         />
       ) : null}
       <Table
@@ -196,7 +211,8 @@ const AStockConsensusValuationModal = ({
       <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         每家机构只取它在研报池里最新一篇带目标价的研报；当前财年估值 = 目标价，下财年 / 下下财年
         = 目标价 × 该研报对应财年 EPS ÷ 当前财年 EPS（缺 EPS 时用净利润之比）。研报发布后发生除权的，目标价按复权因子
-        换算到当前股价口径；盈利预测指引展示研报原始 EPS。上下限分别取各家机构的最低 / 最高值。
+        换算到当前股价口径；盈利预测指引展示研报原始 EPS。开启 PE 通道后，没给目标价的机构 = 通道 20% / 80% 分位
+        × 该机构未来 12 个月 EPS（当年、次年 EPS 按年内已过时间加权）。上下限分别取各家机构的最低 / 最高值。
       </Text>
     </Modal>
   );

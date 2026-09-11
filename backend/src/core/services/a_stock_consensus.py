@@ -28,6 +28,22 @@ PRICE_FACTOR_PADDING_DAYS = 10
 # 指数估值里成分股缺估值时沿用上一次估值的最长天数，超过视为无人覆盖。
 VALUATION_FFILL_MAX_DAYS = 365
 
+# 前瞻 PE 通道(可开关的"历史估值法")：没给目标价的机构，用该股近 3 年每天
+# 股价 ÷ 当时一致预期未来 12 个月 EPS 的 20% / 80% 分位 × 这家机构的未来 12 个月 EPS 估值。
+VALUATION_METHOD_TARGET_PRICE = "target_price"
+VALUATION_METHOD_PE_BAND = "pe_band"
+PE_BAND_AVAILABLE = "available"
+PE_BAND_WINDOW_DAYS = 365 * 3
+PE_BAND_LOW_PERCENTILE = 0.2
+PE_BAND_HIGH_PERCENTILE = 0.8
+# 至少一年的有效样本；窗口内有正的前瞻 EPS 的交易日要占九成以上(否则多是亏损或覆盖断档)。
+PE_BAND_MIN_DAYS = 250
+PE_BAND_MIN_VALID_RATIO = 0.9
+# 80 分位超过 20 分位的 3 倍，说明估值体系本身不稳定(周期、困境反转)，通道不可信。
+PE_BAND_MAX_WIDTH = 3.0
+# 逐日回放历史时，每隔这么多个交易日重算一次通道(通道本身变化很慢)。
+PE_BAND_REFRESH_EVERY_DAYS = 5
+
 # 同一家券商在数据源里的别名：2026-08 起数据源改用全称，同一篇研报会挂在两个机构名下。
 # 只收同一法人主体的改名/简称；合并前的券商(如国泰君安与海通证券)在合并前仍是两家。
 ORG_NAME_ALIASES = {
@@ -395,20 +411,37 @@ def _normalize_forecast_rows(
     return records
 
 
-def _target_organizations(records: Iterable[_ForecastRow]) -> set:
-    return {record.org_name for record in records if record.target_low is not None}
+def _has_target_price(record: _ForecastRow) -> bool:
+    return record.target_low is not None
+
+
+def _has_eps_forecast(record: _ForecastRow) -> bool:
+    return record.eps is not None
+
+
+def _has_target_or_eps(record: _ForecastRow) -> bool:
+    return record.target_low is not None or record.eps is not None
+
+
+def _valuable_organizations(
+    records: Iterable[_ForecastRow],
+    valuable: Callable[[_ForecastRow], bool] = _has_target_price,
+) -> set:
+    return {record.org_name for record in records if valuable(record)}
 
 
 def _select_consensus_pool(
     records: Sequence[_ForecastRow],
     as_of: date,
     cutoffs: DisclosureCutoffs,
+    valuable: Callable[[_ForecastRow], bool] = _has_target_price,
 ) -> Optional[Tuple[str, date, List[_ForecastRow]]]:
     """按 T 期 / T-1 期披露日选研报候选池，返回 (池子, 起始日, 研报行)。
 
-    只用预测当前年份及以后财年的行。T 池里给出目标价的机构 >= 2 家就用 T 池；否则
-    退到 T-1 池(没有 T-1 期时 T-1 池就是 T 池)，只要有一家机构给了目标价就估值；
-    T-1 池也没有则返回 None，不估值。
+    只用预测当前年份及以后财年的行。T 池里"能给出估值"的机构 >= 2 家就用 T 池；否则
+    退到 T-1 池(没有 T-1 期时 T-1 池就是 T 池)，只要有一家就估值；T-1 池也没有则
+    返回 None，不估值。valuable 判定一行研报能否给出估值：默认是给了目标价，启用前瞻
+    PE 通道后给了 EPS 预测也算。
     """
     if cutoffs.t_date is None:
         return None
@@ -417,11 +450,11 @@ def _select_consensus_pool(
         if record.report_date <= as_of and record.fiscal_year >= as_of.year
     ]
     t_pool = [record for record in eligible if record.report_date >= cutoffs.t_date]
-    if len(_target_organizations(t_pool)) >= MIN_POOL_ORGANIZATIONS:
+    if len(_valuable_organizations(t_pool, valuable)) >= MIN_POOL_ORGANIZATIONS:
         return CONSENSUS_POOL_T, cutoffs.t_date, t_pool
     t1_start = cutoffs.t1_date or cutoffs.t_date
     t1_pool = [record for record in eligible if record.report_date >= t1_start]
-    if _target_organizations(t1_pool):
+    if _valuable_organizations(t1_pool, valuable):
         return CONSENSUS_POOL_T1, t1_start, t1_pool
     return None
 
@@ -439,91 +472,152 @@ def _forecast_ratio(
     return None, None
 
 
+def _ntm_weight(day: date) -> float:
+    """未来 12 个月里落在下一财年的比例：年初为 0，年底接近 1。"""
+    year_start = date(day.year, 1, 1)
+    return (day - year_start).days / (date(day.year + 1, 1, 1) - year_start).days
+
+
+def _ntm_value(current: Optional[float], following: Optional[float], day: date) -> Optional[float]:
+    """未来 12 个月 EPS：按年内已过去的时间在当年、次年预测之间加权。"""
+    if current is None or following is None:
+        return None
+    weight = _ntm_weight(day)
+    return (1.0 - weight) * current + weight * following
+
+
+def _organization_view(
+    org_name: str,
+    report_rows: Sequence[_ForecastRow],
+    raw_bounds: Tuple[float, float],
+    method: str,
+    fiscal_years: Sequence[int],
+    basis_factor: Optional[float],
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    head = report_rows[0]
+    raw_low, raw_high = raw_bounds
+    # 目标价(或 PE 通道估值)按写研报时的股价口径给出；之后送转、分红除权的，按复权因子
+    # 换算到估值口径，否则除权后股价机械下跌、旧估值不动，会凭空多出"低估"空间。
+    price_adjustment = _price_scale(head.price_factor, basis_factor)
+    target_low, target_high = raw_low * price_adjustment, raw_high * price_adjustment
+    by_year: Dict[int, _ForecastRow] = {}
+    for row in report_rows:
+        by_year[row.fiscal_year] = row
+    base = by_year.get(fiscal_years[0])
+    values: List[Optional[Dict[str, Any]]] = []
+    for offset, fiscal_year in enumerate(fiscal_years):
+        if offset == 0:
+            ratio, basis = 1.0, method
+        else:
+            ratio, basis = _forecast_ratio(base, by_year.get(fiscal_year))
+        if ratio is None:
+            values.append(None)
+            continue
+        low, high = target_low * ratio, target_high * ratio
+        values.append({
+            "fiscal_year": fiscal_year,
+            "lo": low,
+            "hi": high,
+            "mid": (low + high) / 2.0,
+            "ratio": ratio,
+            "basis": basis,
+            "base_quarter": base.quarter if offset and base is not None else None,
+            "quarter": f"{fiscal_year}Q4",
+        })
+    view: Dict[str, Any] = {
+        "org_name": org_name,
+        "method": method,
+        "raw_org_names": sorted({row.raw_org_name for row in report_rows}),
+        "report_date": head.report_date,
+        "report_title": head.report_title,
+        "author_name": head.author_name,
+        "rating": next((row.rating for row in report_rows if row.rating), None),
+        "target_price_low": target_low,
+        "target_price_high": target_high,
+        "target_price_low_raw": raw_low,
+        "target_price_high_raw": raw_high,
+        "price_adjustment": price_adjustment,
+        "forecasts": [
+            {
+                "quarter": row.quarter,
+                "fiscal_year": row.fiscal_year,
+                "eps": row.eps,
+                "eps_adjusted": row.eps * price_adjustment if row.eps is not None else None,
+                "np": row.np,
+                "pe": row.pe,
+            }
+            for row in sorted(by_year.values(), key=lambda item: item.fiscal_year)
+        ],
+        "values": values,
+    }
+    if extra:
+        view.update(extra)
+        if extra.get("ntm_eps") is not None:
+            view["ntm_eps_adjusted"] = extra["ntm_eps"] * price_adjustment
+    return view
+
+
 def _organization_views(
     pool: Sequence[_ForecastRow],
     fiscal_years: Sequence[int],
     basis_factor: Optional[float] = None,
+    pe_band: Optional[Mapping[str, Any]] = None,
+    as_of: Optional[date] = None,
 ) -> List[Dict[str, Any]]:
     """每家机构取它在池子里最新的一篇带目标价研报，按该研报自己的盈利预测展开财年估值。
 
     当前财年估值 = 目标价；下财年 / 下下财年 = 目标价 × 该研报 EPS(n) / EPS(当前财年)，
     EPS 缺失时退用净利润之比。同一篇研报里的目标价和盈利预测是同一个分析师在同一天
     给的，比拿共识目标价乘共识增速(混了不同机构)更自洽。
+
+    传入可用的前瞻 PE 通道时，池子里从没给过目标价的机构，取它最新一篇同时有当年、
+    次年 EPS 的研报，当前财年估值 = 通道 20% / 80% 分位 × 这家机构的未来 12 个月 EPS。
     """
     reports: Dict[Tuple[date, str, str, str], List[_ForecastRow]] = defaultdict(list)
     for record in pool:
         reports[record.report_key].append(record)
 
-    latest_by_org: Dict[str, Tuple[Tuple[date, str], List[_ForecastRow], Tuple[float, float]]] = {}
+    latest_target: Dict[str, Tuple[Tuple[date, str], List[_ForecastRow], Tuple[float, float]]] = {}
+    latest_forecast: Dict[str, Tuple[Tuple[date, str], List[_ForecastRow], float]] = {}
     for report_rows in reports.values():
+        recency = max(row.recency for row in report_rows)
+        org_name = report_rows[0].org_name
         bounds = next(
             ((row.target_low, row.target_high) for row in report_rows if row.target_low is not None),
             None,
         )
-        if bounds is None:
-            continue
-        recency = max(row.recency for row in report_rows)
-        org_name = report_rows[0].org_name
-        current = latest_by_org.get(org_name)
-        if current is None or recency > current[0]:
-            latest_by_org[org_name] = (recency, report_rows, bounds)
+        if bounds is not None:
+            current = latest_target.get(org_name)
+            if current is None or recency > current[0]:
+                latest_target[org_name] = (recency, report_rows, bounds)
+        if pe_band is not None and as_of is not None:
+            eps_by_year = {row.fiscal_year: row.eps for row in report_rows}
+            ntm = _ntm_value(eps_by_year.get(fiscal_years[0]), eps_by_year.get(fiscal_years[1]), as_of)
+            if ntm is not None and ntm > 0:
+                current = latest_forecast.get(org_name)
+                if current is None or recency > current[0]:
+                    latest_forecast[org_name] = (recency, report_rows, ntm)
 
-    views: List[Dict[str, Any]] = []
-    for org_name, (_, report_rows, (raw_low, raw_high)) in latest_by_org.items():
-        head = report_rows[0]
-        # 目标价按写研报时的股价口径给出；之后送转、分红除权的，按复权因子换算到估值口径，
-        # 否则除权后股价机械下跌、旧目标价不动，会凭空多出"低估"空间。
-        price_adjustment = _price_scale(head.price_factor, basis_factor)
-        target_low, target_high = raw_low * price_adjustment, raw_high * price_adjustment
-        by_year: Dict[int, _ForecastRow] = {}
-        for row in report_rows:
-            by_year[row.fiscal_year] = row
-        base = by_year.get(fiscal_years[0])
-        values: List[Optional[Dict[str, Any]]] = []
-        for offset, fiscal_year in enumerate(fiscal_years):
-            if offset == 0:
-                ratio, basis = 1.0, "target_price"
-            else:
-                ratio, basis = _forecast_ratio(base, by_year.get(fiscal_year))
-            if ratio is None:
-                values.append(None)
+    views = [
+        _organization_view(
+            org_name, report_rows, bounds, VALUATION_METHOD_TARGET_PRICE, fiscal_years, basis_factor,
+        )
+        for org_name, (_, report_rows, bounds) in latest_target.items()
+    ]
+    if pe_band is not None and as_of is not None:
+        for org_name, (_, report_rows, ntm) in latest_forecast.items():
+            if org_name in latest_target:
                 continue
-            low, high = target_low * ratio, target_high * ratio
-            values.append({
-                "fiscal_year": fiscal_year,
-                "lo": low,
-                "hi": high,
-                "mid": (low + high) / 2.0,
-                "ratio": ratio,
-                "basis": basis,
-                "base_quarter": base.quarter if offset and base is not None else None,
-                "quarter": f"{fiscal_year}Q4",
-            })
-        views.append({
-            "org_name": org_name,
-            "raw_org_names": sorted({row.raw_org_name for row in report_rows}),
-            "report_date": head.report_date,
-            "report_title": head.report_title,
-            "author_name": head.author_name,
-            "rating": next((row.rating for row in report_rows if row.rating), None),
-            "target_price_low": target_low,
-            "target_price_high": target_high,
-            "target_price_low_raw": raw_low,
-            "target_price_high_raw": raw_high,
-            "price_adjustment": price_adjustment,
-            "forecasts": [
-                {
-                    "quarter": row.quarter,
-                    "fiscal_year": row.fiscal_year,
-                    "eps": row.eps,
-                    "eps_adjusted": row.eps * price_adjustment if row.eps is not None else None,
-                    "np": row.np,
-                    "pe": row.pe,
-                }
-                for row in sorted(by_year.values(), key=lambda item: item.fiscal_year)
-            ],
-            "values": values,
-        })
+            views.append(_organization_view(
+                org_name,
+                report_rows,
+                (pe_band["low_pe"] * ntm, pe_band["high_pe"] * ntm),
+                VALUATION_METHOD_PE_BAND,
+                fiscal_years,
+                basis_factor,
+                extra={"ntm_eps": ntm, "ntm_weight": _ntm_weight(as_of)},
+            ))
     views.sort(key=lambda view: (view["target_price_low"], view["org_name"]))
     return views
 
@@ -607,15 +701,23 @@ def _aggregate_forecast_records(
     cutoffs: DisclosureCutoffs,
     *,
     basis_factor: Optional[float] = None,
+    pe_band: Optional[Mapping[str, Any]] = None,
     include_details: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """basis_factor 是输出价格口径对应的复权因子：取估值日当天的就是当天原始价格口径。"""
-    selected = _select_consensus_pool(records, as_of, cutoffs)
+    """basis_factor 是输出价格口径对应的复权因子：取估值日当天的就是当天原始价格口径。
+
+    pe_band 为这只股票的前瞻 PE 通道；只有状态可用时才启用，此时给了 EPS 预测的机构也
+    计入"能给出估值"的机构数。
+    """
+    band_usable = bool(pe_band) and pe_band.get("status") == PE_BAND_AVAILABLE
+    selected = _select_consensus_pool(
+        records, as_of, cutoffs, _has_target_or_eps if band_usable else _has_target_price,
+    )
     if selected is None:
         return None
     pool_name, pool_start, pool = selected
     fiscal_years = tuple(as_of.year + offset for offset in range(len(FORECAST_HORIZON_LABELS)))
-    views = _organization_views(pool, fiscal_years, basis_factor)
+    views = _organization_views(pool, fiscal_years, basis_factor, pe_band if band_usable else None, as_of)
     if not views:
         return None
     horizons = [
@@ -659,9 +761,11 @@ def _aggregate_forecast_records(
         "consensus_pe": current["pe"],
         "next_consensus_pe": following["pe"],
         "report_count": len({record.report_key for record in pool}),
-        # 每家机构只算它最新的一篇带目标价研报，所以带目标价研报数 = 机构数。
-        "target_report_count": len(views),
+        # 每家机构只算一篇研报；带目标价研报数 = 用目标价估值的机构数。
+        "target_report_count": sum(1 for view in views if view["method"] == VALUATION_METHOD_TARGET_PRICE),
         "organization_count": len(views),
+        "method_counts": dict(Counter(view["method"] for view in views)),
+        "pe_band": dict(pe_band) if pe_band else None,
         "rating": rating_counter.most_common(1)[0][0] if rating_counter else None,
     }
     if include_details:
@@ -675,6 +779,7 @@ def _aggregate_report_rows(
     cutoffs: DisclosureCutoffs,
     *,
     price_factors: Optional[_PriceFactors] = None,
+    pe_band: Optional[Mapping[str, Any]] = None,
     include_details: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """输出按估值日当天的原始价格口径，和当天收盘价直接可比。"""
@@ -683,8 +788,146 @@ def _aggregate_report_rows(
         as_of,
         cutoffs,
         basis_factor=price_factors.on_or_before(as_of) if price_factors else None,
+        pe_band=pe_band,
         include_details=include_details,
     )
+
+
+def _forward_pe_series(
+    records: Sequence[_ForecastRow],
+    disclosures: Sequence[Tuple[date, date]],
+    closes: Sequence[Tuple[date, float]],
+    price_factors: Optional[_PriceFactors],
+) -> List[Tuple[date, Optional[float]]]:
+    """逐个交易日的前瞻 PE = 股价 ÷ 一致预期未来 12 个月 EPS。
+
+    一致预期 EPS 走和估值同一套研报池规则(T/T-1 期、机构 + quarter 取最新)，只是
+    "能给出估值"的门槛换成给了 EPS 预测；股价和 EPS 都换算成后复权口径再相除，
+    除权前后可比。当天没有一致预期或 EPS 不为正时记为 None。
+    """
+    report_dates = [record.report_date for record in records]
+    cache_key = None
+    consensus: Optional[Tuple[Optional[float], Optional[float]]] = None
+    series: List[Tuple[date, Optional[float]]] = []
+    for day, close in closes:
+        visible = bisect_right(report_dates, day)
+        cutoffs = _disclosure_cutoffs_as_of(disclosures, day)
+        key = (visible, cutoffs, day.year)
+        if key != cache_key:
+            cache_key = key
+            selected = _select_consensus_pool(records[:visible], day, cutoffs, _has_eps_forecast)
+            if selected is None:
+                consensus = None
+            else:
+                # basis_factor=1 即后复权口径：EPS × 写研报时的复权因子。
+                forecasts = _consensus_forecasts(selected[2], (day.year, day.year + 1), 1.0)
+                consensus = (forecasts[day.year]["eps"], forecasts[day.year + 1]["eps"])
+        ntm = _ntm_value(consensus[0], consensus[1], day) if consensus else None
+        factor = price_factors.on_or_before(day) if price_factors else None
+        series.append((day, close * (factor or 1.0) / ntm if ntm is not None and ntm > 0 else None))
+    return series
+
+
+def _pe_band(series: Sequence[Tuple[date, Optional[float]]], as_of: date) -> Dict[str, Any]:
+    """as_of 当天可见的前瞻 PE 通道：近 3 年的 20% / 50% / 80% 分位。"""
+    window_start = as_of - timedelta(days=PE_BAND_WINDOW_DAYS)
+    window = [pe for day, pe in series if window_start < day <= as_of]
+    valid = sorted(pe for pe in window if pe is not None and pe > 0)
+    band: Dict[str, Any] = {
+        "status": "unavailable",
+        "reason": None,
+        "as_of": as_of,
+        "window_start": window_start,
+        "days": len(window),
+        "valid_days": len(valid),
+        "low_pe": None,
+        "mid_pe": None,
+        "high_pe": None,
+        "current_pe": next((pe for day, pe in reversed(series) if day <= as_of), None),
+    }
+    if len(valid) < PE_BAND_MIN_DAYS:
+        band["reason"] = "insufficient_history"
+        return band
+    band.update(
+        low_pe=_percentile(valid, PE_BAND_LOW_PERCENTILE),
+        mid_pe=_percentile(valid, 0.5),
+        high_pe=_percentile(valid, PE_BAND_HIGH_PERCENTILE),
+    )
+    if len(valid) < PE_BAND_MIN_VALID_RATIO * len(window):
+        band["reason"] = "unprofitable_or_uncovered"
+    elif band["high_pe"] > PE_BAND_MAX_WIDTH * band["low_pe"]:
+        band["reason"] = "unstable_multiple"
+    else:
+        band["status"] = PE_BAND_AVAILABLE
+    return band
+
+
+def _load_daily_closes(
+    db: Any,
+    symbols: Sequence[str],
+    *,
+    start: date,
+    end: date,
+) -> Dict[str, List[Tuple[date, float]]]:
+    closes: Dict[str, List[Tuple[date, float]]] = defaultdict(list)
+    for offset in range(0, len(symbols), 500):
+        chunk = symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        rows = db.execute(text(f"""
+            SELECT ts_code, trade_date, close
+            FROM a_stock_market_daily
+            WHERE ts_code IN ({placeholders})
+              AND trade_date > :start
+              AND trade_date <= :end
+              AND close > 0
+            ORDER BY ts_code, trade_date
+        """), {**symbol_params, "start": start, "end": end}).mappings().all()
+        for row in rows:
+            day = _row_to_date(row.get("trade_date"))
+            close = _positive_float(row.get("close"))
+            if day is not None and close is not None:
+                closes[str(row.get("ts_code") or "").strip().upper()].append((day, close))
+    return closes
+
+
+def compute_forward_pe_bands(
+    db: Any,
+    symbols: Iterable[str],
+    as_of: date,
+) -> Dict[str, Dict[str, Any]]:
+    """计算一批股票截至 as_of 的前瞻 PE 通道。全市场约 3000 只要二十来秒，列表页用
+    定时任务预先算好的结果；个股页只算一只，现算即可。"""
+    normalized_symbols = list(dict.fromkeys(
+        normalized for symbol in symbols
+        if (normalized := normalize_a_stock_symbol(symbol))
+    ))
+    if not normalized_symbols:
+        return {}
+    window_start = as_of - timedelta(days=PE_BAND_WINDOW_DAYS)
+    report_start = window_start - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS)
+    rows_by_symbol = _load_report_rows_by_symbol(
+        db, normalized_symbols, report_start=report_start, report_end=as_of,
+    )
+    covered = list(rows_by_symbol)
+    disclosures = load_a_stock_disclosure_dates(
+        db, covered, since=report_start - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
+    )
+    price_factors = load_a_stock_price_factors(
+        db, covered, start=report_start - timedelta(days=PRICE_FACTOR_PADDING_DAYS), end=as_of,
+    )
+    closes = _load_daily_closes(db, covered, start=window_start, end=as_of)
+    bands: Dict[str, Dict[str, Any]] = {}
+    for symbol in covered:
+        symbol_factors = price_factors.get(symbol)
+        series = _forward_pe_series(
+            _normalize_forecast_rows(rows_by_symbol[symbol], symbol_factors),
+            disclosures.get(symbol, []),
+            closes.get(symbol, []),
+            symbol_factors,
+        )
+        bands[symbol] = _pe_band(series, as_of)
+    return bands
 
 
 def _pool_fields(aggregate: Mapping[str, Any]) -> Dict[str, Any]:
@@ -706,6 +949,7 @@ def _iter_point_in_time_aggregates(
     disclosures: Sequence[Tuple[date, date]],
     trade_dates: Sequence[date],
     basis_for_day: Optional[Callable[[date], Optional[float]]] = None,
+    pe_band_for_day: Optional[Callable[[date], Optional[Mapping[str, Any]]]] = None,
 ):
     """逐个交易日回放共识：只看当天及以前的研报、当天已披露的财报。
 
@@ -719,11 +963,12 @@ def _iter_point_in_time_aggregates(
         visible = bisect_right(report_dates, trade_day)
         cutoffs = _disclosure_cutoffs_as_of(disclosures, trade_day)
         basis = basis_for_day(trade_day) if basis_for_day else None
-        key = (visible, cutoffs, trade_day.year, basis)
+        pe_band = pe_band_for_day(trade_day) if pe_band_for_day else None
+        key = (visible, cutoffs, trade_day.year, basis, id(pe_band) if pe_band else None)
         if key != cache_key:
             cache_key = key
             aggregate = _aggregate_forecast_records(
-                records[:visible], trade_day, cutoffs, basis_factor=basis,
+                records[:visible], trade_day, cutoffs, basis_factor=basis, pe_band=pe_band,
             )
         yield trade_day, aggregate, basis
 
@@ -734,6 +979,7 @@ def build_a_stock_consensus_candidates(
     *,
     disclosures: Optional[Mapping[str, Sequence[Tuple[date, date]]]] = None,
     price_factors: Optional[Mapping[str, _PriceFactors]] = None,
+    pe_bands: Optional[Mapping[str, Mapping[str, Any]]] = None,
     search_symbol: str = "",
     has_search: bool = False,
     min_market_cap_100m: Optional[float] = 100.0,
@@ -777,6 +1023,7 @@ def build_a_stock_consensus_candidates(
             latest_trade_date,
             _disclosure_cutoffs_as_of(disclosures.get(symbol, []), latest_trade_date),
             price_factors=price_factors.get(symbol),
+            pe_band=pe_bands.get(symbol) if pe_bands else None,
         )
         if aggregate is None:
             continue
@@ -830,6 +1077,8 @@ def build_a_stock_consensus_candidates(
             "target_report_count": aggregate["target_report_count"],
             "organization_count": aggregate["organization_count"],
             "rating": aggregate["rating"],
+            "method_counts": aggregate["method_counts"],
+            "pe_band": aggregate["pe_band"],
             **_pool_fields(aggregate),
         })
 
@@ -880,8 +1129,12 @@ def build_a_stock_rolling_consensus_history(
     *,
     disclosures: Sequence[Tuple[date, date]] = (),
     price_factors: Optional[_PriceFactors] = None,
+    closes: Optional[Sequence[Tuple[date, float]]] = None,
 ) -> List[Dict[str, Any]]:
     """逐个交易日的共识估值。某天没有估值(T-1 池也空)就不出点，前端按前值填充画线。
+
+    传入 closes(需覆盖图表起点往前 3 年)时启用前瞻 PE 通道：每个交易日用当天之前 3 年的
+    通道，每 PE_BAND_REFRESH_EVERY_DAYS 个交易日重算一次，不用未来数据。
 
     个股 K 线画的是前复权价(a_stock_market_daily_qfq，锚点是最新复权因子)，估值线统一
     换算到同一个锚点，除权前后的线才能和 K 线对齐。
@@ -891,10 +1144,22 @@ def build_a_stock_rolling_consensus_history(
     if not normalized_dates or not records:
         return []
     anchor = price_factors.latest if price_factors else None
+    bands_by_day: Dict[date, Dict[str, Any]] = {}
+    if closes is not None:
+        series = _forward_pe_series(records, disclosures, closes, price_factors)
+        band: Optional[Dict[str, Any]] = None
+        for index, trade_day in enumerate(normalized_dates):
+            if band is None or index % PE_BAND_REFRESH_EVERY_DAYS == 0:
+                band = _pe_band(series, trade_day)
+            bands_by_day[trade_day] = band
     return [
         _history_point(trade_day, aggregate)
         for trade_day, aggregate, _ in _iter_point_in_time_aggregates(
-            records, disclosures, normalized_dates, basis_for_day=lambda _day: anchor,
+            records,
+            disclosures,
+            normalized_dates,
+            basis_for_day=lambda _day: anchor,
+            pe_band_for_day=bands_by_day.get if bands_by_day else None,
         )
         if aggregate is not None
     ]
@@ -912,6 +1177,7 @@ def load_a_stock_consensus_history(
     symbol: str,
     *,
     limit: int = 1260,
+    use_pe_band: bool = False,
 ) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_a_stock_symbol(symbol)
     if not normalized_symbol:
@@ -932,7 +1198,9 @@ def load_a_stock_consensus_history(
     if not trade_dates:
         return []
     earliest_trade_date = min(trade_dates)
-    report_start = earliest_trade_date - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS)
+    # 开启前瞻 PE 通道时，图表第一天也要有它之前 3 年的通道，研报和股价都得往前多取 3 年。
+    band_start = earliest_trade_date - timedelta(days=PE_BAND_WINDOW_DAYS) if use_pe_band else earliest_trade_date
+    report_start = band_start - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS)
     rows = db.execute(
         text(
             f"""
@@ -951,21 +1219,30 @@ def load_a_stock_consensus_history(
     disclosures = load_a_stock_disclosure_dates(
         db,
         [normalized_symbol],
-        since=earliest_trade_date - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
+        since=report_start - timedelta(days=DISCLOSURE_FETCH_LOOKBACK_DAYS),
     )
     price_factors = load_a_stock_price_factors(
         db, [normalized_symbol], start=report_start - timedelta(days=PRICE_FACTOR_PADDING_DAYS),
     )
+    closes = None
+    if use_pe_band:
+        closes = _load_daily_closes(
+            db, [normalized_symbol], start=band_start, end=max(trade_dates),
+        ).get(normalized_symbol, [])
     return build_a_stock_rolling_consensus_history(
         rows,
         trade_dates,
         disclosures=disclosures.get(normalized_symbol, []),
         price_factors=price_factors.get(normalized_symbol),
+        closes=closes,
     )
 
 
-def load_a_stock_consensus_detail(db: Any, symbol: str) -> Dict[str, Any]:
-    """个股详情页用：最新交易日的三个财年估值上下限，以及每家机构的研报明细。"""
+def load_a_stock_consensus_detail(db: Any, symbol: str, *, use_pe_band: bool = False) -> Dict[str, Any]:
+    """个股详情页用：最新交易日的三个财年估值上下限，以及每家机构的研报明细。
+
+    use_pe_band 时现算这一只股票的前瞻 PE 通道，没给目标价的机构用通道补估值。
+    """
     normalized_symbol = normalize_a_stock_symbol(symbol)
     if not normalized_symbol:
         return {"status": "unavailable", "reason": "invalid_symbol"}
@@ -1021,8 +1298,11 @@ def load_a_stock_consensus_detail(db: Any, symbol: str) -> Dict[str, Any]:
         start=as_of - timedelta(days=REPORT_FETCH_LOOKBACK_DAYS + PRICE_FACTOR_PADDING_DAYS),
         end=as_of,
     ).get(normalized_symbol)
+    pe_band = compute_forward_pe_bands(db, [normalized_symbol], as_of).get(normalized_symbol) if use_pe_band else None
+    payload["use_pe_band"] = use_pe_band
+    payload["pe_band"] = pe_band
     aggregate = _aggregate_report_rows(
-        rows, as_of, cutoffs, price_factors=price_factors, include_details=True,
+        rows, as_of, cutoffs, price_factors=price_factors, pe_band=pe_band, include_details=True,
     )
     if aggregate is None:
         payload.update(
@@ -1034,6 +1314,7 @@ def load_a_stock_consensus_detail(db: Any, symbol: str) -> Dict[str, Any]:
         status="available",
         **_pool_fields(aggregate),
         organization_count=aggregate["organization_count"],
+        method_counts=aggregate["method_counts"],
         report_count=aggregate["report_count"],
         latest_report_date=_date_to_iso(aggregate["latest_report_date"]),
         horizons=aggregate["horizons"],
@@ -1350,7 +1631,9 @@ def search_a_stock_consensus_candidates(
     min_growth_pct: Optional[float] = 10.0,
     min_organization_count: int = 1,
     limit: int = 200,
+    pe_bands: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
+    """pe_bands 为预先算好的前瞻 PE 通道(开启"PE 通道补估值"时传入)。"""
     latest_trade_date = _row_to_date(
         db.execute(text("SELECT MAX(trade_date) FROM a_stock_market_daily")).scalar()
     )
@@ -1416,6 +1699,7 @@ def search_a_stock_consensus_candidates(
         latest_trade_date,
         disclosures=disclosures,
         price_factors=price_factors,
+        pe_bands=pe_bands,
         search_symbol=search_symbol,
         has_search=has_search,
         min_market_cap_100m=min_market_cap_100m,
