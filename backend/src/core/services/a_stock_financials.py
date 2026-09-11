@@ -73,6 +73,7 @@ INDICATOR_CORE_COLUMNS = (
     "roic",
     "eps",
     "dt_eps",               # 扣非每股收益
+    "profit_dedt",          # 扣非归母净利润(元)
     "bps",                  # 每股净资产
     "ocfps",                # 每股经营现金流
     "debt_to_assets",
