@@ -31,7 +31,7 @@ import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import { useAccount } from '../contexts/AccountContext';
-import XueqiuStockLink from '../components/XueqiuStockLink';
+import StockDetailLink from '../components/StockDetailLink';
 import './AIStock.css';
 
 const { Text, Title } = Typography;
@@ -209,7 +209,7 @@ const recommendationColumns = (quotes, flashes) => [
     render: (_, item) => (
       <Space direction="vertical" size={0}>
         <Text strong>{item.name}</Text>
-        <XueqiuStockLink symbol={item.ts_code}>{item.ts_code}</XueqiuStockLink>
+        <StockDetailLink symbol={item.ts_code}>{item.ts_code}</StockDetailLink>
         {item.industry ? <Text type="secondary" style={{ fontSize: 12 }}>{item.industry}</Text> : null}
       </Space>
     ),
@@ -311,7 +311,7 @@ const todayColumns = (quotes, flashes) => [
     render: (_, item) => (
       <Space direction="vertical" size={0}>
         <Text strong>{item.name}</Text>
-        <XueqiuStockLink symbol={item.ts_code}>{item.ts_code}</XueqiuStockLink>
+        <StockDetailLink symbol={item.ts_code}>{item.ts_code}</StockDetailLink>
       </Space>
     ),
   },
@@ -672,7 +672,7 @@ const AIStock = () => {
   }, [holdEvals]);
 
   const positionColumns = [
-    { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><XueqiuStockLink symbol={row.ts_code}>{row.ts_code}</XueqiuStockLink></Space> },
+    { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><StockDetailLink symbol={row.ts_code}>{row.ts_code}</StockDetailLink></Space> },
     { title: '持仓', dataIndex: 'quantity', width: 90, align: 'right' },
     { title: '可卖', dataIndex: 'sellable_quantity', width: 90, align: 'right' },
     { title: '成本', dataIndex: 'cost', width: 90, align: 'right', render: money },
@@ -702,7 +702,7 @@ const AIStock = () => {
   const tradeColumns = [
     { title: '时间', dataIndex: 'executed_at', width: 150, render: dateTime },
     { title: '方向', dataIndex: 'side', width: 72, render: side => <Tag color={side === 'BUY' ? 'blue' : 'red'}>{side === 'BUY' ? '买入' : '卖出'}</Tag> },
-    { title: '股票', key: 'stock', width: 140, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><XueqiuStockLink symbol={row.ts_code}>{row.ts_code}</XueqiuStockLink></Space> },
+    { title: '股票', key: 'stock', width: 140, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><StockDetailLink symbol={row.ts_code}>{row.ts_code}</StockDetailLink></Space> },
     { title: '成交', key: 'fill', width: 140, align: 'right', render: (_, row) => `${row.quantity} × ${money(row.price)}` },
     { title: '费用', dataIndex: 'fee', width: 90, align: 'right', render: money },
     { title: '已实现盈亏', dataIndex: 'realized_pnl', width: 112, align: 'right', render: value => <Text className={valueClass(value)}>{money(value)}</Text> },
@@ -816,7 +816,7 @@ const AIStock = () => {
   );
 
   const holdAdviceColumns = [
-    { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><XueqiuStockLink symbol={row.ts_code}>{row.ts_code}</XueqiuStockLink></Space> },
+    { title: '股票', key: 'stock', width: 150, render: (_, row) => <Space direction="vertical" size={0}><Text strong>{row.name}</Text><StockDetailLink symbol={row.ts_code}>{row.ts_code}</StockDetailLink></Space> },
     { title: '建议', dataIndex: 'action', width: 84, align: 'center', render: value => <Tag color={value === '卖出' ? 'red' : 'green'}>{value}</Tag> },
     { title: '现价', dataIndex: 'price', width: 90, align: 'right', render: value => (value === null || value === undefined ? '-' : money(value)) },
     { title: '盈亏', dataIndex: 'pnl_pct', width: 90, align: 'right', render: value => (value === null || value === undefined ? '-' : <Text className={valueClass(value)}>{percent(value)}</Text>) },

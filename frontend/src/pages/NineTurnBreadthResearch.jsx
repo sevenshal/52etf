@@ -16,7 +16,7 @@ import {
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import request from '../utils/request';
-import XueqiuStockLink from '../components/XueqiuStockLink';
+import StockDetailLink from '../components/StockDetailLink';
 import './NineTurnBreadthResearch.css';
 
 const { Text, Title } = Typography;
@@ -77,7 +77,7 @@ const detailColumns = [
     render: (value, record) => (
       <Space direction="vertical" size={0}>
         <Text strong>{value || record.ts_code}</Text>
-        <XueqiuStockLink symbol={record.ts_code} className="nine-turn-detail__code">{record.ts_code}</XueqiuStockLink>
+        <StockDetailLink symbol={record.ts_code} className="nine-turn-detail__code">{record.ts_code}</StockDetailLink>
       </Space>
     ),
   },
