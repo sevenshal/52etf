@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Literal, Optional, List
 from sqlalchemy.orm import Session
 from ...core.database import StockEVC, StockTag, stock_tags, get_db
 from sqlalchemy import func, and_
@@ -33,6 +33,8 @@ class AStockConsensusSearchRequest(BaseModel):
     min_undervalue_pct: Optional[float] = 10.0
     min_growth_pct: Optional[float] = 10.0
     min_organization_count: int = 1
+    # fresh = 只看 T 池(最新)，stale = 只看退到 T-1 池的"待更新"；不传则不筛选。
+    stale_filter: Optional[Literal["fresh", "stale"]] = None
     # 开启后，没给目标价的机构用前瞻 PE 通道(定时任务预先算好)补估值。
     use_pe_band: bool = False
     limit: int = 200
@@ -177,6 +179,7 @@ async def a_stock_consensus_search(
             min_undervalue_pct=request.min_undervalue_pct,
             min_growth_pct=request.min_growth_pct,
             min_organization_count=request.min_organization_count,
+            stale_filter=request.stale_filter,
             pe_bands=load_a_stock_consensus_pe_bands() if request.use_pe_band else None,
             limit=request.limit,
         )

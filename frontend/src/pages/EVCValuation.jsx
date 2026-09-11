@@ -128,6 +128,7 @@ const EVCValuation = () => {
                 'min_undervalue_pct',
                 'min_growth_pct',
                 'min_organization_count',
+                'stale_filter',
                 'limit'
             ].forEach((key) => {
                 if (payload[key] === null || payload[key] === undefined || payload[key] === '') {
@@ -560,6 +561,20 @@ const EVCValuation = () => {
             </Form.Item>
             <Form.Item label="最少机构数" name="min_organization_count">
                 <InputNumber min={1} max={50} step={1} />
+            </Form.Item>
+            <Form.Item
+                label="估值状态"
+                name="stale_filter"
+                tooltip="待更新 = T期（最新一期定期报告）披露后能给出估值的机构不足2家，已退到T-1期披露日之后的研报"
+            >
+                <Select
+                    allowClear
+                    placeholder="全部"
+                    options={[
+                        { value: 'fresh', label: '只看最新（T池）' },
+                        { value: 'stale', label: '只看待更新（T-1池）' },
+                    ]}
+                />
             </Form.Item>
             <Form.Item
                 label="PE通道补估值"

@@ -12,6 +12,10 @@ from sqlalchemy import text
 A_STOCK_MARKET_CAP_UNIT = 10_000.0
 FLOAT_COMPARE_EPSILON = 1e-9
 
+# 列表按估值状态筛选：fresh = 只看 T 池(最新)，stale = 只看退到 T-1 池的(待更新)。
+STALE_FILTER_FRESH = "fresh"
+STALE_FILTER_STALE = "stale"
+
 # 研报候选池：先用 T 期(最新一份已披露定期报告)披露日之后的研报；给出目标价的机构
 # 不足 MIN_POOL_ORGANIZATIONS 家时退到 T-1 期披露日之后，最多退到 T-1，再没有就不估值。
 CONSENSUS_POOL_T = "T"
@@ -987,6 +991,7 @@ def build_a_stock_consensus_candidates(
     min_undervalue_pct: Optional[float] = 10.0,
     min_growth_pct: Optional[float] = 10.0,
     min_organization_count: int = 1,
+    stale_filter: Optional[str] = None,
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
     if latest_trade_date is None:
@@ -1047,6 +1052,10 @@ def build_a_stock_consensus_candidates(
             if min_growth_pct is not None and (
                 growth_pct is None or growth_pct + FLOAT_COMPARE_EPSILON < float(min_growth_pct)
             ):
+                continue
+            if stale_filter == STALE_FILTER_FRESH and aggregate["is_stale"]:
+                continue
+            if stale_filter == STALE_FILTER_STALE and not aggregate["is_stale"]:
                 continue
 
         candidates.append({
@@ -1630,6 +1639,7 @@ def search_a_stock_consensus_candidates(
     min_undervalue_pct: Optional[float] = 10.0,
     min_growth_pct: Optional[float] = 10.0,
     min_organization_count: int = 1,
+    stale_filter: Optional[str] = None,
     limit: int = 200,
     pe_bands: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
@@ -1707,5 +1717,6 @@ def search_a_stock_consensus_candidates(
         min_undervalue_pct=min_undervalue_pct,
         min_growth_pct=min_growth_pct,
         min_organization_count=min_organization_count,
+        stale_filter=stale_filter,
         limit=limit,
     )
