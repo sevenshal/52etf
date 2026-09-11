@@ -5,6 +5,7 @@ import request from '../utils/request';
 import StockKlineChart from '../components/StockKlineChart';
 import XueqiuStockLink from '../components/XueqiuStockLink';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
+import { useAccount } from '../contexts/AccountContext';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
 import StockFinancialsCard from '../components/StockFinancialsCard';
 import StockValueInvestingCard from '../components/StockValueInvestingCard';
@@ -42,6 +43,9 @@ const StockDetail = () => {
   const symbolSearchTimer = useRef(null);
   const symbolSearchSequence = useRef(0);
   const { quotes, register } = useRealtimeQuotes('stock_detail_page');
+  // 雪球持仓数据属于管理员专属的因子实验室（接口是 valid_admin_account），
+  // 非管理员不请求、K 线上也就不出现雪球副图，维持原有权限不变
+  const { isAdmin } = useAccount();
 
   useEffect(() => {
     register(isAStock ? [normalizedSymbol] : []);
@@ -211,6 +215,9 @@ const StockDetail = () => {
           valuationDateOffsetDays={isAStock ? 0 : -1}
           realtimeQuote={isAStock ? quotes[normalizedSymbol] : null}
           eventsUrl={isAStock ? `/api/stock/a-stock/chart-events/${normalizedSymbol}` : undefined}
+          xueqiuHistoryUrl={isAStock && isAdmin
+            ? `/api/factor-lab/xueqiu-top-holdings/history?symbol=${normalizedSymbol}`
+            : undefined}
           onKlinesChange={setKlines}
           height={600}
         />
