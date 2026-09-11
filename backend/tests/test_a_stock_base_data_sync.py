@@ -1256,6 +1256,22 @@ class AStockBaseDataSyncTest(TestCase):
                 assert fake_tushare.fetch_calls == [
                     (date(2026, 5, 22), date(2026, 5, 30), {"raise_on_error": True})
                 ]
+
+                # 全量区间按月切，单次查询才不会撞上 tushare report_rc 的 offset 上限
+                fake_tushare.fetch_calls.clear()
+                service = AStockBaseDataSyncService(analytics_db=AnalyticsSession(), tushare_service=fake_tushare)
+                try:
+                    result = service.sync_report_rc(date(2023, 12, 15), date(2024, 3, 10), incremental=False)
+                finally:
+                    service.close()
+                    AnalyticsSession.remove()
+                assert result["chunks"] == 4
+                assert [call[:2] for call in fake_tushare.fetch_calls] == [
+                    (date(2023, 12, 15), date(2023, 12, 31)),
+                    (date(2024, 1, 1), date(2024, 1, 31)),
+                    (date(2024, 2, 1), date(2024, 2, 29)),
+                    (date(2024, 3, 1), date(2024, 3, 10)),
+                ]
                 """
             )
             env = os.environ.copy()
