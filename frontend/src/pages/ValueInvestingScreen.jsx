@@ -17,7 +17,7 @@ import {
 } from 'antd';
 import { InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import request from '../utils/request';
-import XueqiuStockLink from '../components/XueqiuStockLink';
+import StockDetailLink from '../components/StockDetailLink';
 import ValueInvestingDetail, {
   SignedPercent,
   formatNumber,
@@ -82,7 +82,7 @@ const buildColumns = () => [
             </Tooltip>
           )}
         </Space>
-        <XueqiuStockLink symbol={record.ts_code}>{record.ts_code}</XueqiuStockLink>
+        <StockDetailLink symbol={record.ts_code}>{record.ts_code}</StockDetailLink>
       </Space>
     ),
   },
@@ -204,7 +204,7 @@ const excludedColumns = [
     render: (_, record) => (
       <Space direction="vertical" size={0}>
         <Text strong>{record.name || record.ts_code}</Text>
-        <XueqiuStockLink symbol={record.ts_code}>{record.ts_code}</XueqiuStockLink>
+        <StockDetailLink symbol={record.ts_code}>{record.ts_code}</StockDetailLink>
       </Space>
     ),
   },
