@@ -767,6 +767,16 @@ def _run_a_stock_index_valuation_refresh(symbols: Optional[Any] = None):
     return message
 
 
+def _run_a_stock_consensus_pe_band_refresh():
+    from ..core.services.a_stock_consensus_pe_band import refresh_a_stock_consensus_pe_bands
+
+    result = refresh_a_stock_consensus_pe_bands()
+    return (
+        "A stock consensus PE band refresh "
+        f"as_of={result.get('as_of')} saved={result.get('saved', 0)} available={result.get('available', 0)}"
+    )
+
+
 def _run_hk_stock_base_data_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1545,6 +1555,15 @@ class ScheduledTaskManager:
                         description="可选，逗号/空格分隔，例如 MICRO400.CN,INNO100.CN；为空时计算全部A股指数。",
                     ),
                 ),
+            ),
+            "a_stock_consensus_pe_band_refresh": TaskDefinition(
+                task_key="a_stock_consensus_pe_band_refresh",
+                name="A股前瞻PE通道更新",
+                description="按研报一致预期 EPS 计算个股近 3 年前瞻 PE 通道（20%/80% 分位），供 A股估值列表开启“PE通道补估值”时使用；个股详情页现算，不依赖本任务。",
+                default_time="18:45",
+                default_enabled=True,
+                sort_order=77,
+                runner=_run_a_stock_consensus_pe_band_refresh,
             ),
             "a_stock_index_valuation_refresh": TaskDefinition(
                 task_key="a_stock_index_valuation_refresh",

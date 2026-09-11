@@ -408,6 +408,20 @@ class AStockIndexValuationSnapshot(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class AStockConsensusPeBand(Base):
+    """A股个股前瞻 PE 通道：近 3 年每天 股价 ÷ 一致预期未来 12 个月 EPS 的 20%/50%/80% 分位。
+
+    全市场现算要二十来秒，由定时任务每天算好，供 A股估值列表开启"PE 通道补估值"时读取；
+    每只股票只保留最新一次计算结果。
+    """
+    __tablename__ = "a_stock_consensus_pe_bands"
+
+    symbol = Column(String(32), primary_key=True)
+    as_of = Column(Date, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class AStockFearGreedIntraday(Base):
     """A股盘中贪恐快照（12:00 等盘中时点），独立于日频最终历史库 etf_fear_greed_clone_history。"""
     __tablename__ = "a_stock_fear_greed_intraday"

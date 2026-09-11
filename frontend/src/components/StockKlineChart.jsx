@@ -61,6 +61,8 @@ const buildValuationContext = (dates, valuationHistory, fillMode, dateOffsetDays
   const fairValueLo = [];
   const forwardNextFyHi = [];
   const forwardNextFyLo = [];
+  const forwardNext2FyHi = [];
+  const forwardNext2FyLo = [];
   const valuationByDate = {};
 
   const sortedHistory = [...(valuationHistory || [])]
@@ -77,8 +79,10 @@ const buildValuationContext = (dates, valuationHistory, fillMode, dateOffsetDays
       fairValueLo.push(null);
       forwardNextFyHi.push(null);
       forwardNextFyLo.push(null);
+      forwardNext2FyHi.push(null);
+      forwardNext2FyLo.push(null);
     });
-    return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, valuationByDate };
+    return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, forwardNext2FyHi, forwardNext2FyLo, valuationByDate };
   }
 
   if (fillMode === 'forward') {
@@ -94,8 +98,10 @@ const buildValuationContext = (dates, valuationHistory, fillMode, dateOffsetDays
       fairValueLo.push(toFiniteNumber(latestHistory?.fair_value_lo));
       forwardNextFyHi.push(toFiniteNumber(latestHistory?.forward_next_fy_hi));
       forwardNextFyLo.push(toFiniteNumber(latestHistory?.forward_next_fy_lo));
+      forwardNext2FyHi.push(toFiniteNumber(latestHistory?.forward_next2_fy_hi));
+      forwardNext2FyLo.push(toFiniteNumber(latestHistory?.forward_next2_fy_lo));
     });
-    return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, valuationByDate };
+    return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, forwardNext2FyHi, forwardNext2FyLo, valuationByDate };
   }
 
   const historyMap = {};
@@ -109,8 +115,10 @@ const buildValuationContext = (dates, valuationHistory, fillMode, dateOffsetDays
     fairValueLo.push(toFiniteNumber(item?.fair_value_lo));
     forwardNextFyHi.push(toFiniteNumber(item?.forward_next_fy_hi));
     forwardNextFyLo.push(toFiniteNumber(item?.forward_next_fy_lo));
+    forwardNext2FyHi.push(toFiniteNumber(item?.forward_next2_fy_hi));
+    forwardNext2FyLo.push(toFiniteNumber(item?.forward_next2_fy_lo));
   });
-  return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, valuationByDate };
+  return { fairValueHi, fairValueLo, forwardNextFyHi, forwardNextFyLo, forwardNext2FyHi, forwardNext2FyLo, valuationByDate };
 };
 
 const hasSeriesData = (values) => values.some(value => value !== null && value !== undefined);
@@ -237,6 +245,8 @@ const StockKlineChart = ({
       fairValueLo,
       forwardNextFyHi,
       forwardNextFyLo,
+      forwardNext2FyHi,
+      forwardNext2FyLo,
       valuationByDate,
     } = buildValuationContext(dates, valuationHistory, valuationFillMode, valuationDateOffsetDays);
 
@@ -244,6 +254,8 @@ const StockKlineChart = ({
     const hasFairValueLo = hasSeriesData(fairValueLo);
     const hasForwardNextFyHi = hasSeriesData(forwardNextFyHi);
     const hasForwardNextFyLo = hasSeriesData(forwardNextFyLo);
+    const hasForwardNext2FyHi = hasSeriesData(forwardNext2FyHi);
+    const hasForwardNext2FyLo = hasSeriesData(forwardNext2FyLo);
 
     const klineData = processedKlines.map((item) => {
       const isUp = item.close >= item.open;
@@ -576,6 +588,26 @@ const StockKlineChart = ({
         connectNulls: true
       });
     }
+    if (hasForwardNext2FyHi) {
+      series.push({
+        name: '下下财年估值上限',
+        type: 'line',
+        data: forwardNext2FyHi,
+        lineStyle: { color: '#FF9C6E', width: 2, type: 'dashed' },
+        symbol: 'none',
+        connectNulls: true
+      });
+    }
+    if (hasForwardNext2FyLo) {
+      series.push({
+        name: '下下财年估值下限',
+        type: 'line',
+        data: forwardNext2FyLo,
+        lineStyle: { color: '#5CDBD3', width: 2, type: 'dashed' },
+        symbol: 'none',
+        connectNulls: true
+      });
+    }
 
     return {
       animation: false,
@@ -698,6 +730,11 @@ const StockKlineChart = ({
                 <span style="color:#FFA6A6;">下财年上限：</span>${fmtPrice(toFiniteNumber(valuation.forward_next_fy_hi))}
                 <span style="color:#66CCFF;margin-left:10px;">下财年下限：</span>${fmtPrice(toFiniteNumber(valuation.forward_next_fy_lo))}
               </div>
+              ${valuation.forward_next2_fy_hi !== undefined ? `
+              <div style="margin-bottom: 4px;">
+                <span style="color:#FF9C6E;">下下财年上限：</span>${fmtPrice(toFiniteNumber(valuation.forward_next2_fy_hi))}
+                <span style="color:#5CDBD3;margin-left:10px;">下下财年下限：</span>${fmtPrice(toFiniteNumber(valuation.forward_next2_fy_lo))}
+              </div>` : ''}
             `;
           }
           return result;
@@ -719,12 +756,16 @@ const StockKlineChart = ({
           ...(hasFairValueLo ? ['估值下限'] : []),
           ...(hasForwardNextFyHi ? ['下财年估值上限'] : []),
           ...(hasForwardNextFyLo ? ['下财年估值下限'] : []),
+          ...(hasForwardNext2FyHi ? ['下下财年估值上限'] : []),
+          ...(hasForwardNext2FyLo ? ['下下财年估值下限'] : []),
         ],
         selected: {
           '最近支撑': false,
           '最近压力': false,
           '下财年估值上限': false,
           '下财年估值下限': false,
+          '下下财年估值上限': false,
+          '下下财年估值下限': false,
         }
       },
       // 三个 grid 上下叠放：主图 / 成交量 / MACD，日期标签只留在最下面那个副图上，

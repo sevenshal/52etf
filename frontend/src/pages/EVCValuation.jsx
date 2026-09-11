@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Tag, Tooltip } from 'antd';
+import { Empty, Form, Grid, InputNumber, Input, Button, Table, message, Tabs, Select, Switch, Tag, Tooltip } from 'antd';
 import { FilterOutlined, SearchOutlined, StarFilled, StarOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import request from '../utils/request';
@@ -21,8 +21,8 @@ const A_STOCK_DEFAULT_VALUES = {
     max_market_cap_100m: null,
     min_undervalue_pct: 10,
     min_growth_pct: 10,
-    report_lookback_days: 60,
-    min_report_count: 5,
+    min_organization_count: 1,
+    use_pe_band: false,
     limit: 200
 };
 
@@ -127,8 +127,7 @@ const EVCValuation = () => {
                 'max_market_cap_100m',
                 'min_undervalue_pct',
                 'min_growth_pct',
-                'report_lookback_days',
-                'min_report_count',
+                'min_organization_count',
                 'limit'
             ].forEach((key) => {
                 if (payload[key] === null || payload[key] === undefined || payload[key] === '') {
@@ -363,18 +362,35 @@ const EVCValuation = () => {
         (col.key !== 'market_cap_100m' || stocks.some(stock => stock.market_cap_100m !== null && stock.market_cap_100m !== undefined))
     ));
 
-    // 共识只取最近一次年报公告日之后的研报；若年报后还没有新研报，退回上一次年报
-    // 之后的研报参与计算，这时估值口径已经落后一个财年，必须显式标注。
+    // 研报池：T 期(最新一期定期报告)披露后给出目标价的机构不足 2 家时，退到 T-1 期
+    // 披露日之后的研报参与计算，估值口径相对滞后，必须显式标注。
     const renderStaleTag = (record) => {
         if (!record?.is_stale) {
             return null;
         }
-        const tip = record.consensus_window === 'post_prev_annual'
-            ? `最近一次年报(${record.latest_annual_ann_date || '-'})后暂无新研报，当前取上一次年报之后的研报计算`
-            : '缺少年报公告日，无法按年报切分研报窗口';
+        const tip = `T期(${record.t_period_label || '-'}，${record.t_disclosure_date || '-'}披露)之后给出目标价的机构不足2家，`
+            + `已退到T-1期(${record.t1_period_label || '-'}，${record.t1_disclosure_date || '-'}披露)之后的研报计算`
+            + (record.organization_count === 1 ? '，且只有1家机构' : '');
         return (
             <Tooltip title={tip}>
                 <Tag color="orange" style={{ marginLeft: 4 }}>待更新</Tag>
+            </Tooltip>
+        );
+    };
+
+    // 开启"PE通道补估值"后，没给目标价的机构用前瞻 PE 通道估值，这里标出来，避免和纯目标价口径混淆。
+    const renderPeBandTag = (record) => {
+        const count = record?.method_counts?.pe_band || 0;
+        if (!count) {
+            return null;
+        }
+        const band = record.pe_band || {};
+        const range = band.low_pe && band.high_pe
+            ? `${Number(band.low_pe).toFixed(1)}~${Number(band.high_pe).toFixed(1)}倍`
+            : '-';
+        return (
+            <Tooltip title={`${count}家机构未给目标价，用前瞻PE通道（近3年20%~80%分位 ${range}）× 该机构未来12个月EPS估值`}>
+                <Tag color="purple" style={{ marginLeft: 4 }}>PE通道</Tag>
             </Tooltip>
         );
     };
@@ -401,6 +417,7 @@ const EVCValuation = () => {
                 <span className="evc-stock-name">
                     {value || '-'}
                     {renderStaleTag(record)}
+                    {renderPeBandTag(record)}
                 </span>
             )
         },
@@ -457,7 +474,7 @@ const EVCValuation = () => {
             sorter: (a, b) => (a.circ_market_cap_100m || 0) - (b.circ_market_cap_100m || 0),
             render: value => formatFixed(value, 1)
         },
-        { title: '研报数', dataIndex: 'target_report_count', key: 'target_report_count', width: 80, sorter: (a, b) => (a.target_report_count || 0) - (b.target_report_count || 0) },
+        { title: '研报数', dataIndex: 'report_count', key: 'report_count', width: 80, sorter: (a, b) => (a.report_count || 0) - (b.report_count || 0) },
         { title: '机构数', dataIndex: 'organization_count', key: 'organization_count', width: 80, sorter: (a, b) => (a.organization_count || 0) - (b.organization_count || 0) },
         { title: '评级', dataIndex: 'rating', key: 'rating', width: 80, render: value => value || '-' },
         { title: '行情日', dataIndex: 'trade_date', key: 'trade_date', width: 100 },
@@ -541,11 +558,16 @@ const EVCValuation = () => {
             <Form.Item label="市值上限(亿元)" name="max_market_cap_100m">
                 <InputNumber min={0} step={10} />
             </Form.Item>
-            <Form.Item label="研报窗口(天)" name="report_lookback_days">
-                <InputNumber min={1} max={1095} step={30} />
-            </Form.Item>
-            <Form.Item label="最少研报数" name="min_report_count">
+            <Form.Item label="最少机构数" name="min_organization_count">
                 <InputNumber min={1} max={50} step={1} />
+            </Form.Item>
+            <Form.Item
+                label="PE通道补估值"
+                name="use_pe_band"
+                valuePropName="checked"
+                tooltip="开启后，没给目标价的机构用该股近3年前瞻PE的20%~80%分位 × 该机构未来12个月EPS估值（通道每天收盘后预先算好）"
+            >
+                <Switch />
             </Form.Item>
             {!compact && (
                 <Form.Item className="evc-filter-form__submit">
@@ -647,6 +669,7 @@ const EVCValuation = () => {
                                 </Link>
                                 <span>{record.name || '-'}</span>
                                 {renderStaleTag(record)}
+                                {renderPeBandTag(record)}
                             </div>
                             <Tag>{record.rating || '未评级'}</Tag>
                         </div>
@@ -661,7 +684,7 @@ const EVCValuation = () => {
                         <div className="evc-stock-card__details">
                             <span>{record.industry || '-'}</span>
                             <span>市值 {formatFixed(record.market_cap_100m, 1)} 亿元</span>
-                            <span>研报 {record.target_report_count || 0} 篇</span>
+                            <span>研报 {record.report_count || 0} 篇</span>
                             <span>机构 {record.organization_count || 0} 家</span>
                             <span>研报日 {record.latest_report_date || '-'}</span>
                         </div>

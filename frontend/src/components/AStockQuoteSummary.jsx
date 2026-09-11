@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import dayjs from 'dayjs';
+import { Switch } from 'antd';
 import { formatChineseAmount as formatChinese } from '../utils/format';
 
 const toNumber = value => {
@@ -34,7 +35,107 @@ const Metric = ({ label, value }) => (
   </div>
 );
 
-const AStockQuoteSummary = ({ quote = {}, summary = {}, week52 = {} }) => {
+const CONSENSUS_UNAVAILABLE_REASONS = {
+  no_target_price_in_pool: 'T-1期披露日之后没有能给出估值的研报，不计算估值',
+  disclosure_missing: '缺少定期报告披露日，无法划定研报池',
+  market_data_missing: '缺少行情数据',
+};
+
+// 卖方一致预期的三个财年估值上下限；点击某个上下限打开各机构研报明细。
+const PE_BAND_UNAVAILABLE_REASONS = {
+  insufficient_history: '前瞻PE有效样本不足一年',
+  unprofitable_or_uncovered: '近3年较多交易日没有正的一致预期EPS（亏损或无人覆盖）',
+  unstable_multiple: '近3年前瞻PE波动过大（80%分位超过20%分位3倍），通道不可信',
+};
+
+const describePeBand = band => {
+  if (!band) return '--';
+  if (band.status !== 'available') return PE_BAND_UNAVAILABLE_REASONS[band.reason] || '不可用';
+  const current = toNumber(band.current_pe);
+  return `${formatFixed(band.low_pe, 1)} ~ ${formatFixed(band.high_pe, 1)}倍`
+    + (current === null ? '' : `（当前 ${current.toFixed(1)}倍）`);
+};
+
+const ConsensusValuationMetrics = ({ consensus, onOpenConsensus, peBandEnabled, onTogglePeBand }) => {
+  if (!consensus) return null;
+  const available = consensus.status === 'available';
+  const renderBound = (horizon, bound, color) => {
+    const value = toNumber(horizon?.[bound]);
+    if (value === null) return '--';
+    const org = horizon[`${bound}_org`];
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenConsensus?.(horizon.offset, bound)}
+        style={{
+          color, padding: 0, border: 0, background: 'none', cursor: 'pointer', font: 'inherit', fontWeight: 600,
+        }}
+        title={`${bound === 'lo' ? '下限' : '上限'}来自${org || '--'}，点击查看各机构研报`}
+      >
+        {value.toFixed(2)}
+      </button>
+    );
+  };
+  const poolTip = available
+    ? `T期 ${consensus.t_period_label || '-'}（${consensus.t_disclosure_date || '-'} 披露），`
+      + `研报取自 ${consensus.pool_start_date} 之后`
+      + (consensus.pool === 'T-1' ? '；T期后给出目标价的机构不足2家，已退到T-1期' : '')
+    : CONSENSUS_UNAVAILABLE_REASONS[consensus.reason] || '暂无一致预期估值';
+  const metrics = available
+    ? [
+      ...(consensus.horizons || []).map(horizon => [
+        `${horizon.label}估值(${horizon.fiscal_year})`,
+        <span>{renderBound(horizon, 'lo', '#0066FF')} ~ {renderBound(horizon, 'hi', '#FF0000')}</span>,
+      ]),
+      [
+        '估值研报池',
+        <span title={poolTip} style={{ color: consensus.pool === 'T' ? '#389e0d' : '#d46b08' }}>
+          {consensus.pool === 'T' ? 'T池' : 'T-1池（待更新）'} · {consensus.organization_count}家机构
+          {consensus.method_counts?.pe_band ? `（${consensus.method_counts.pe_band}家用PE通道）` : ''}
+        </span>,
+      ],
+    ]
+    : [['一致预期估值', <span title={poolTip}>--</span>]];
+  if (onTogglePeBand) {
+    metrics.push([
+      'PE通道补估值',
+      <Switch
+        size="small"
+        checked={Boolean(peBandEnabled)}
+        onChange={onTogglePeBand}
+        title="开启后，没给目标价的机构用该股近3年前瞻PE的20%~80%分位 × 该机构未来12个月EPS估值"
+      />,
+    ]);
+    if (peBandEnabled) {
+      metrics.push(['前瞻PE通道(近3年)', <span>{describePeBand(consensus.pe_band)}</span>]);
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+      gap: '2px 18px',
+      marginTop: 8,
+      padding: '10px 14px',
+      background: '#f0f5ff',
+      border: '1px solid #d6e4ff',
+      borderRadius: 6,
+    }}>
+      {metrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
+    </div>
+  );
+};
+
+const AStockQuoteSummary = ({
+  quote = {},
+  summary = {},
+  week52 = {},
+  consensus = null,
+  onOpenConsensus,
+  peBandEnabled = false,
+  onTogglePeBand,
+}) => {
   const values = useMemo(() => {
     const last = toNumber(quote.last_px);
     const preclose = toNumber(quote.preclose_px);
@@ -126,6 +227,12 @@ const AStockQuoteSummary = ({ quote = {}, summary = {}, week52 = {} }) => {
       }}>
         {metrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
       </div>
+      <ConsensusValuationMetrics
+        consensus={consensus}
+        onOpenConsensus={onOpenConsensus}
+        peBandEnabled={peBandEnabled}
+        onTogglePeBand={onTogglePeBand}
+      />
     </div>
   );
 };

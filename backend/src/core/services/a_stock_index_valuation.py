@@ -47,6 +47,7 @@ def calculate_weighted_index_valuation(
     covered_count = 0
     stale_covered_weight = 0.0
     stale_covered_count = 0
+    ffilled_covered_count = 0
     forward_covered_weight = 0.0
     effective_covered_weight = 0.0
     forward_effective_covered_weight = 0.0
@@ -80,10 +81,13 @@ def calculate_weighted_index_valuation(
         covered_weight += weight
         effective_covered_weight += effective_weight
         covered_count += 1
-        # 该成分股最近一次年报后还没有新研报，目标价口径落后一个财年。
+        # 待更新：T 期披露后给出目标价的机构不足 2 家、退到了 T-1 池，或者当天没有估值、
+        # 沿用了之前的估值(最多 365 天)。
         if getattr(valuation, "is_stale", False):
             stale_covered_weight += weight
             stale_covered_count += 1
+        if getattr(valuation, "is_ffilled", False):
+            ffilled_covered_count += 1
         valuation_dates.append(valuation.date)
         for key, value in current_values.items():
             current_weighted_multiples[key] += effective_weight * value / price
@@ -105,6 +109,7 @@ def calculate_weighted_index_valuation(
         "constituent_count": sum(1 for _ in holdings) if isinstance(holdings, list) else None,
         "covered_count": covered_count,
         "stale_covered_count": stale_covered_count,
+        "ffilled_covered_count": ffilled_covered_count,
         "forward_covered_count": forward_covered_count,
         "total_weight": round(total_weight, 8),
         "covered_weight": round(covered_weight, 8),

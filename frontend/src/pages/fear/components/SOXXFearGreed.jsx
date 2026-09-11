@@ -641,12 +641,12 @@ const SOXXFearGreed = () => {
                     valueStyle={{ color: (valuation.stale_weight_ratio ?? 0) > 0.3 ? '#d4380d' : undefined }}
                   />
                   <Text type="secondary">
-                    {valuation.stale_covered_count ?? 0}/{valuation.covered_count ?? 0} 个成分年报后无新研报
+                    {valuation.stale_covered_count ?? 0}/{valuation.covered_count ?? 0} 个成分退到T-1池或沿用旧估值
                   </Text>
                 </Col>
               </Row>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；成分股只取其最近一次年报公告日之后发布的研报，年报后暂无新研报的成分退回上一次年报之后的研报并计入"待更新权重"；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
+                低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；成分股按其最新一期定期报告(T期)披露日之后的研报取目标价，每家机构只用最新一篇，给出目标价的机构不足2家时退到T-1期披露日之后，仍没有则沿用此前估值(最多365天)；退到T-1池或沿用旧估值的成分计入"待更新权重"；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
               </Text>
             </Card>
           )}
