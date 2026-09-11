@@ -302,6 +302,28 @@ def _attach_xueqiu_fear_index_memberships(
     return sorted(used_options.values(), key=lambda value: (value["label"], value["symbol"]))
 
 
+def load_a_stock_fear_index_memberships(
+    symbol: str,
+    as_of: Optional[date] = None,
+) -> List[Dict[str, str]]:
+    """一只 A 股当前属于哪些「有贪恐计算」的指数（含 A创100），按名称排序。
+
+    直接复用 `_attach_xueqiu_fear_index_memberships`：雪球持仓表上的「所属贪恐指数」
+    就是它算的，个股详情页必须和那一列同一份口径——各指数取 ≤ as_of 的最新一期成分
+    权重快照（被调出的成分不算），A创100 取最新一次调仓的成分。
+    """
+    ts_code = _xueqiu_symbol_to_ts_code(symbol)
+    if not ts_code:
+        return []
+    item = {"stock_symbol": ts_code}
+    connection = _connect_duckdb()
+    try:
+        _attach_xueqiu_fear_index_memberships(connection, [item], as_of or _china_today())
+    finally:
+        connection.close()
+    return item.get("fear_indexes", [])
+
+
 _XUEQIU_PRICE_TABLES = (
     "us_stock_daily",
     "a_stock_index_daily",
@@ -1508,6 +1530,7 @@ def load_xueqiu_top_holdings_history(
                 "raw_symbol": raw_symbol,
                 "limit": normalized_limit,
                 "latest": None,
+                "latest_snapshot_date": None,
                 "history": [],
             }
 
@@ -1651,6 +1674,9 @@ def load_xueqiu_top_holdings_history(
             "raw_symbol": raw_symbol,
             "limit": normalized_limit,
             "latest": rows[-1] if rows else None,
+            # 全局最新快照日。latest 是这只股票"最后一次上榜"的那一行：若它早于这个日期，
+            # 说明股票已经跌出雪球持仓榜，latest 里的排名是旧排名，不能当成当前排名展示。
+            "latest_snapshot_date": global_snapshot_dates[-1].isoformat() if global_snapshot_dates else None,
             "history": rows,
         }
     finally:

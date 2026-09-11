@@ -37,8 +37,8 @@ const EMPTY_EVENTS = { research_days: [], financial_reports: [] };
 const XUEQIU_WEIGHT_SERIES_NAME = '雪球综合权重';
 const XUEQIU_DIRECTION_SERIES_NAME = '5日权价比方向';
 const XUEQIU_WEIGHT_COLOR = '#1677ff';
-// 雪球历史接口一次最多 2000 条；5 年 K 线约 1250 个交易日，1300 足够覆盖
-const XUEQIU_HISTORY_LIMIT = 1300;
+// 默认空历史用模块级常量：参数默认值写 [] 每次渲染都是新数组，会让依赖它的 useMemo 每次重算
+const EMPTY_XUEQIU_HISTORY = [];
 // 副图图例：放在各自副图正上方的缝隙里，只管本副图的系列，不和主图的 K线/MA20 混在一起
 const SUB_LEGEND_STYLE = { left: '10%', itemWidth: 12, itemHeight: 8, itemGap: 12, textStyle: { fontSize: 11 } };
 
@@ -183,7 +183,8 @@ const StockKlineChart = ({
   onKlinesChange,
   realtimeQuote,
   eventsUrl,
-  xueqiuHistoryUrl,
+  // 雪球持仓历史由页面取好传进来（行情摘要的「雪球持仓排行」也用同一份，避免重复请求）
+  xueqiuHistory = EMPTY_XUEQIU_HISTORY,
   height = 600,
 }) => {
   const [loading, setLoading] = useState(true);
@@ -196,7 +197,6 @@ const StockKlineChart = ({
   const [macdParams, setMacdParams] = useState(DEFAULT_MACD_PARAMS);
   const [chartOption, setChartOption] = useState({});
   const [chartEvents, setChartEvents] = useState(EMPTY_EVENTS);
-  const [xueqiuHistory, setXueqiuHistory] = useState([]);
   const [activeEvent, setActiveEvent] = useState(null);
   const zoomRef = useRef(null);
   // 图表点击回调在 onChartReady 时只绑定一次，最新的标记和日期经 ref 传进去
@@ -224,19 +224,6 @@ const StockKlineChart = ({
       .catch(error => console.error('获取K线事件标记失败:', error));
     return () => { cancelled = true; };
   }, [eventsUrl]);
-
-  // 雪球持仓历史：与「雪球持仓」模块同一个接口、同一默认口径(只统计主理人活跃组合)
-  useEffect(() => {
-    setXueqiuHistory([]);
-    if (!xueqiuHistoryUrl) return undefined;
-    let cancelled = false;
-    request.get(xueqiuHistoryUrl, { params: { active_only: true, limit: XUEQIU_HISTORY_LIMIT } })
-      .then(({ data }) => {
-        if (!cancelled) setXueqiuHistory(data?.history || []);
-      })
-      .catch(error => console.error('获取雪球持仓历史失败:', error));
-    return () => { cancelled = true; };
-  }, [xueqiuHistoryUrl]);
 
   const fetchKlines = useCallback(async () => {
     setLoading(true);

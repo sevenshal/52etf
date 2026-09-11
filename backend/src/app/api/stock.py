@@ -16,6 +16,7 @@ from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
 from ...core.services.a_stock_financials import DEFAULT_PERIOD_COUNT, load_a_stock_financials
 from ...core.services.a_stock_chart_events import load_a_stock_chart_events
+from .xueqiu_holdings import load_a_stock_fear_index_memberships
 from ...core.services.tushare import TushareService
 from sqlalchemy.orm import Session
 
@@ -249,6 +250,23 @@ def get_a_stock_chart_events(
     finally:
         analytics_db.close()
         AnalyticsSession.remove()
+
+
+@router.get("/a-stock/fear-indexes/{symbol}")
+def get_a_stock_fear_indexes(
+    symbol: str,
+    _: str = Depends(valid_account),
+):
+    """个股所属的「有贪恐计算」的指数（与雪球持仓表的「所属贪恐指数」同一口径）。
+
+    只给成员关系；各指数的贪恐值由前端批量调 /api/cnn/etf-fear-greed-clone/summaries，
+    和贪恐看板读的是同一份数据（A股指数叠加当日盘中快照）。
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    return {
+        "symbol": normalized_symbol,
+        "indexes": load_a_stock_fear_index_memberships(normalized_symbol),
+    }
 
 
 @router.get("/klines/{symbol}", response_model=List[KLineData])
