@@ -7,6 +7,7 @@ import XueqiuStockLink from '../components/XueqiuStockLink';
 import useRealtimeQuotes from '../hooks/useRealtimeQuotes';
 import { useAccount } from '../contexts/AccountContext';
 import AStockQuoteSummary from '../components/AStockQuoteSummary';
+import StockFearIndexStrip from '../components/StockFearIndexStrip';
 import StockFinancialsCard from '../components/StockFinancialsCard';
 import StockValueInvestingCard from '../components/StockValueInvestingCard';
 import AStockConsensusValuationModal from '../components/AStockConsensusValuationModal';
@@ -207,6 +208,7 @@ const StockDetail = () => {
             onTogglePeBand={handlePeBandToggle}
           />
         ) : null}
+        {isAStock ? <StockFearIndexStrip symbol={normalizedSymbol} /> : null}
         <StockKlineChart
           symbol={normalizedSymbol}
           klineUrl={isAStock ? `/api/stock/a-stock/klines/${normalizedSymbol}` : undefined}

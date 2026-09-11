@@ -28,6 +28,55 @@ export const getFearGreedStatus = (score) => {
   return '极度恐惧';
 };
 
+// ---- 贪恐值展示：看板卡片与个股详情「所属指数 · 贪恐」共用，保证两处显示同一个数 ----
+
+const isFiniteScore = value => value !== null && value !== undefined && Number.isFinite(Number(value));
+
+// 服务端按 Asia/Shanghai 计算收盘日期，前端也用同一时区判断“今天”
+export const chinaTodayString = () => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = type => (parts.find(p => p.type === type) || {}).value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+};
+
+export const fearColor = value => (isFiniteScore(value) ? getFearGreedColor(value) : '#8c8c8c');
+
+// 中性色 #d9d9d9 做文字太浅，换成深灰
+export const fearTextColor = (value) => {
+  const color = fearColor(value);
+  return color === '#d9d9d9' ? '#595959' : color;
+};
+
+export const fearStatus = value => (isFiniteScore(value) ? getFearGreedStatus(value) : '未入库');
+
+/**
+ * 一条 summaries 记录该显示哪个贪恐值：盘中快照还是收盘值。
+ *
+ * 规则（原先写在看板 SummaryCard 里，现在两处共用）：有盘中快照、且收盘入库日期还不是今天时显示盘中；
+ * 收盘日期等于今天视为已收盘，只显收盘；早于今天的收盘统一标“昨收”。
+ *
+ * @returns {{ score, mode: 'intraday'|'close', closeLabel: '收盘'|'昨收', hasData: boolean }}
+ */
+export const resolveFearSummaryScore = (summary, today = chinaTodayString()) => {
+  const latest = summary?.latest;
+  const intraday = summary?.intraday;
+  const hasIntraday = isFiniteScore(intraday?.score);
+  const closeIsToday = latest?.date === today;
+  const showIntraday = hasIntraday && !closeIsToday;
+  return {
+    score: showIntraday ? intraday.score : latest?.score,
+    mode: showIntraday ? 'intraday' : 'close',
+    closeLabel: closeIsToday ? '收盘' : '昨收',
+    // 与看板卡片一致：有没有入库的收盘记录决定显示“未入库”
+    hasData: Boolean(latest),
+  };
+};
+
 // 格式化季度
 export const formatQuarter = (dateStr) => {
   const date = new Date(dateStr);

@@ -2,7 +2,14 @@ import React, { Fragment, useCallback, useEffect, useMemo, useRef, useState } fr
 import { Alert, Button, Card, Col, Divider, Empty, Radio, Row, Skeleton, Space, Statistic, Tag, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../../utils/request';
-import { TIME_RANGES, getFearGreedColor, getFearGreedStatus } from '../utils';
+import {
+  TIME_RANGES,
+  chinaTodayString,
+  fearColor,
+  fearStatus,
+  fearTextColor,
+  resolveFearSummaryScore,
+} from '../utils';
 import {
   CN_GENERAL_GROUPS,
   CN_INDUSTRY_GROUPS,
@@ -39,15 +46,6 @@ const isFiniteNumber = value => value !== null && value !== undefined && Number.
 const formatNumber = (value, digits = 1) => (
   isFiniteNumber(value) ? Number(value).toFixed(digits) : '-'
 );
-
-const fearColor = value => (isFiniteNumber(value) ? getFearGreedColor(value) : '#8c8c8c');
-
-const fearTextColor = (value) => {
-  const color = fearColor(value);
-  return color === '#d9d9d9' ? '#595959' : color;
-};
-
-const fearStatus = value => (isFiniteNumber(value) ? getFearGreedStatus(value) : '未入库');
 
 const formatCompactVolume = (value) => {
   if (!isFiniteNumber(value)) return '-';
@@ -140,17 +138,8 @@ const formatIntradayTime = (value) => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
-// 服务端按 Asia/Shanghai 计算收盘日期，前端也用同一时区判断“今天”
-const chinaToday = (() => {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-  const get = type => (parts.find(p => p.type === type) || {}).value || '';
-  return `${get('year')}-${get('month')}-${get('day')}`;
-})();
+// 页面加载时算一次（与原先的 IIFE 行为一致）
+const chinaToday = chinaTodayString();
 
 const SOXXFearGreed = () => {
   const [summaries, setSummaries] = useState([]);
@@ -875,13 +864,10 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
 const SummaryCard = ({ option, summary, active, onToggle }) => {
   const latest = summary?.latest;
   const intraday = summary?.intraday;
-  const hasIntraday = isFiniteNumber(intraday?.score);
-  // 收盘日期等于今天时视为已收盘，隐藏盘中只显收盘；早于今天统一标“昨收”
-  const closeIsToday = latest?.date === chinaToday;
-  const showIntraday = hasIntraday && !closeIsToday;
-  const score = showIntraday ? intraday.score : latest?.score;
+  // 盘中/收盘取舍与个股详情页「所属指数 · 贪恐」共用同一个函数，两处永远显示同一个数
+  const { score, mode, closeLabel } = resolveFearSummaryScore(summary, chinaToday);
+  const showIntraday = mode === 'intraday';
   const scoreColor = fearColor(score);
-  const closeLabel = closeIsToday ? '收盘' : '昨收';
   const sevenDayScore = summary?.seven_day_ago?.score;
   const oneMonthScore = summary?.one_month_ago?.score;
   const price = showIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
