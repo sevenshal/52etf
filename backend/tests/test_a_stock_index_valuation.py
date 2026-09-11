@@ -109,6 +109,13 @@ def test_percentile_rank_uses_midrank_for_current_value():
 def test_valuation_ratio_inverts_current_target_space():
     assert _valuation_ratio(34.84) == pytest.approx(0.6516)
     assert _valuation_ratio(None) is None
+    assert _valuation_ratio(float("nan")) is None
+
+
+def test_valuation_ratio_keeps_values_outside_zero_to_one():
+    # 指数高于估值中枢(偏离为负)时系数大于 1，偏离超过 100% 时小于 0，都要照常画出来。
+    assert _valuation_ratio(-6.6) == pytest.approx(1.066)
+    assert _valuation_ratio(120.0) == pytest.approx(-0.2)
 
 
 def test_valuation_position_uses_504_days_and_keeps_252_day_comparison():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
@@ -339,14 +340,19 @@ def load_a_stock_index_valuation_history(
 
 
 def _valuation_ratio(current_gap_pct: Any) -> Optional[float]:
+    """估值系数 = 1 − 估值偏离：大于 1 表示指数已高于成分股一致预期的估值中枢，
+    小于 0 表示离中枢还有一倍以上的空间。
+
+    不能截断到 0~1：原先超出就置空，指数涨过估值中枢(最该看清高估)的时段曲线反而
+    整段断开，半导体在 2026-06-16 ~ 07-16 连续一个月都是空的。
+    """
     try:
         current_gap = float(current_gap_pct)
     except (TypeError, ValueError):
         return None
-    ratio = 1.0 - current_gap / 100.0
-    if ratio < 0 or ratio > 1:
+    if not math.isfinite(current_gap):
         return None
-    return round(ratio, 6)
+    return round(1.0 - current_gap / 100.0, 6)
 
 
 def _midpoint(low: Optional[float], high: Optional[float]) -> Optional[float]:
