@@ -43,6 +43,11 @@ const VIEW_OPTIONS = [
 ];
 const GROUP_KEYS = ['valuation', 'growth', 'quality', 'expectation'];
 const TASK_POLL_MS = 5000;
+// 定时任务状态由后端写成大写（与「定时任务」页同一口径）
+const TASK_STATUS_META = {
+  SUCCESS: { label: '成功', color: 'green' },
+  FAILED: { label: '失败', color: 'red' },
+};
 
 const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 
@@ -666,8 +671,8 @@ const StockSystem = () => {
       {busy ? <Tag color="processing">{task.is_running ? '计算中' : '排队中'}</Tag> : null}
       {!busy && task.last_run_status ? (
         <Tooltip title={task.last_run_message}>
-          <Tag color={task.last_run_status === 'success' ? 'green' : 'red'}>
-            上次{task.last_run_status === 'success' ? '成功' : '失败'}
+          <Tag color={TASK_STATUS_META[task.last_run_status]?.color || 'default'}>
+            上次{TASK_STATUS_META[task.last_run_status]?.label || task.last_run_status}
           </Tag>
         </Tooltip>
       ) : null}
