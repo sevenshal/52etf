@@ -1615,6 +1615,9 @@ def load_a_stock_klines(
         trade_date = _row_to_date(row.get("trade_date"))
         if trade_date is None:
             continue
+        # tushare daily_basic 的 turnover_rate 是百分数（2.02 表示 2.02%）；K 线接口统一返回
+        # 小数口径，和美港股 volume/股本 算出的一致，前端换手衰减按小数计算。
+        turnover_rate_pct = _safe_float(row.get("turnover_rate"))
         result.append({
             "timestamp": datetime.combine(trade_date, time(hour=15)),
             "open": _safe_float(row.get("open")) or 0.0,
@@ -1623,7 +1626,7 @@ def load_a_stock_klines(
             "close": _safe_float(row.get("close")) or 0.0,
             "volume": _safe_float(row.get("volume")) or 0.0,
             "turnover": _safe_float(row.get("turnover")) or 0.0,
-            "turnover_rate": _safe_float(row.get("turnover_rate")),
+            "turnover_rate": None if turnover_rate_pct is None else turnover_rate_pct / 100.0,
         })
     return result
 
