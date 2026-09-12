@@ -226,19 +226,22 @@ STATEMENT_STOCK_COLUMNS = {
 TTM_LOOKBACK_PERIODS = 8
 
 
-def _latest_risk_free_rate(connection, curve_id: str, term_years: float) -> Optional[float]:
-    """取中债国债收益率曲线最新一个交易日、最接近 term_years 期限的利率(转成小数)。
+def _latest_risk_free_rate(
+    connection, curve_id: str, term_years: float, as_of: Optional[date] = None
+) -> Optional[float]:
+    """取中债国债收益率曲线截至 as_of 最近一个交易日、最接近 term_years 期限的利率(转成小数)。
 
     曲线还没同步到(或那一天缺这条曲线的数据)时返回 None，调用方应退回静态假设，
     而不是假装取到了一个精确值。
     """
     if not duckdb_table_exists(connection, "a_stock_chinabond_yield_curve_daily"):
         return None
-    query = """
+    date_clause = " AND trade_date <= ?" if as_of is not None else ""
+    query = f"""
         WITH latest_date AS (
             SELECT MAX(trade_date) AS trade_date
             FROM a_stock_chinabond_yield_curve_daily
-            WHERE curve_id = ?
+            WHERE curve_id = ?{date_clause}
         )
         SELECT c.term, c.yield_rate
         FROM a_stock_chinabond_yield_curve_daily AS c, latest_date
@@ -246,7 +249,8 @@ def _latest_risk_free_rate(connection, curve_id: str, term_years: float) -> Opti
         ORDER BY ABS(c.term - ?)
         LIMIT 1
     """
-    row = connection.execute(query, [curve_id, curve_id, term_years]).fetchone()
+    params = [curve_id, *([as_of] if as_of is not None else []), curve_id, term_years]
+    row = connection.execute(query, params).fetchone()
     if not row:
         return None
     yield_rate_pct = safe_float(row[1])
@@ -265,12 +269,24 @@ def _symbol_filter(symbols: Optional[Sequence[str]], column: str = "ts_code") ->
     return f" AND {column} IN ({placeholders})", [str(symbol) for symbol in symbols]
 
 
+def _disclosed_by_clause(as_of: Optional[date]) -> tuple[str, List[Any]]:
+    """只取截至 as_of 已经披露的报告，保证历史回放不看到未来的财报。
+
+    同一报告期的更正版也按披露日截断，于是去重拿到的是"当时能看到的最新版本"。
+    个别行缺 ann_date 时按报告期后 120 天(年报法定披露期限)视为已披露。
+    """
+    if as_of is None:
+        return "", []
+    return " AND COALESCE(ann_date, end_date + INTERVAL 120 DAY) <= ?", [as_of]
+
+
 def _annual_rows(
     connection,
     table: str,
     columns: Sequence[str],
     periods: int = ANNUAL_HISTORY_PERIODS,
     symbols: Optional[Sequence[str]] = None,
+    as_of: Optional[date] = None,
 ) -> pd.DataFrame:
     """只取年报(end_date为12-31)，按 end_date 取最近 periods 期。
 
@@ -294,19 +310,20 @@ def _annual_rows(
     }
     projection = ", ".join(f'"{name}"' for name in dict.fromkeys(selected) if name in available)
     symbol_clause, symbol_params = _symbol_filter(symbols)
+    disclosed_clause, disclosed_params = _disclosed_by_clause(as_of)
     query = f"""
         WITH deduped AS (
             SELECT {projection},
                    ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS _dedup_rn
             FROM {table}
-            WHERE end_date IS NOT NULL AND strftime(end_date, '%m-%d') = '12-31'{symbol_clause}
+            WHERE end_date IS NOT NULL AND strftime(end_date, '%m-%d') = '12-31'{symbol_clause}{disclosed_clause}
         )
         SELECT * EXCLUDE (_dedup_rn)
         FROM deduped
         WHERE _dedup_rn = 1
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) <= {int(periods)}
     """
-    return connection.execute(query, symbol_params).fetchdf()
+    return connection.execute(query, [*symbol_params, *disclosed_params]).fetchdf()
 
 
 def _as_date(value) -> Optional[date]:
@@ -331,6 +348,7 @@ def _recent_period_rows(
     columns: Sequence[str],
     periods: int = TTM_LOOKBACK_PERIODS,
     symbols: Optional[Sequence[str]] = None,
+    as_of: Optional[date] = None,
 ) -> pd.DataFrame:
     """取最近 `periods` 期定期报告，**不限于年报**，用来拼 TTM。
 
@@ -349,19 +367,20 @@ def _recent_period_rows(
     }
     projection = ", ".join(f'"{name}"' for name in dict.fromkeys(selected) if name in available)
     symbol_clause, symbol_params = _symbol_filter(symbols)
+    disclosed_clause, disclosed_params = _disclosed_by_clause(as_of)
     query = f"""
         WITH deduped AS (
             SELECT {projection},
                    ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS _dedup_rn
             FROM {table}
-            WHERE end_date IS NOT NULL{symbol_clause}
+            WHERE end_date IS NOT NULL{symbol_clause}{disclosed_clause}
         )
         SELECT * EXCLUDE (_dedup_rn)
         FROM deduped
         WHERE _dedup_rn = 1
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) <= {int(periods)}
     """
-    return connection.execute(query, symbol_params).fetchdf()
+    return connection.execute(query, [*symbol_params, *disclosed_params]).fetchdf()
 
 
 def _ttm_overlay(
@@ -446,29 +465,39 @@ def _ttm_overlay(
     return result
 
 
-def _latest_market_row(connection, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
+def _latest_market_row(
+    connection, symbols: Optional[Sequence[str]] = None, as_of: Optional[date] = None
+) -> pd.DataFrame:
     if not duckdb_table_exists(connection, "a_stock_market_daily"):
         return pd.DataFrame()
     symbol_clause, symbol_params = _symbol_filter(symbols)
+    date_clause = " AND trade_date <= ?" if as_of is not None else ""
     query = f"""
         SELECT ts_code, trade_date, close, total_mv, circ_mv, pe, pe_ttm, pb, dv_ttm
         FROM a_stock_market_daily
-        WHERE TRUE{symbol_clause}
+        WHERE TRUE{symbol_clause}{date_clause}
         QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) = 1
     """
-    return connection.execute(query, symbol_params).fetchdf()
+    return connection.execute(query, [*symbol_params, *([as_of] if as_of is not None else [])]).fetchdf()
 
 
-def _valuation_history(connection, start_date: date, symbols: Optional[Sequence[str]] = None) -> pd.DataFrame:
+def _valuation_history(
+    connection,
+    start_date: date,
+    symbols: Optional[Sequence[str]] = None,
+    end_date: Optional[date] = None,
+) -> pd.DataFrame:
     if not duckdb_table_exists(connection, "a_stock_market_daily"):
         return pd.DataFrame()
     symbol_clause, symbol_params = _symbol_filter(symbols)
+    end_clause = " AND trade_date <= ?" if end_date is not None else ""
     query = f"""
         SELECT ts_code, pe_ttm, pb
         FROM a_stock_market_daily
-        WHERE trade_date >= ?{symbol_clause}
+        WHERE trade_date >= ?{end_clause}{symbol_clause}
     """
-    return connection.execute(query, [start_date, *symbol_params]).fetchdf()
+    params = [start_date, *([end_date] if end_date is not None else []), *symbol_params]
+    return connection.execute(query, params).fetchdf()
 
 
 def _beta_by_symbol(
@@ -476,19 +505,23 @@ def _beta_by_symbol(
     lookback_start: date,
     market_index_code: str,
     symbols: Optional[Sequence[str]] = None,
+    as_of: Optional[date] = None,
 ) -> Dict[str, float]:
-    """用近 BETA_LOOKBACK_DAYS 天的日收益率对基准指数做回归斜率估算 beta。
+    """用 as_of 之前 BETA_LOOKBACK_DAYS 天的日收益率对基准指数做回归斜率估算 beta。
 
     一次 SQL 对全市场做 REGR_SLOPE 分组聚合，避免逐个股票 Python 循环回归。
     """
     if not duckdb_table_exists(connection, "a_stock_index_daily") or not duckdb_table_exists(connection, "a_stock_market_daily"):
         return {}
     symbol_clause, symbol_params = _symbol_filter(symbols, column="m.ts_code")
+    index_end_clause = " AND trade_date <= ?" if as_of is not None else ""
+    market_end_clause = " AND m.trade_date <= ?" if as_of is not None else ""
+    end_params = [as_of] if as_of is not None else []
     query = f"""
         WITH index_returns AS (
             SELECT trade_date, pct_chg AS index_pct_chg
             FROM a_stock_index_daily
-            WHERE ts_code = ? AND trade_date >= ? AND pct_chg IS NOT NULL
+            WHERE ts_code = ? AND trade_date >= ?{index_end_clause} AND pct_chg IS NOT NULL
         )
         SELECT
             m.ts_code AS ts_code,
@@ -496,13 +529,17 @@ def _beta_by_symbol(
             COUNT(*) AS obs
         FROM a_stock_market_daily m
         JOIN index_returns i ON m.trade_date = i.trade_date
-        WHERE m.pct_chg IS NOT NULL AND m.trade_date >= ?{symbol_clause}
+        WHERE m.pct_chg IS NOT NULL AND m.trade_date >= ?{market_end_clause}{symbol_clause}
         GROUP BY m.ts_code
         HAVING COUNT(*) >= ? AND REGR_SLOPE(m.pct_chg, i.index_pct_chg) IS NOT NULL
     """
     frame = connection.execute(
         query,
-        [market_index_code, lookback_start, lookback_start, *symbol_params, MIN_BETA_OBSERVATIONS],
+        [
+            market_index_code, lookback_start, *end_params,
+            lookback_start, *end_params, *symbol_params,
+            MIN_BETA_OBSERVATIONS,
+        ],
     ).fetchdf()
     if frame.empty:
         return {}
@@ -1675,19 +1712,41 @@ def screen_value_investing_candidates(
     history_start = as_of_value - timedelta(days=365 * VALUATION_HISTORY_YEARS)
     beta_lookback_start = as_of_value - timedelta(days=BETA_LOOKBACK_DAYS)
 
+    # point-in-time：财报只取截至 as_of 已披露的、行情/利率/beta 只用 as_of 及之前的数据，
+    # 历史快照回放时才不会看到未来。as_of 留空(今天)时这些截断不改变任何结果。
     connection = connect_analytics_db()
     try:
         basic_clause, basic_params = _symbol_filter(symbols)
+        basic_columns = {
+            row[0]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'a_stock_basic'"
+            ).fetchall()
+        }
+        list_status_expr = "list_status"
+        list_status_params: List[Any] = []
+        if as_of is not None and "delist_date" in basic_columns:
+            # 历史回放：按 as_of 当时是否在市判断，而不是现在的上市状态——否则后来退市的
+            # 股票会从历史快照里消失(幸存者偏差)
+            list_status_expr = (
+                "CASE WHEN list_date <= ? AND (delist_date IS NULL OR delist_date > ?) "
+                "THEN 'L' ELSE 'N' END AS list_status"
+            )
+            list_status_params = [as_of_value, as_of_value]
         basic = connection.execute(
-            f"SELECT ts_code, name, industry, list_date, list_status FROM a_stock_basic WHERE TRUE{basic_clause}",
-            basic_params,
+            f"SELECT ts_code, name, industry, list_date, {list_status_expr} FROM a_stock_basic WHERE TRUE{basic_clause}",
+            [*list_status_params, *basic_params],
         ).fetchdf()
-        income_annual = _annual_rows(connection, "a_stock_income", INCOME_SCAN_COLUMNS, symbols=symbols)
+        income_annual = _annual_rows(connection, "a_stock_income", INCOME_SCAN_COLUMNS, symbols=symbols, as_of=as_of_value)
         # 资产负债表以前只取最新1期。现在"去年那次估值快照"也要用去年的少数股东权益
         # 和货币资金，否则两次快照的净债务/少数股东口径会打架，同比差值就成了噪声。
-        balancesheet_annual = _annual_rows(connection, "a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS, symbols=symbols)
-        cashflow_annual = _annual_rows(connection, "a_stock_cashflow", CASHFLOW_SCAN_COLUMNS, symbols=symbols)
-        fina_annual = _annual_rows(connection, "a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS, symbols=symbols)
+        balancesheet_annual = _annual_rows(
+            connection, "a_stock_balancesheet", BALANCESHEET_SCAN_COLUMNS, symbols=symbols, as_of=as_of_value
+        )
+        cashflow_annual = _annual_rows(connection, "a_stock_cashflow", CASHFLOW_SCAN_COLUMNS, symbols=symbols, as_of=as_of_value)
+        fina_annual = _annual_rows(
+            connection, "a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS, symbols=symbols, as_of=as_of_value
+        )
         period_frames = {}
         if use_ttm:
             for table, scan_columns in (
@@ -1696,13 +1755,19 @@ def screen_value_investing_candidates(
                 ("a_stock_cashflow", CASHFLOW_SCAN_COLUMNS),
                 ("a_stock_fina_indicator", FINA_INDICATOR_SCAN_COLUMNS),
             ):
-                period_frames[table] = _recent_period_rows(connection, table, scan_columns, symbols=symbols)
-        market_latest = _latest_market_row(connection, symbols=symbols)
-        valuation_history = _valuation_history(connection, history_start, symbols=symbols)
-        beta_by_symbol = _beta_by_symbol(connection, beta_lookback_start, MARKET_INDEX_CODE, symbols=symbols)
+                period_frames[table] = _recent_period_rows(
+                    connection, table, scan_columns, symbols=symbols, as_of=as_of_value
+                )
+        market_latest = _latest_market_row(connection, symbols=symbols, as_of=as_of_value)
+        valuation_history = _valuation_history(connection, history_start, symbols=symbols, end_date=as_of_value)
+        beta_by_symbol = _beta_by_symbol(
+            connection, beta_lookback_start, MARKET_INDEX_CODE, symbols=symbols, as_of=as_of_value
+        )
         risk_free_rate_source = "explicit_override"
         if risk_free_rate is None:
-            risk_free_rate = _latest_risk_free_rate(connection, CHINABOND_GOVERNMENT_BOND_CURVE_ID, RISK_FREE_RATE_TERM_YEARS)
+            risk_free_rate = _latest_risk_free_rate(
+                connection, CHINABOND_GOVERNMENT_BOND_CURVE_ID, RISK_FREE_RATE_TERM_YEARS, as_of=as_of_value
+            )
             risk_free_rate_source = "chinabond_10y" if risk_free_rate is not None else "default_fallback"
             if risk_free_rate is None:
                 risk_free_rate = DEFAULT_RISK_FREE_RATE
@@ -1950,6 +2015,42 @@ def screen_value_investing_candidates(
             capex_cycle=capex_cycle,
         )
 
+        # --- 最近12个月口径 ---
+        # 上面质量闸门看的是近5年平均，对拐点太迟钝；选股系统的硬闸门和质量因子要的是
+        # 最近一年的状态。流量科目走 TTM(拼不出来时就是最新年报)，存量科目取最新时点数。
+        fina_last_row = fina_ttm.iloc[-1].to_dict() if fina_ttm is not None and not fina_ttm.empty else {}
+        ttm_ebit = safe_float(fina_last_row.get("ebit"))
+        latest_invest_capital = safe_float(fina_last_row.get("invest_capital"))
+        latest_roic_pct = None
+        latest_roic_source = None
+        if ttm_ebit is not None and latest_invest_capital and latest_invest_capital > 0:
+            latest_roic_pct = ttm_ebit * (1.0 - effective_tax_rate) / latest_invest_capital * 100.0
+            latest_roic_source = "ttm_nopat_over_invested_capital"
+        elif fina_history_annual is not None and not fina_history_annual.empty and "roic" in fina_history_annual:
+            latest_roic_pct = safe_float(fina_history_annual.iloc[-1]["roic"])
+            latest_roic_source = "annual_tushare_roic" if latest_roic_pct is not None else None
+        ttm_parent_profit = safe_float(income_latest_row.get("n_income_attr_p"))
+        parent_equity = safe_float(bs_row.get("total_hldr_eqy_exc_min_int"))
+        latest_roe_pct = (
+            ttm_parent_profit / parent_equity * 100.0
+            if ttm_parent_profit is not None and parent_equity and parent_equity > 0
+            else None
+        )
+        cashflow_last_row = cashflow_ttm.iloc[-1].to_dict() if cashflow_ttm is not None and not cashflow_ttm.empty else {}
+        ttm_consolidated_profit = safe_float(cashflow_last_row.get("net_profit"))
+        ttm_operating_cash = safe_float(cashflow_last_row.get("n_cashflow_act"))
+        latest_fields = {
+            "latest_roic_pct": safe_float(latest_roic_pct, 2),
+            "latest_roic_source": latest_roic_source,
+            "latest_roe_pct": safe_float(latest_roe_pct, 2),
+            # 净利润非正时比值没有意义，不给
+            "ocf_to_net_profit_ttm": (
+                safe_float(ttm_operating_cash / ttm_consolidated_profit, 2)
+                if ttm_operating_cash is not None and ttm_consolidated_profit and ttm_consolidated_profit > 0
+                else None
+            ),
+        }
+
         if not quality["passes"] and not force_valuation:
             candidates.append(
                 {
@@ -1967,6 +2068,7 @@ def screen_value_investing_candidates(
                     "in_capex_cycle": capex_cycle["in_capex_cycle"],
                     "capex_to_daa": capex_cycle["capex_to_daa"],
                     "ocf_positive_years": capex_cycle["ocf_positive_years"],
+                    **latest_fields,
                     "expected_return_pct": None,
                 }
             )
@@ -2113,6 +2215,7 @@ def screen_value_investing_candidates(
                 "avg_roe_pct": avg_roe,
                 "avg_roic_pct": avg_roic,
                 "ocf_to_net_profit": ocf_to_np,
+                **latest_fields,
                 "fcf_positive_years": fcf_positive_years,
                 "in_capex_cycle": capex_cycle["in_capex_cycle"],
                 "capex_to_daa": capex_cycle["capex_to_daa"],

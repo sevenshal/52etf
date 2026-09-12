@@ -116,6 +116,7 @@ SYMBOLS_RUN_TASK_KEYS = frozenset({
     "a_stock_etf_fear_greed_backfill",
     "a_stock_index_valuation_refresh",
 })
+STOCK_SYSTEM_POOL_TASK_KEY = "stock_system_pool_refresh"
 
 
 def _parse_optional_symbol_list(value: Any) -> Optional[List[str]]:
@@ -774,6 +775,78 @@ def _run_a_stock_consensus_pe_band_refresh():
     return (
         "A stock consensus PE band refresh "
         f"as_of={result.get('as_of')} saved={result.get('saved', 0)} available={result.get('available', 0)}"
+    )
+
+
+def _run_stock_system_pool_refresh(as_of: Optional[str] = None, only_allocation: bool = False):
+    """先算第一层基本面股票池，再用它算第二层情绪择时与目标仓位。"""
+    from ..core.services.stock_system.allocation import run_allocation
+    from ..core.services.stock_system.fundamental_pool import run_fundamental_pool
+
+    as_of_date = _parse_optional_task_date(as_of, "估值日")
+    messages = []
+    if not only_allocation:
+        result = run_fundamental_pool(as_of=as_of_date)
+        summary = result.get("summary") or {}
+        if result.get("status") != "completed":
+            raise RuntimeError(result.get("message") or f"股票池计算失败: {result.get('status')}")
+        messages.append(
+            f"股票池 trade_date={result.get('trade_date')} 范围={summary.get('universe_size')} "
+            f"过闸门={summary.get('gate_passed')} 有评分={summary.get('scored')} 入池={summary.get('pool_size')} "
+            f"耗时={result.get('duration_seconds')}s"
+        )
+    try:
+        allocation = run_allocation(as_of=as_of_date)
+    except Exception as exc:
+        raise RuntimeError("；".join([*messages, f"仓位计算失败: {exc}"])) from exc
+    if allocation.get("status") != "completed":
+        raise RuntimeError("；".join([*messages, allocation.get("message") or "仓位计算失败"]))
+    market = allocation.get("market") or {}
+    summary = allocation.get("summary") or {}
+    messages.append(
+        f"仓位 市场={market.get('name')}{market.get('state_label')}{'(过热)' if market.get('overheated') else ''} "
+        f"总仓位上限={summary.get('exposure_pct')}% 目标持仓={summary.get('positions')} "
+        f"已配={summary.get('invested_pct')}% 板块状态={summary.get('sector_states')} "
+        f"耗时={allocation.get('duration_seconds')}s"
+    )
+
+    from ..core.services.stock_system.trading import run_trading_day
+
+    try:
+        trading = run_trading_day(as_of=as_of_date)
+    except Exception as exc:
+        raise RuntimeError("；".join([*messages, f"技术信号/模拟盘失败: {exc}"])) from exc
+    if trading.get("status") != "completed":
+        raise RuntimeError("；".join([*messages, trading.get("message") or "技术信号计算失败"]))
+    trading_summary = trading.get("summary") or {}
+    nav = trading_summary.get("nav")
+    messages.append(
+        f"信号 候选={trading_summary.get('candidates')} 触发={trading_summary.get('triggered')} "
+        f"被过滤={trading_summary.get('filtered')} 买单={trading_summary.get('buy_orders')} "
+        f"卖单={trading_summary.get('sell_orders')} 持仓={trading_summary.get('holdings')} "
+        f"成交={trading_summary.get('fills')}"
+        + (f" 净值={nav:,.0f}" if nav is not None else "")
+        + (f" {trading_summary.get('paper_note')}" if trading_summary.get("paper_note") else "")
+    )
+    return "；".join(messages)
+
+
+def _run_a_stock_daily_basic_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    only_missing: bool = True,
+):
+    from .a_stock_daily_basic_backfill import backfill_a_stock_daily_basic_valuation
+
+    result = backfill_a_stock_daily_basic_valuation(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        only_missing=only_missing,
+    )
+    return (
+        f"daily_basic 估值列回填 {result['start_date']}~{result['end_date']} "
+        f"待补{result['candidate_dates']}天 已补{result['filled_dates']}天 更新{result['updated_rows']}行 "
+        f"无数据{result['empty_date_count']}天 耗时{result['seconds']}s"
     )
 
 
@@ -1573,6 +1646,71 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=77,
                 runner=_run_a_stock_index_valuation_refresh,
+            ),
+            STOCK_SYSTEM_POOL_TASK_KEY: TaskDefinition(
+                task_key=STOCK_SYSTEM_POOL_TASK_KEY,
+                name="选股系统股票池",
+                description=(
+                    "按「研究 → 选股系统」里的配置计算：①基本面股票池——剔除 ST 和市值/成交额不达标的股票，"
+                    "硬闸门只拦明显有问题的，再按估值/成长/质量/预期因子加权评分取前 N 名；②情绪择时与仓位——"
+                    "按市场和各板块贪恐顶/底信号定总仓位、板块上限和目标仓位；③技术信号与模拟盘——对目标股票判定入场、"
+                    "对持仓判定出场，推进模拟盘并出下一交易日的订单。结果按交易日保存快照。"
+                ),
+                default_time="19:10",
+                default_enabled=True,
+                sort_order=78,
+                runner=_run_stock_system_pool_refresh,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="as_of",
+                        label="估值日",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时按今天(取最近一个交易日)计算。",
+                    ),
+                    TaskParameterDefinition(
+                        key="only_allocation",
+                        label="只算择时与仓位",
+                        value_type="boolean",
+                        default=False,
+                        description="打开后沿用已有的股票池快照，只重算情绪择时与目标仓位。",
+                    ),
+                ),
+            ),
+            "a_stock_daily_basic_backfill": TaskDefinition(
+                task_key="a_stock_daily_basic_backfill",
+                name="A股估值列历史回填",
+                description=(
+                    "逐个交易日拉 tushare daily_basic，回填 a_stock_market_daily 的 pe/pe_ttm/pb/股息率/量比"
+                    "（这几列是后加的，历史一直为空）。默认只补整天 pb 为空的交易日，可中断后重跑续上。一次性任务，默认不定时执行。"
+                ),
+                default_time="03:30",
+                default_enabled=False,
+                sort_order=79,
+                runner=_run_a_stock_daily_basic_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="2019-01-01",
+                        description="YYYY-MM-DD。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="only_missing",
+                        label="只补缺失",
+                        value_type="boolean",
+                        default=True,
+                        description="关闭后区间内每个交易日都重新拉取覆盖。",
+                    ),
+                ),
             ),
             "a_stock_fear_greed_intraday": TaskDefinition(
                 task_key="a_stock_fear_greed_intraday",

@@ -46,6 +46,7 @@ import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
 import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
 import NineTurnBreadthResearch from './NineTurnBreadthResearch';
 import ValueInvestingScreen from './ValueInvestingScreen';
+import StockSystem from './StockSystem';
 import './FactorLab.css';
 
 const { Text } = Typography;
@@ -63,6 +64,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'eastmoney-holdings', label: '东方财富' },
   { key: 'nine-turn-breadth', label: '九转宽度' },
   { key: 'value-investing', label: '价值投资' },
+  { key: 'stock-system', label: '选股系统' },
   { key: 'db', label: 'DB' },
 ];
 
@@ -3217,7 +3219,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               <h1>研究</h1>
               <Tag color="blue">{activeTabLabel}</Tag>
             </div>
-            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && (
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && activeTab !== 'stock-system' && (
               <Space className="factor-lab-actions">
                 <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3268,6 +3270,8 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       {activeTab === 'nine-turn-breadth' && <NineTurnBreadthResearch />}
 
       {activeTab === 'value-investing' && <ValueInvestingScreen />}
+
+      {activeTab === 'stock-system' && <StockSystem />}
 
       {activeTab === 'valuation-sim' && <ValuationSimulation embedded />}
 

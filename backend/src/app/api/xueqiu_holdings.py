@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -585,6 +585,7 @@ def _attach_xueqiu_today_ratio(
 def _attach_xueqiu_history_5d_ratios(
     rows: List[Dict[str, Any]],
     global_snapshot_dates: Optional[List[date]] = None,
+    lookback: int = XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS,
 ) -> None:
     """按「5 个持仓日前」的滑动窗口为每行补上 5日权价比 / 方向。
 
@@ -592,8 +593,10 @@ def _attach_xueqiu_history_5d_ratios(
     往前第 5 个交易日（而非本股票行序里往前第 4 行），个股中途掉出榜单也不会漂移，
     且比值改由 ``_xueqiu_5d_ratio_fields`` 计算，与最新综合持仓列同一套取整口径。
     传入 ``global_snapshot_dates`` 时用全局序列定位锚点；缺省时退回本股票行序兜底。
+
+    ``lookback`` 默认 5（页面上的「5日」）；选股系统的雪球过滤按配置传别的窗口，
+    这时 ``*_5d`` 字段里装的就是 N 日的值，算法完全相同。
     """
-    lookback = XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS
     today = _china_today()
     for row in rows:
         row["weight_5d_ago"] = None
@@ -653,6 +656,172 @@ def _attach_xueqiu_history_5d_ratios(
         row["momentum_multiple_5d"] = fields["momentum_multiple_5d"]
         row["weight_price_ratio_5d"] = fields["weight_price_ratio_5d"]
         row["direction_5d"] = fields["direction_5d"]
+
+
+def _xueqiu_stock_summary_ctes() -> str:
+    """每个快照日每只股票的综合权重（持仓权重之和 / 当日组合数）和持有组合数。
+
+    「权重和排名历史」与选股系统的雪球过滤共用这一段，接在 ``_xueqiu_top_holdings_snapshot_cte``
+    后面使用，口径不会分叉。
+    """
+    return """
+            date_summary AS (
+                SELECT
+                    snapshot_date,
+                    MAX(snapshot_at) AS snapshot_at,
+                    COUNT(DISTINCT cube_symbol) AS cube_count,
+                    MAX(active_rebalance_days) AS active_rebalance_days
+                FROM filtered_holdings
+                GROUP BY snapshot_date
+            ),
+            stock_summary AS (
+                SELECT
+                    filtered_holdings.snapshot_date,
+                    MAX(date_summary.snapshot_at) AS snapshot_at,
+                    MAX(date_summary.cube_count) AS cube_count,
+                    MAX(date_summary.active_rebalance_days) AS active_rebalance_days,
+                    filtered_holdings.stock_symbol,
+                    ANY_VALUE(filtered_holdings.raw_stock_symbol) AS raw_stock_symbol,
+                    ANY_VALUE(filtered_holdings.stock_name) AS stock_name,
+                    AVG(filtered_holdings.current_price) AS current_price,
+                    ANY_VALUE(filtered_holdings.segment_name) AS segment_name,
+                    MIN(filtered_holdings.year_rank) AS best_year_rank,
+                    COUNT(DISTINCT filtered_holdings.cube_symbol) AS holding_cube_count,
+                    SUM(filtered_holdings.weight_pct) AS total_weight_pct,
+                    SUM(filtered_holdings.weight_pct) / NULLIF(MAX(date_summary.cube_count), 0) AS composite_weight_pct,
+                    COUNT(DISTINCT filtered_holdings.cube_symbol) * 100.0 / NULLIF(MAX(date_summary.cube_count), 0) AS holding_cube_ratio_pct,
+                    SUM(filtered_holdings.weight_pct) / NULLIF(COUNT(DISTINCT filtered_holdings.cube_symbol), 0) AS average_weight_pct
+                FROM filtered_holdings
+                JOIN date_summary ON filtered_holdings.snapshot_date = date_summary.snapshot_date
+                GROUP BY filtered_holdings.snapshot_date, filtered_holdings.stock_symbol
+            )"""
+
+
+# 最近一期雪球快照离估值日超过这么多自然日，视为数据中断
+XUEQIU_RATIO_MAX_STALE_DAYS = 7
+
+
+def load_xueqiu_weight_price_ratios(
+    symbols: Sequence[str],
+    as_of: date,
+    *,
+    lookback: int = XUEQIU_TOP_HOLDINGS_RANK_COMPARE_TRADING_DAYS,
+    active_only: bool = True,
+) -> Dict[str, Any]:
+    """一批 A 股截至 as_of 的 N 日权价比和持有组合数，与「权重和排名历史」逐字段同源。
+
+    - 快照日：as_of 及之前最近一个快照日；锚点：全局快照序列往前第 N 个（同 history）；
+    - 综合权重 / 持有组合数：同一段 ``_xueqiu_stock_summary_ctes``；
+    - 价格：同一个 ``_load_price_frame``，取快照日及之前最近一根收盘，保留 3 位小数；
+    - 比值：同一个 ``_xueqiu_5d_ratio_fields``。
+
+    唯一不同：history 表对"今天"那一行用盘中持仓价，这里一律用收盘价——选股系统收盘后才跑，
+    按收盘价判定才和 K 线信号同一时点。
+    """
+    ts_codes = list(dict.fromkeys(
+        code for code in (_xueqiu_symbol_to_ts_code(symbol) for symbol in symbols) if code
+    ))
+    result: Dict[str, Any] = {
+        "available": False, "reason": None, "lookback": int(lookback),
+        "snapshot_date": None, "compare_snapshot_date": None, "items": {},
+    }
+    if not ts_codes:
+        result["reason"] = "没有要查询的股票"
+        return result
+    xueqiu_symbols = {f"{code.split('.')[1]}.{code.split('.')[0]}": code for code in ts_codes if "." in code}
+
+    connection = connect_analytics_db()
+    try:
+        if not _duckdb_table_exists(connection, XUEQIU_TOP_HOLDINGS_SNAPSHOT_TABLE):
+            result["reason"] = "雪球持仓快照表不存在"
+            return result
+        cte = _xueqiu_top_holdings_snapshot_cte(active_only)
+        snapshot_dates = [
+            date.fromisoformat(str(record["snapshot_date"]))
+            for record in _duckdb_query_dicts(
+                connection,
+                f"{cte} SELECT DISTINCT snapshot_date FROM filtered_holdings "
+                "WHERE snapshot_date <= CAST(? AS DATE) ORDER BY snapshot_date",
+                [as_of],
+            )
+        ]
+        if not snapshot_dates:
+            result["reason"] = f"{as_of} 及之前没有雪球持仓快照"
+            return result
+        snapshot_day = snapshot_dates[-1]
+        if (as_of - snapshot_day).days > XUEQIU_RATIO_MAX_STALE_DAYS:
+            result["reason"] = f"最近一期雪球快照停在 {snapshot_day}"
+            return result
+        if len(snapshot_dates) <= lookback:
+            result["reason"] = f"雪球快照只有 {len(snapshot_dates)} 期，不够算 {lookback} 日权价比"
+            return result
+        compare_day = snapshot_dates[-1 - int(lookback)]
+        placeholders = ", ".join("?" for _ in xueqiu_symbols)
+        rows = _duckdb_query_dicts(
+            connection,
+            f"""
+            {cte},
+            {_xueqiu_stock_summary_ctes()}
+            SELECT snapshot_date, stock_symbol, holding_cube_count, composite_weight_pct
+            FROM stock_summary
+            WHERE snapshot_date IN (CAST(? AS DATE), CAST(? AS DATE))
+              AND UPPER(stock_symbol) IN ({placeholders})
+            """,
+            [snapshot_day, compare_day, *xueqiu_symbols],
+        )
+    finally:
+        connection.close()
+
+    by_day: Dict[Tuple[date, str], Dict[str, Any]] = {}
+    for row in rows:
+        code = xueqiu_symbols.get(str(row.get("stock_symbol") or "").upper())
+        if code:
+            by_day[(date.fromisoformat(str(row["snapshot_date"])), code)] = row
+
+    closes: Dict[Tuple[date, str], Optional[float]] = {}
+    try:
+        price_df = _load_price_frame(
+            ts_codes, compare_day - timedelta(days=10), snapshot_day + timedelta(days=1)
+        ).sort("trade_date")
+        for code in ts_codes:
+            symbol_prices = price_df.filter(pl.col("symbol") == code)
+            for day in (snapshot_day, compare_day):
+                available = symbol_prices.filter(pl.col("trade_date") <= day)
+                price = _safe_float(available.tail(1).to_dicts()[0].get("close")) if not available.is_empty() else None
+                closes[(day, code)] = round(price, 3) if price is not None else None
+    except Exception as exc:
+        logger.warning("Unable to load prices for 雪球权价比: %s", exc)
+
+    items: Dict[str, Dict[str, Any]] = {}
+    for code in ts_codes:
+        current = by_day.get((snapshot_day, code))
+        previous = by_day.get((compare_day, code))
+        fields = (
+            _xueqiu_5d_ratio_fields(
+                current.get("composite_weight_pct"),
+                previous.get("composite_weight_pct"),
+                closes.get((snapshot_day, code)),
+                closes.get((compare_day, code)),
+            )
+            if current and previous
+            else {"weight_multiple_5d": None, "momentum_multiple_5d": None,
+                  "weight_price_ratio_5d": None, "direction_5d": None}
+        )
+        items[code] = {
+            "holding_cube_count": int(current.get("holding_cube_count") or 0) if current else 0,
+            "composite_weight_pct": _safe_float(current.get("composite_weight_pct")) if current else None,
+            "weight_multiple": fields["weight_multiple_5d"],
+            "price_multiple": fields["momentum_multiple_5d"],
+            "weight_price_ratio": fields["weight_price_ratio_5d"],
+            "direction": fields["direction_5d"],
+        }
+    result.update(
+        available=True,
+        snapshot_date=snapshot_day.isoformat(),
+        compare_snapshot_date=compare_day.isoformat(),
+        items=items,
+    )
+    return result
 
 
 def _load_xueqiu_board_momentum(
@@ -1539,36 +1708,7 @@ def load_xueqiu_top_holdings_history(
             connection,
             f"""
             {cte},
-            date_summary AS (
-                SELECT
-                    snapshot_date,
-                    MAX(snapshot_at) AS snapshot_at,
-                    COUNT(DISTINCT cube_symbol) AS cube_count,
-                    MAX(active_rebalance_days) AS active_rebalance_days
-                FROM filtered_holdings
-                GROUP BY snapshot_date
-            ),
-            stock_summary AS (
-                SELECT
-                    filtered_holdings.snapshot_date,
-                    MAX(date_summary.snapshot_at) AS snapshot_at,
-                    MAX(date_summary.cube_count) AS cube_count,
-                    MAX(date_summary.active_rebalance_days) AS active_rebalance_days,
-                    filtered_holdings.stock_symbol,
-                    ANY_VALUE(filtered_holdings.raw_stock_symbol) AS raw_stock_symbol,
-                    ANY_VALUE(filtered_holdings.stock_name) AS stock_name,
-                    AVG(filtered_holdings.current_price) AS current_price,
-                    ANY_VALUE(filtered_holdings.segment_name) AS segment_name,
-                    MIN(filtered_holdings.year_rank) AS best_year_rank,
-                    COUNT(DISTINCT filtered_holdings.cube_symbol) AS holding_cube_count,
-                    SUM(filtered_holdings.weight_pct) AS total_weight_pct,
-                    SUM(filtered_holdings.weight_pct) / NULLIF(MAX(date_summary.cube_count), 0) AS composite_weight_pct,
-                    COUNT(DISTINCT filtered_holdings.cube_symbol) * 100.0 / NULLIF(MAX(date_summary.cube_count), 0) AS holding_cube_ratio_pct,
-                    SUM(filtered_holdings.weight_pct) / NULLIF(COUNT(DISTINCT filtered_holdings.cube_symbol), 0) AS average_weight_pct
-                FROM filtered_holdings
-                JOIN date_summary ON filtered_holdings.snapshot_date = date_summary.snapshot_date
-                GROUP BY filtered_holdings.snapshot_date, filtered_holdings.stock_symbol
-            ),
+            {_xueqiu_stock_summary_ctes()},
             ranked AS (
                 SELECT
                     ROW_NUMBER() OVER (

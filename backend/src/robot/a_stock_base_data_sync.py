@@ -36,7 +36,7 @@ from ..core.analytics_database import (
     AnalyticsSession,
 )
 from ..core.database import AIStockTHSIndexCache, get_db_ctx
-from ..core.duckdb_utils import connect_duckdb
+from ..core.duckdb_utils import connect_duckdb, connect_duckdb_for_write
 from ..core.tushare_statement_fields import (
     BALANCESHEET_DATE_FIELDS,
     BALANCESHEET_NUMERIC_FIELDS,
@@ -225,7 +225,8 @@ def _insert_or_replace_analytics_frame(
         f"SELECT {quoted_columns} FROM {_quote_duckdb_identifier(temp_frame_name)}"
     )
 
-    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)
+    # 写锁被其它定时任务占用时等待重试，而不是一撞就把整轮同步作废
+    connection = connect_duckdb_for_write(ANALYTICS_DB_PATH)
     try:
         connection.execute("BEGIN TRANSACTION")
         if replace_dates:

@@ -1402,17 +1402,30 @@ def _load_report_rows_by_symbol(
 def load_a_stock_consensus_valuation_map(
     db: Any,
     symbols: Iterable[str],
+    as_of: Optional[date] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Load latest A-share consensus target ranges for a constituent universe."""
+    """Load A-share consensus target ranges for a constituent universe.
+
+    默认取最新交易日；传 ``as_of`` 时取 as_of 及之前最近一个交易日，研报、财报披露日
+    和复权因子都按那一天截断(point-in-time)，供选股系统回放历史快照使用。
+    """
     normalized_symbols = list(dict.fromkeys(
         normalized for symbol in symbols
         if (normalized := normalize_a_stock_symbol(symbol))
     ))
     if not normalized_symbols:
         return {}
-    latest_trade_date = _row_to_date(
-        db.execute(text("SELECT MAX(trade_date) FROM a_stock_market_daily")).scalar()
-    )
+    if as_of is None:
+        latest_trade_date = _row_to_date(
+            db.execute(text("SELECT MAX(trade_date) FROM a_stock_market_daily")).scalar()
+        )
+    else:
+        latest_trade_date = _row_to_date(
+            db.execute(
+                text("SELECT MAX(trade_date) FROM a_stock_market_daily WHERE trade_date <= :as_of"),
+                {"as_of": as_of},
+            ).scalar()
+        )
     if latest_trade_date is None:
         return {}
 
@@ -1612,19 +1625,72 @@ def load_a_stock_klines(
 
     result: List[Dict[str, Any]] = []
     for row in rows:
-        trade_date = _row_to_date(row.get("trade_date"))
-        if trade_date is None:
-            continue
-        result.append({
-            "timestamp": datetime.combine(trade_date, time(hour=15)),
-            "open": _safe_float(row.get("open")) or 0.0,
-            "high": _safe_float(row.get("high")) or 0.0,
-            "low": _safe_float(row.get("low")) or 0.0,
-            "close": _safe_float(row.get("close")) or 0.0,
-            "volume": _safe_float(row.get("volume")) or 0.0,
-            "turnover": _safe_float(row.get("turnover")) or 0.0,
-            "turnover_rate": _safe_float(row.get("turnover_rate")),
-        })
+        payload = _a_stock_kline_payload(row)
+        if payload is not None:
+            result.append(payload)
+    return result
+
+
+def _a_stock_kline_payload(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """个股详情页 K 线的一根日 K；单只和批量加载共用，保证选股系统的技术信号和 K 线图吃的是同一份输入。"""
+    trade_date = _row_to_date(row.get("trade_date"))
+    if trade_date is None:
+        return None
+    return {
+        "timestamp": datetime.combine(trade_date, time(hour=15)),
+        "open": _safe_float(row.get("open")) or 0.0,
+        "high": _safe_float(row.get("high")) or 0.0,
+        "low": _safe_float(row.get("low")) or 0.0,
+        "close": _safe_float(row.get("close")) or 0.0,
+        "volume": _safe_float(row.get("volume")) or 0.0,
+        "turnover": _safe_float(row.get("turnover")) or 0.0,
+        "turnover_rate": _safe_float(row.get("turnover_rate")),
+    }
+
+
+def load_a_stock_klines_batch(
+    db: Any,
+    symbols: Iterable[str],
+    *,
+    start_date: date,
+    end_date: date,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """多只股票的前复权日 K：与 ``load_a_stock_klines`` 同一张表、同一组字段、同一种格式。
+
+    前复权视图里没有行（缺复权因子）的股票退回原始日线，和单只加载的兜底一致。
+    """
+    normalized_symbols = list(dict.fromkeys(
+        normalized for symbol in symbols if (normalized := normalize_a_stock_symbol(symbol))
+    ))
+    result: Dict[str, List[Dict[str, Any]]] = {symbol: [] for symbol in normalized_symbols}
+    if not normalized_symbols or start_date > end_date:
+        return result
+
+    def query(table_name: str, volume_column: str, turnover_column: str, chunk: Sequence[str]):
+        params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in params)
+        return db.execute(text(f"""
+            SELECT ts_code, trade_date, open, high, low, close,
+                   {volume_column} AS volume, {turnover_column} AS turnover, turnover_rate
+            FROM {table_name}
+            WHERE ts_code IN ({placeholders})
+              AND trade_date >= :start_date
+              AND trade_date <= :end_date
+            ORDER BY ts_code, trade_date
+        """), {**params, "start_date": start_date, "end_date": end_date}).mappings().all()
+
+    for offset in range(0, len(normalized_symbols), 500):
+        chunk = normalized_symbols[offset:offset + 500]
+        for row in query("a_stock_market_daily_qfq", "volume", "turnover", chunk):
+            payload = _a_stock_kline_payload(row)
+            if payload is not None:
+                result[str(row.get("ts_code") or "").upper()].append(payload)
+        missing = [symbol for symbol in chunk if not result[symbol]]
+        if missing:
+            for row in query("a_stock_market_daily", "vol", "amount", missing):
+                payload = _a_stock_kline_payload(row)
+                if payload is not None:
+                    result[str(row.get("ts_code") or "").upper()].append(payload)
     return result
 
 

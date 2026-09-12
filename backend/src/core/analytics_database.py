@@ -2,7 +2,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text, create_engine, text
+from sqlalchemy import Boolean, Column, Date, DateTime, Double, Float, Integer, String, Text, create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -616,6 +616,160 @@ class HKIndexWeightSnapshot(AnalyticsBase):
     verified = Column(Float, default=0)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemPoolRun(AnalyticsBase):
+    """选股系统基本面股票池的每日运行记录（一个交易日一行，重跑覆盖）。"""
+    __tablename__ = "stock_system_pool_run"
+
+    trade_date = Column(Date, primary_key=True)
+    as_of = Column(Date)
+    status = Column(String(16))
+    message = Column(Text)
+    universe_total = Column(Integer)
+    universe_size = Column(Integer)
+    gate_passed = Column(Integer)
+    scored = Column(Integer)
+    pool_size = Column(Integer)
+    duration_seconds = Column(Double)
+    config_json = Column(Text)
+    summary_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemPoolSnapshot(AnalyticsBase):
+    """选股系统基本面股票池的逐股快照：股票池范围内每只股票一行。
+
+    因子原值单独成列，方便事后按日期做分组前瞻收益 / IC 检验；闸门理由和因子百分位
+    这类展示用的明细存 JSON 文本。数值列用 DOUBLE：DuckDB 的 FLOAT 是 32 位，
+    分数和百分比存进去会丢精度(97.78 读回来是 97.7799987…)。
+    """
+    __tablename__ = "stock_system_pool_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(64))
+    industry = Column(String(64))
+    is_financial = Column(Boolean)
+    close = Column(Double)
+    avg_total_mv_100m = Column(Double)
+    avg_amount_10k = Column(Double)
+    gate_passed = Column(Boolean)
+    gate_reasons = Column(Text)
+    gate_notes = Column(Text)
+    dcf_return_pct = Column(Double)
+    consensus_upside_pct = Column(Double)
+    earnings_yield_pct = Column(Double)
+    revenue_yoy_pct = Column(Double)
+    profit_yoy_pct = Column(Double)
+    quarter_revenue_yoy_pct = Column(Double)
+    consensus_growth_pct = Column(Double)
+    consensus_revision_pct = Column(Double)
+    profitability_pct = Column(Double)
+    ocf_to_np_ttm = Column(Double)
+    debt_to_assets_pct = Column(Double)
+    goodwill_to_equity_pct = Column(Double)
+    factor_scores = Column(Text)
+    valuation_score = Column(Double)
+    growth_score = Column(Double)
+    quality_score = Column(Double)
+    expectation_score = Column(Double)
+    composite_score = Column(Double)
+    coverage = Column(Double)
+    pool_rank = Column(Integer)
+    in_pool = Column(Boolean)
+
+
+class StockSystemRegimeSnapshot(AnalyticsBase):
+    """选股系统情绪面择时：每个交易日、每条有贪恐计算的 A 股指数的状态。"""
+    __tablename__ = "stock_system_regime_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    index_code = Column(String(16), primary_key=True)
+    name = Column(String(64))
+    category = Column(String(16))
+    is_market = Column(Boolean)
+    constituent_count = Column(Integer)
+    state = Column(String(16))
+    overheated = Column(Boolean)
+    stale = Column(Boolean)
+    score = Column(Double)
+    score_date = Column(Date)
+    signal_side = Column(String(16))
+    signal_label = Column(String(64))
+    signal_date = Column(Date)
+    days_since_signal = Column(Integer)
+    note = Column(Text)
+    cap_pct = Column(Double)
+    pool_members = Column(Integer)
+    allocated_pct = Column(Double)
+
+
+class StockSystemAllocationSnapshot(AnalyticsBase):
+    """选股系统仓位控制：入池股票逐只的目标仓位（或没分到仓位的原因）。"""
+    __tablename__ = "stock_system_allocation_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(64))
+    industry = Column(String(64))
+    pool_rank = Column(Integer)
+    composite_score = Column(Double)
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    sector_state = Column(String(16))
+    sector_overheated = Column(Boolean)
+    status = Column(String(16))
+    target_weight_pct = Column(Double)
+    reason = Column(Text)
+
+
+class StockSystemAllocationRun(AnalyticsBase):
+    """选股系统仓位控制的每日运行记录（一个交易日一行，重跑覆盖）。"""
+    __tablename__ = "stock_system_allocation_run"
+
+    trade_date = Column(Date, primary_key=True)
+    as_of = Column(Date)
+    market_index = Column(String(16))
+    market_state = Column(String(16))
+    market_overheated = Column(Boolean)
+    market_score = Column(Double)
+    exposure_pct = Column(Double)
+    invested_pct = Column(Double)
+    positions = Column(Integer)
+    duration_seconds = Column(Double)
+    config_json = Column(Text)
+    summary_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemSignalSnapshot(AnalyticsBase):
+    """选股系统技术面信号：每个交易日评估过的股票（候选 + 模拟盘持仓）逐只一行。"""
+    __tablename__ = "stock_system_signal_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(64))
+    role = Column(String(16))
+    pool_rank = Column(Integer)
+    sector_name = Column(String(64))
+    sector_state = Column(String(16))
+    target_weight_pct = Column(Double)
+    bar_date = Column(Date)
+    close = Column(Double)
+    atr = Column(Double)
+    trigger_keys = Column(Text)
+    triggers = Column(Text)
+    xueqiu_status = Column(String(16))
+    xueqiu_ratio = Column(Double)
+    xueqiu_detail = Column(Text)
+    filter_passed = Column(Boolean)
+    action = Column(String(16))
+    planned_weight_pct = Column(Double)
+    stop_pct = Column(Double)
+    stop_price = Column(Double)
+    exits = Column(Text)
+    note = Column(Text)
 
 
 def _financial_statement_column_types(date_fields, text_fields, numeric_fields):
