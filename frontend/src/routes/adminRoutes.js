@@ -47,6 +47,11 @@ export const adminRouteDescriptors = [
     props: { initialTab: 'value-investing' },
   },
   {
+    path: '/factor-lab/stock-system',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
+    props: { initialTab: 'stock-system' },
+  },
+  {
     path: '/live',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/LiveTrading')),
   },

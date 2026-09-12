@@ -1598,6 +1598,163 @@ class FactorBacktestSearchResult(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 # 创建所有表
+class StockSystemPaperAccount(Base):
+    """选股系统模拟盘账户（全局单份）。重置模拟盘会清空持仓/订单/净值并重建这一行。"""
+    __tablename__ = "stock_system_paper_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    initial_capital = Column(Float, nullable=False)
+    cash = Column(Float, nullable=False)
+    started_on = Column(Date)
+    # 已经结算到哪个交易日（成交、盯市、净值都做完了）
+    last_trade_date = Column(Date)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemPaperPosition(Base):
+    """选股系统模拟盘持仓。
+
+    分红送转按复权因子折算进市值（相当于红利再投）：市值 = 股数 × 原始收盘价 ×
+    当日复权因子 / 买入日复权因子，所以除权日不会出现假的跳水。
+    """
+    __tablename__ = "stock_system_paper_positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(16), nullable=False, unique=True)
+    name = Column(String(64))
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    quantity = Column(Integer, nullable=False)
+    entry_date = Column(Date, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    entry_adj_factor = Column(Float)
+    cost = Column(Float, nullable=False)
+    stop_pct = Column(Float)
+    entry_reason = Column(Text)
+    last_price = Column(Float)
+    last_adj_factor = Column(Float)
+    market_value = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemPaperOrder(Base):
+    """选股系统模拟盘订单：信号日收盘生成，下一交易日开盘撮合。"""
+    __tablename__ = "stock_system_paper_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    signal_date = Column(Date, nullable=False)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    side = Column(String(8), nullable=False)
+    status = Column(String(16), nullable=False)
+    target_weight_pct = Column(Float)
+    budget = Column(Float)
+    quantity = Column(Integer)
+    stop_pct = Column(Float)
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    reason = Column(Text)
+    exec_date = Column(Date)
+    fill_price = Column(Float)
+    fill_adj_factor = Column(Float)
+    amount = Column(Float)
+    fee = Column(Float)
+    realized_pnl = Column(Float)
+    message = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemPaperNav(Base):
+    """选股系统模拟盘逐日净值（按交易日收盘盯市）。"""
+    __tablename__ = "stock_system_paper_navs"
+
+    trade_date = Column(Date, primary_key=True)
+    cash = Column(Float, nullable=False)
+    market_value = Column(Float, nullable=False)
+    nav = Column(Float, nullable=False)
+    positions = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemBacktestRun(Base):
+    """选股系统回测任务：独立子进程执行，进度和结果写这里（SQLite 支持多进程读写）。"""
+    __tablename__ = "stock_system_backtest_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    status = Column(String(16), nullable=False)
+    progress = Column(Float, nullable=False, default=0.0)
+    message = Column(Text)
+    params = Column(JSON)
+    # 提交时的完整选股系统配置快照：之后改配置不影响这次回测的解释
+    config = Column(JSON)
+    summary = Column(JSON)
+    pid = Column(Integer)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+
+
+class StockSystemBacktestNav(Base):
+    """回测各方案的逐日净值。"""
+    __tablename__ = "stock_system_backtest_navs"
+
+    run_id = Column(Integer, primary_key=True)
+    variant = Column(String(32), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    nav = Column(Float, nullable=False)
+    exposure_pct = Column(Float)
+    positions = Column(Integer)
+
+
+class StockSystemBacktestTrade(Base):
+    """回测各方案的平仓记录（减仓按比例拆出一条）。"""
+    __tablename__ = "stock_system_backtest_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, nullable=False, index=True)
+    variant = Column(String(32), nullable=False)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    entry_date = Column(Date)
+    exit_date = Column(Date)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    quantity = Column(Float)
+    pnl = Column(Float)
+    return_pct = Column(Float)
+    holding_days = Column(Integer)
+    reason = Column(Text)
+
+
+class StockSystemBacktestPoolCache(Base):
+    """回测用的历史股票池（第一层）缓存：同一套第一层参数下，某个调仓日的结果只算一次。"""
+    __tablename__ = "stock_system_backtest_pool_cache"
+
+    pool_key = Column(String(32), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    rows = Column(JSON, nullable=False)
+    summary = Column(JSON)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class StockSystemConfig(Base):
+    """选股交易系统的超参数（全局单份）。
+
+    股票池范围、硬闸门阈值、软评分因子权重等整份存在 payload(JSON) 里，由
+    ``core.services.stock_system.config`` 负责和默认值合并、校验；新增参数不需要改表。
+    """
+    __tablename__ = "stock_system_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payload = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_by = Column(String(64))
+
+
 Base.metadata.create_all(engine)
 
 

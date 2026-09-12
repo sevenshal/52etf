@@ -771,6 +771,42 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
         # not this symbol's own 4-rows-back row (2026-06-16).
         self.assertEqual(10.0, histories["SH600001"]["history"][-1]["weight_5d_ago"])
 
+    def test_batch_weight_price_ratios_match_history_rows(self):
+        """选股系统的批量权价比必须和「权重和排名历史」最新一行逐字段一致（同锚点、同取整）。"""
+        with TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/analytics.duckdb"
+            self._create_snapshot_db_with_rank_trend(db_path)
+            self._create_price_db(db_path)
+
+            with patch("src.core.services.duckdb_analytics.ANALYTICS_DB_PATH", db_path):
+                batch = factor_lab.load_xueqiu_weight_price_ratios(
+                    ["600001.SH", "600002.SH", "600003.SH", "600999.SH"], date(2026, 6, 22)
+                )
+                histories = {
+                    ts_code: factor_lab.load_xueqiu_top_holdings_history(symbol=api_symbol, active_only=True, limit=50)
+                    for ts_code, api_symbol in (
+                        ("600001.SH", "SH600001"), ("600002.SH", "SH600002"), ("600003.SH", "SH600003"),
+                    )
+                }
+                too_early = factor_lab.load_xueqiu_weight_price_ratios(["600001.SH"], date(2026, 6, 16))
+
+        self.assertTrue(batch["available"])
+        self.assertEqual("2026-06-22", batch["snapshot_date"])
+        self.assertEqual("2026-06-15", batch["compare_snapshot_date"])
+        for ts_code, history in histories.items():
+            newest = history["history"][-1]
+            item = batch["items"][ts_code]
+            self.assertEqual(newest["weight_price_ratio_5d"], item["weight_price_ratio"], msg=ts_code)
+            self.assertEqual(newest["weight_multiple_5d"], item["weight_multiple"], msg=ts_code)
+            self.assertEqual(newest["momentum_multiple_5d"], item["price_multiple"], msg=ts_code)
+            self.assertEqual(newest["direction_5d"], item["direction"], msg=ts_code)
+            self.assertEqual(newest["holding_cube_count"], item["holding_cube_count"], msg=ts_code)
+        self.assertEqual(6.11, batch["items"]["600001.SH"]["weight_price_ratio"])
+        self.assertEqual(0, batch["items"]["600999.SH"]["holding_cube_count"])
+        self.assertIsNone(batch["items"]["600999.SH"]["weight_price_ratio"])
+        # 快照期数不够 N+1 期时整体不可用（选股系统据此自动跳过雪球过滤）
+        self.assertFalse(too_early["available"])
+
     def test_history_and_latest_both_use_intraday_point_price_on_current_day(self):
         with TemporaryDirectory() as tmpdir:
             db_path = f"{tmpdir}/analytics.duckdb"

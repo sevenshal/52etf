@@ -46,3 +46,17 @@ def test_turnover_rate_is_converted_from_tushare_percent_to_fraction():
     # 前端换手衰减按小数计算，1.22 原样透传会被截成 1、每天清空成交分布
     assert result[0]["turnover_rate"] == pytest.approx(0.0122)
     assert result[1]["turnover_rate"] is None
+
+
+def test_batch_loader_uses_the_same_turnover_fraction():
+    """选股系统的批量 K 线和个股详情页共用行格式，换手率同样是小数口径。"""
+    from src.core.services.a_stock_consensus import load_a_stock_klines_batch
+
+    rows = [{
+        "ts_code": "300750.SZ", "trade_date": date(2026, 9, 8), "open": 400.0, "high": 410.0, "low": 395.0,
+        "close": 405.0, "volume": 500000.0, "turnover": 2.0e7, "turnover_rate": 1.22,
+    }]
+    result = load_a_stock_klines_batch(
+        _FakeDb(rows), ["300750.SZ"], start_date=date(2026, 9, 1), end_date=date(2026, 9, 10)
+    )
+    assert result["300750.SZ"][0]["turnover_rate"] == pytest.approx(0.0122)
