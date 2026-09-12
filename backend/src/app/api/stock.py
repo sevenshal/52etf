@@ -32,7 +32,7 @@ class KLineData(BaseModel):
     close: float
     volume: float
     turnover: float
-    turnover_rate: Optional[float] = None
+    turnover_rate: Optional[float] = None  # 小数口径：0.02 表示 2%
 
 class FavoriteResponse(BaseModel):
     """收藏响应"""
