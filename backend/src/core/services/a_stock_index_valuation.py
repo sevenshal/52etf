@@ -317,26 +317,110 @@ def load_a_stock_index_valuation_history(
     normalized_symbol = str(symbol or "").strip().upper()
     db = Session()
     try:
-        query = db.query(AStockIndexValuationSnapshot).filter(
+        # 估值点位要用起始日之前的历史算分位，所以只按结束日过滤，输出时再按起始日截取
+        query = db.query(AStockIndexValuationSnapshot.date, AStockIndexValuationSnapshot.payload).filter(
             AStockIndexValuationSnapshot.symbol == normalized_symbol
         )
-        if start_date is not None:
-            query = query.filter(AStockIndexValuationSnapshot.date >= start_date)
+        if end_date is not None:
+            query = query.filter(AStockIndexValuationSnapshot.date <= end_date)
+        rows = [
+            (snapshot_date, (payload or {}).get("current_gap_pct"))
+            for snapshot_date, payload in query.order_by(AStockIndexValuationSnapshot.date.asc()).all()
+        ]
+    finally:
+        Session.remove()
+
+    positions = build_valuation_position_history(rows)
+    history = []
+    for snapshot_date, current_gap_pct in rows:
+        if start_date is not None and snapshot_date < start_date:
+            continue
+        position = positions.get(snapshot_date) or {}
+        history.append({
+            "date": snapshot_date.isoformat(),
+            "valuation_ratio": _valuation_ratio(current_gap_pct),
+            "current_gap_pct": current_gap_pct,
+            "valuation_position_252": position.get(VALUATION_POSITION_SHORT_WINDOW),
+            "valuation_position_504": position.get(VALUATION_POSITION_MAX_WINDOW),
+        })
+    return history
+
+
+def load_a_stock_index_valuation_position_history(
+    symbol: str,
+    *,
+    end_date: Optional[date] = None,
+) -> Dict[date, Dict[int, Optional[float]]]:
+    """逐日估值点位，按窗口（252 / 504）给出当天的分位。
+
+    与页面上的 valuation_position_252_pct / valuation_position_pct 同一口径，但每一天只用
+    截至当天的估值偏离历史计算，没有未来函数，回测可以直接用。样本不足 120 天时为 None。
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    db = Session()
+    try:
+        query = db.query(AStockIndexValuationSnapshot.date, AStockIndexValuationSnapshot.payload).filter(
+            AStockIndexValuationSnapshot.symbol == normalized_symbol
+        )
         if end_date is not None:
             query = query.filter(AStockIndexValuationSnapshot.date <= end_date)
         rows = query.order_by(AStockIndexValuationSnapshot.date.asc()).all()
-        history = []
-        for row in rows:
-            payload = dict(row.payload or {})
-            valuation_ratio = _valuation_ratio(payload.get("current_gap_pct"))
-            history.append({
-                "date": row.date.isoformat(),
-                "valuation_ratio": valuation_ratio,
-                "current_gap_pct": payload.get("current_gap_pct"),
-            })
-        return history
     finally:
         Session.remove()
+
+    return build_valuation_position_history(
+        (snapshot_date, (payload or {}).get("current_gap_pct")) for snapshot_date, payload in rows
+    )
+
+
+def build_valuation_position_history(
+    gap_rows: Iterable[tuple],
+) -> Dict[date, Dict[int, Optional[float]]]:
+    """按日期升序的 (日期, 估值偏离%) 逐日算估值点位：第 i 天只用截至当天的偏离历史。"""
+    gaps: List[float] = []
+    positions: Dict[date, Dict[int, Optional[float]]] = {}
+    for snapshot_date, current_gap_pct in gap_rows:
+        try:
+            gap = float(current_gap_pct)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(gap):
+            continue
+        gaps.append(gap)
+        fields = _build_valuation_position_fields(gaps[-VALUATION_POSITION_MAX_WINDOW:], gap)
+        positions[snapshot_date] = {
+            VALUATION_POSITION_SHORT_WINDOW: fields["valuation_position_252_pct"],
+            VALUATION_POSITION_MAX_WINDOW: fields["valuation_position_pct"],
+        }
+    return positions
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def valuation_buy_allowed(valuation: Any, buy_min: Optional[float]) -> bool:
+    """估值买入闸门（回测与实盘共用）：估值点位 >= buy_min 才买；没有估值（非 A股指数、样本不足）不设闸。"""
+    if buy_min is None or not _is_finite_number(valuation):
+        return True
+    return float(valuation) >= float(buy_min)
+
+
+def valuation_sell_allowed(
+    valuation: Any,
+    fear: Any,
+    sell_max: Optional[float],
+    force_sell_greed: Optional[float],
+) -> bool:
+    """估值卖出闸门（回测与实盘共用）：估值点位 <= sell_max 才卖；贪恐达到兜底阈值时不看估值直接卖。"""
+    if sell_max is None or not _is_finite_number(valuation):
+        return True
+    if force_sell_greed is not None and _is_finite_number(fear) and float(fear) >= float(force_sell_greed):
+        return True
+    return float(valuation) <= float(sell_max)
 
 
 def _valuation_ratio(current_gap_pct: Any) -> Optional[float]:

@@ -1014,6 +1014,14 @@ class AStockFearStrategyConfig(Base):
     max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
     min_position_pct_after_take_profit = Column(Float, nullable=False, default=0.0)
     rebalance_threshold_pct = Column(Float, nullable=False, default=0.0)
+    # 估值点位闸门（与回测同一口径）：窗口 252/504 日；阈值 NULL=关闭
+    valuation_window = Column(Integer, nullable=True, default=252)
+    # 买入需信号日估值点位 >= 该值
+    valuation_buy_min = Column(Float, nullable=True)
+    # 卖出需信号日估值点位 <= 该值（贪婪但还不贵就继续拿）
+    valuation_sell_max = Column(Float, nullable=True)
+    # 贪恐 >= 该值时不看估值直接卖
+    valuation_force_sell_greed = Column(Float, nullable=True)
     last_run_at = Column(DateTime)
     last_run_status = Column(String(16))
     last_run_message = Column(String(500))
@@ -2261,26 +2269,21 @@ ensure_soxl_fear_strategy_multi_config_schema()
 
 
 def ensure_a_stock_fear_strategy_schema():
-    """A股情绪量能策略表结构迁移（幂等）：给 configs 表补跷跷板候补列。"""
+    """A股情绪量能策略表结构迁移（幂等）：给 configs 表补估值点位闸门列。
+
+    候补/第二候补/换仓/log-z 等列已在生产库升级完成，对应 ALTER 已移除。
+    存量配置补列后估值闸门阈值为 NULL（关闭），实盘行为不变。
+    """
     with engine.begin() as conn:
         columns = {
             row[1]
             for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)")).fetchall()
         }
         additions = [
-            ("sub_symbol", "VARCHAR(32)"),
-            ("sub_fear_source", "VARCHAR(64)"),
-            ("sub_volume_signal_symbol", "VARCHAR(32)"),
-            ("sub_buy_threshold", "FLOAT DEFAULT 25.0"),
-            ("sub_volume_ratio_threshold", "FLOAT DEFAULT 1.6"),
-            ("sub2_symbol", "VARCHAR(32)"),
-            ("sub2_fear_source", "VARCHAR(64)"),
-            ("sub2_volume_signal_symbol", "VARCHAR(32)"),
-            ("sub2_buy_threshold", "FLOAT DEFAULT 20.0"),
-            ("sub2_volume_ratio_threshold", "FLOAT DEFAULT 1.3"),
-            ("swap_threshold", "FLOAT"),
-            ("volume_z_threshold", "FLOAT"),
-            ("sell_shrink_z", "FLOAT DEFAULT -1.0"),
+            ("valuation_window", "INTEGER DEFAULT 252"),
+            ("valuation_buy_min", "FLOAT"),
+            ("valuation_sell_max", "FLOAT"),
+            ("valuation_force_sell_greed", "FLOAT"),
         ]
         for column_name, column_type in additions:
             if column_name not in columns:

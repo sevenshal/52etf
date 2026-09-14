@@ -14,6 +14,7 @@ from ...core.services.a_stock_index_valuation import (
     load_a_stock_index_valuation_history,
 )
 from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
+from ...core.services.us_index_valuation import load_us_index_valuation, load_us_index_valuation_history
 from ...core.services.fear_greed_clone_service import FearGreedCloneCalculator
 from ...core.services.market import MarketService
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
@@ -161,13 +162,26 @@ async def get_etf_fear_greed_clone_history(
                 include_latest_holdings=include_latest_holdings,
             )
         )
-        if str(symbol or "").strip().upper() in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
+        normalized_symbol = str(symbol or "").strip().upper()
+        if normalized_symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
             result["valuation"] = await run_in_threadpool(
                 lambda: load_a_stock_index_valuation(symbol)
             )
             result["valuation_history"] = await run_in_threadpool(
                 lambda: load_a_stock_index_valuation_history(
                     symbol,
+                    start_date=_parse_date(start_date),
+                    end_date=_parse_date(end_date),
+                )
+            )
+        elif normalized_symbol.endswith(".US"):
+            # 美股指数ETF：用美股ETF估值分析（EVC 成分公允价值）算估值系数与估值点位
+            result["valuation"] = await run_in_threadpool(
+                lambda: load_us_index_valuation(normalized_symbol)
+            )
+            result["valuation_history"] = await run_in_threadpool(
+                lambda: load_us_index_valuation_history(
+                    normalized_symbol,
                     start_date=_parse_date(start_date),
                     end_date=_parse_date(end_date),
                 )
@@ -254,6 +268,10 @@ async def get_etf_fear_greed_clone_summaries(
             if symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
                 item["valuation"] = await run_in_threadpool(
                     lambda current_symbol=symbol: load_a_stock_index_valuation(current_symbol)
+                )
+            elif str(symbol or "").upper().endswith(".US"):
+                item["valuation"] = await run_in_threadpool(
+                    lambda current_symbol=symbol: load_us_index_valuation(current_symbol)
                 )
             intraday = intraday_map.get(symbol)
             if intraday:

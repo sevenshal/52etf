@@ -303,6 +303,11 @@ const SOXXFearGreed = () => {
       valuationHistoryByDate.get(item.date)?.valuation_ratio ?? null
     ));
     const showValuationRatio = valuationRatios.some(isFiniteNumber);
+    // 估值点位（近 252 日分位，越高越低估）与贪恐同为 0~100，画在贪恐轴上
+    const valuationPositions = filteredData.map(item => (
+      valuationHistoryByDate.get(item.date)?.valuation_position_252 ?? null
+    ));
+    const showValuationPosition = valuationPositions.some(isFiniteNumber);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
     const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
     const priceAxisRange = getFocusedAxisRange(prices);
@@ -316,6 +321,7 @@ const SOXXFearGreed = () => {
           '贪恐5日均线',
           priceSeriesName,
           ...(showValuationRatio ? ['估值系数'] : []),
+          ...(showValuationPosition ? ['估值点位(252日)'] : []),
           '成交量',
         ],
         top: 0,
@@ -450,6 +456,17 @@ const SOXXFearGreed = () => {
           data: valuationRatios,
           lineStyle: { width: 1.8, type: 'dashed', color: '#389e0d' },
           itemStyle: { color: '#389e0d' },
+        }] : []),
+        ...(showValuationPosition ? [{
+          name: '估值点位(252日)',
+          type: 'line',
+          yAxisIndex: 0,
+          smooth: true,
+          showSymbol: false,
+          connectNulls: false,
+          data: valuationPositions,
+          lineStyle: { width: 1.5, type: 'dotted', color: '#722ed1' },
+          itemStyle: { color: '#722ed1' },
         }] : []),
         {
           name: '成交量',
@@ -872,7 +889,8 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
   const oneMonthScore = summary?.one_month_ago?.score;
   const price = showIntraday ? (intraday?.index_level ?? latest?.etf_price?.close) : latest?.etf_price?.close;
   const valuation = summary?.valuation;
-  const showValuation = option.market !== 'US' && option.market !== 'HK' && valuation?.status === 'available';
+  // A股指数用成分一致预期估值，美股指数ETF用美股ETF估值分析（EVC 成分公允价值），港股暂无
+  const showValuation = option.market !== 'HK' && valuation?.status === 'available';
   return (
     <button
       type="button"
