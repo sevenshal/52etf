@@ -279,15 +279,15 @@ class SOXLFearStrategyParams(BaseModel):
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
     # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
     swap_threshold: Optional[float] = None
-    # 估值点位闸门（可选）：估值点位 = 贪恐来源指数的估值偏离在近 252/504 个交易日里的分位，
-    # 越高越低估（>=80 极度低估、<20 极度高估），与贪恐页面同一口径、逐日无未来函数。
+    # 估值点位闸门（可选）：估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，
+    # 越大越贵（>=80 极度高估、<20 极度低估），与贪恐页面同一口径、逐日无未来函数。
     # A股指数用成分一致预期估值，美股指数ETF（QQQ/SPY/SOXX/DIA）用美股ETF估值分析；
     # 没有估值的来源/日期（如 CNN、样本不足 120 天）不设闸。
     valuation_window: int = VALUATION_POSITION_SHORT_WINDOW
-    # 买入闸门：极恐放量 且 估值点位 >= 该值才买；None=关闭
-    valuation_buy_min: Optional[float] = None
-    # 卖出闸门：贪婪 且 估值点位 <= 该值才卖（贪婪但还不贵就继续拿）；None=关闭
-    valuation_sell_max: Optional[float] = None
+    # 买入闸门：极恐放量 且 估值点位 <= 该值（够便宜）才买；None=关闭
+    valuation_buy_max: Optional[float] = None
+    # 卖出闸门：贪婪 且 估值点位 >= 该值（够贵）才卖（贪婪但还不贵就继续拿）；None=关闭
+    valuation_sell_min: Optional[float] = None
     # 卖出兜底：贪恐 >= 该值时不看估值直接卖，避免估值迟迟到不了高估而一直卖不掉；None=不兜底
     valuation_force_sell_greed: Optional[float] = None
 
@@ -297,7 +297,7 @@ class SOXLFearStrategyParams(BaseModel):
             raise ValueError("估值点位窗口仅支持 252 或 504 个交易日")
         return value
 
-    @validator("valuation_buy_min", "valuation_sell_max", "valuation_force_sell_greed")
+    @validator("valuation_buy_max", "valuation_sell_min", "valuation_force_sell_greed")
     def validate_valuation_threshold(cls, value):
         if value is None:
             return None
@@ -483,8 +483,8 @@ class SOXLFearSearchParams(BaseModel):
     sub2_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
     # 估值点位闸门候选（参与组合搜索；None=关闭）
     valuation_window_values: List[int] = Field(default_factory=lambda: [VALUATION_POSITION_SHORT_WINDOW])
-    valuation_buy_min_values: List[Optional[float]] = Field(default_factory=lambda: [None])
-    valuation_sell_max_values: List[Optional[float]] = Field(default_factory=lambda: [None])
+    valuation_buy_max_values: List[Optional[float]] = Field(default_factory=lambda: [None])
+    valuation_sell_min_values: List[Optional[float]] = Field(default_factory=lambda: [None])
     valuation_force_sell_greed_values: List[Optional[float]] = Field(default_factory=lambda: [None])
 
     @validator("valuation_window_values")
@@ -494,7 +494,7 @@ class SOXLFearSearchParams(BaseModel):
             raise ValueError("估值点位窗口候选仅支持 252 或 504")
         return normalized
 
-    @validator("valuation_buy_min_values", "valuation_sell_max_values", "valuation_force_sell_greed_values")
+    @validator("valuation_buy_max_values", "valuation_sell_min_values", "valuation_force_sell_greed_values")
     def validate_valuation_threshold_values(cls, value):
         normalized = list(dict.fromkeys(value or []))
         if not normalized:
@@ -1493,17 +1493,17 @@ def _turn_signal_matches(mode: str, volume_flag: bool, ma5_flag: bool) -> bool:
 
 
 def _valuation_buy_allowed(params: SOXLFearStrategyParams, valuation: float) -> bool:
-    return valuation_buy_allowed(valuation, params.valuation_buy_min)
+    return valuation_buy_allowed(valuation, params.valuation_buy_max)
 
 
 def _valuation_sell_allowed(params: SOXLFearStrategyParams, valuation: float, fear: float) -> bool:
     return valuation_sell_allowed(
-        valuation, fear, params.valuation_sell_max, params.valuation_force_sell_greed,
+        valuation, fear, params.valuation_sell_min, params.valuation_force_sell_greed,
     )
 
 
 def _valuation_reason(params: SOXLFearStrategyParams, valuation: float) -> str:
-    if params.valuation_buy_min is None and params.valuation_sell_max is None:
+    if params.valuation_buy_max is None and params.valuation_sell_min is None:
         return ""
     if not np.isfinite(valuation):
         return "，无估值点位（不设估值闸门）"
@@ -2607,8 +2607,8 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.volume_shrink_std_values,
         payload.turn_signal_cooldown_days_values,
         payload.valuation_window_values,
-        payload.valuation_buy_min_values,
-        payload.valuation_sell_max_values,
+        payload.valuation_buy_max_values,
+        payload.valuation_sell_min_values,
         payload.valuation_force_sell_greed_values,
     ]
     total = 1
@@ -2685,8 +2685,8 @@ def _evaluate_search_candidates(
                 payload.volume_shrink_std_values,
                 payload.turn_signal_cooldown_days_values,
                 payload.valuation_window_values,
-                payload.valuation_buy_min_values,
-                payload.valuation_sell_max_values,
+                payload.valuation_buy_max_values,
+                payload.valuation_sell_min_values,
                 payload.valuation_force_sell_greed_values,
             ):
                 index += 1
@@ -2883,8 +2883,8 @@ def _evaluate_search_batch(
                 volume_shrink_std,
                 turn_signal_cooldown_days,
                 valuation_window,
-                valuation_buy_min,
-                valuation_sell_max,
+                valuation_buy_max,
+                valuation_sell_min,
                 valuation_force_sell_greed,
             ) = values
             params = SOXLFearStrategyParams(
@@ -2928,8 +2928,8 @@ def _evaluate_search_batch(
                 volume_shrink_std=float(volume_shrink_std),
                 turn_signal_cooldown_days=int(turn_signal_cooldown_days),
                 valuation_window=int(valuation_window),
-                valuation_buy_min=float(valuation_buy_min) if valuation_buy_min is not None else None,
-                valuation_sell_max=float(valuation_sell_max) if valuation_sell_max is not None else None,
+                valuation_buy_max=float(valuation_buy_max) if valuation_buy_max is not None else None,
+                valuation_sell_min=float(valuation_sell_min) if valuation_sell_min is not None else None,
                 valuation_force_sell_greed=(
                     float(valuation_force_sell_greed) if valuation_force_sell_greed is not None else None
                 ),

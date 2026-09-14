@@ -96,7 +96,8 @@ def test_calculate_weighted_index_valuation_downweights_thin_consensus():
 
 @pytest.mark.parametrize(
     ("position", "label"),
-    [(90, "极度低估"), (70, "低估"), (50, "合理"), (30, "高估"), (10, "极度高估")],
+    # 估值点位越大越贵
+    [(90, "极度高估"), (70, "高估"), (50, "合理"), (30, "低估"), (10, "极度低估")],
 )
 def test_valuation_position_labels(position, label):
     assert _valuation_position_label(position) == label

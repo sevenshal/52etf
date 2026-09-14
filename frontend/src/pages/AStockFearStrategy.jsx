@@ -43,7 +43,7 @@ const formatRunTime = (value) => {
 };
 
 // 默认参数 = 回测最优（2023-03-22 起，情绪+量能+估值点位）：红利 恐贪≤35 且量比≥1.6 买100%，
-// 恐贪≥70 且近一年估值点位≤20 卖100%（恐贪≥90 不看估值直接卖），移动止盈=0，冷却0；三标的对称轮动 换仓45
+// 恐贪≥70 且近一年估值点位≥80（估值点位越大越贵）卖100%（恐贪≥90 不看估值直接卖），移动止盈=0，冷却0；三标的对称轮动 换仓45
 const defaultValues = {
   enabled: false,
   symbol: '510880.SH',
@@ -81,10 +81,10 @@ const defaultValues = {
   sub2_volume_ratio_threshold: 1.3,
   // 换仓阈值：对称轮动 45
   swap_threshold: 45,
-  // 估值点位闸门：卖出需近一年估值点位≤20（极度高估），恐贪≥90 不看估值直接卖；买入不设估值闸门
+  // 估值点位闸门：卖出需近一年估值点位≥80（极度高估），恐贪≥90 不看估值直接卖；买入不设估值闸门
   valuation_window: 252,
-  valuation_buy_min: null,
-  valuation_sell_max: 20,
+  valuation_buy_max: null,
+  valuation_sell_min: 80,
   valuation_force_sell_greed: 90,
 };
 
@@ -110,8 +110,8 @@ const normalizeConfig = (config) => ({
   swap_threshold: config?.swap_threshold ?? null,
   // 存量配置没有估值闸门（NULL=关闭），不能被默认值覆盖
   valuation_window: config?.valuation_window ?? 252,
-  valuation_buy_min: config?.valuation_buy_min ?? null,
-  valuation_sell_max: config?.valuation_sell_max ?? null,
+  valuation_buy_max: config?.valuation_buy_max ?? null,
+  valuation_sell_min: config?.valuation_sell_min ?? null,
   valuation_force_sell_greed: config?.valuation_force_sell_greed ?? null,
 });
 
@@ -386,8 +386,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
     volume_z_threshold: values.volume_z_threshold ?? null,
     sell_shrink_z: values.sell_shrink_z ?? -1,
     valuation_window: values.valuation_window ?? 252,
-    valuation_buy_min: values.valuation_buy_min ?? null,
-    valuation_sell_max: values.valuation_sell_max ?? null,
+    valuation_buy_max: values.valuation_buy_max ?? null,
+    valuation_sell_min: values.valuation_sell_min ?? null,
     valuation_force_sell_greed: values.valuation_force_sell_greed ?? null,
   });
 
@@ -447,8 +447,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub2_volume_ratio_threshold_values: String(values.sub2_volume_ratio_threshold ?? 1.3),
           // 估值点位闸门按实盘配置原样传过去（留空=关闭 → none）
           valuation_window_values: [values.valuation_window ?? 252],
-          valuation_buy_min_values: formatOptionalCandidate(values.valuation_buy_min),
-          valuation_sell_max_values: formatOptionalCandidate(values.valuation_sell_max),
+          valuation_buy_max_values: formatOptionalCandidate(values.valuation_buy_max),
+          valuation_sell_min_values: formatOptionalCandidate(values.valuation_sell_min),
           valuation_force_sell_greed_values: formatOptionalCandidate(values.valuation_force_sell_greed),
           // 实盘只用原阈值逻辑，不做顶底信号组合搜索
           buy_turn_signal_mode_values: ['legacy'],
@@ -590,7 +590,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     },
     {
       title: '估值闸门',
-      dataIndex: 'valuation_sell_max',
+      dataIndex: 'valuation_sell_min',
       width: 210,
       ellipsis: true,
       render: (_, record) => formatValuationGate(record),
@@ -963,7 +963,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             showIcon
                             style={{ marginBottom: 12 }}
                             message="估值点位闸门（可选，与回测同一口径）"
-                            description="估值点位 = 恐贪来源指数的估值偏离在近 252/504 个交易日里的分位，越高越低估（≥80 极度低估，<20 极度高估），用信号日（前一交易日）收盘后算出的值。买入闸门：极恐放量且估值点位 ≥ 阈值才买；卖出闸门：恐贪达到卖出阈值且估值点位 ≤ 阈值才卖（贪婪但还不贵就继续拿）；恐贪达到兜底阈值时不看估值直接卖。各腿用自己恐贪来源指数的估值（A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析），没有估值的来源不设闸；信号日估值还没算出来时本次跳过。留空=关闭。"
+                            description="估值点位 = 恐贪来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），用信号日（前一交易日）收盘后算出的值。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：恐贪达到卖出阈值且估值点位 ≥ 阈值（够贵）才卖（贪婪但还不贵就继续拿）；恐贪达到兜底阈值时不看估值直接卖。各腿用自己恐贪来源指数的估值（A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析），没有估值的来源不设闸；信号日估值还没算出来时本次跳过。留空=关闭。"
                           />
                         </Col>
                         <Col xs={24} md={4}>
@@ -972,12 +972,12 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="valuation_buy_min" label="买入估值点位(>=)">
+                          <Form.Item name="valuation_buy_max" label="买入估值点位(<=)">
                             <InputNumber min={0} max={100} step={5} placeholder="留空=关闭" style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="valuation_sell_max" label="卖出估值点位(<=)">
+                          <Form.Item name="valuation_sell_min" label="卖出估值点位(>=)">
                             <InputNumber min={0} max={100} step={5} placeholder="留空=关闭" style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>

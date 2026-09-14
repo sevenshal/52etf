@@ -292,8 +292,8 @@ const SoxlFearBacktest = () => {
       sub2_volume_ratio_threshold_values: parseNumberList(values.sub2_volume_ratio_threshold_values),
       // 估值点位闸门（参与组合搜索；none=关闭）
       valuation_window_values: values.valuation_window_values?.length ? values.valuation_window_values : [252],
-      valuation_buy_min_values: parseOptionalThresholdList(values.valuation_buy_min_values),
-      valuation_sell_max_values: parseOptionalThresholdList(values.valuation_sell_max_values),
+      valuation_buy_max_values: parseOptionalThresholdList(values.valuation_buy_max_values),
+      valuation_sell_min_values: parseOptionalThresholdList(values.valuation_sell_min_values),
       valuation_force_sell_greed_values: parseOptionalThresholdList(values.valuation_force_sell_greed_values),
     };
   };
@@ -338,8 +338,8 @@ const SoxlFearBacktest = () => {
     sub2_buy_threshold: record.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: record.sub2_volume_ratio_threshold ?? 1.3,
     valuation_window: record.valuation_window ?? 252,
-    valuation_buy_min: record.valuation_buy_min ?? null,
-    valuation_sell_max: record.valuation_sell_max ?? null,
+    valuation_buy_max: record.valuation_buy_max ?? null,
+    valuation_sell_min: record.valuation_sell_min ?? null,
     valuation_force_sell_greed: record.valuation_force_sell_greed ?? null,
     rebalance_threshold_pct: record.rebalance_threshold_pct,
   });
@@ -551,7 +551,7 @@ const SoxlFearBacktest = () => {
     },
     {
       title: '估值闸门',
-      dataIndex: 'valuation_sell_max',
+      dataIndex: 'valuation_sell_min',
       width: 230,
       render: (_, record) => formatValuationGate(record),
     },
@@ -1142,7 +1142,7 @@ const SoxlFearBacktest = () => {
           onFinish={handleSearch}
           initialValues={{
             // 推荐配置（2023-03-22 起回测最优）：红利 + 科创50信号→半导体交易 + 纳指(159509, 量比QQQ, 恐贪qqq_clone)
-            // 对称轮动 换仓45；估值闸门：贪婪且近一年估值点位<=20 才卖，贪恐>=90 不看估值直接卖
+            // 对称轮动 换仓45；估值闸门（估值点位越大越贵）：贪婪且近一年估值点位>=80 才卖，贪恐>=90 不看估值直接卖
             symbol: '510880.SH',
             fear_source_values: ['a_stock_000015_sh'],
             initial_capital: 1000000,
@@ -1190,8 +1190,8 @@ const SoxlFearBacktest = () => {
             sub2_buy_threshold_values: '20',
             sub2_volume_ratio_threshold_values: '1.3',
             valuation_window_values: [252],
-            valuation_buy_min_values: 'none',
-            valuation_sell_max_values: '20',
+            valuation_buy_max_values: 'none',
+            valuation_sell_min_values: '80',
             valuation_force_sell_greed_values: '90',
           }}
         >
@@ -1448,7 +1448,7 @@ const SoxlFearBacktest = () => {
                 showIcon
                 style={{ marginBottom: 12 }}
                 message="估值点位闸门（可选）"
-                description="估值点位 = 贪恐来源指数的估值偏离在近 252/504 个交易日里的分位，越高越低估（≥80 极度低估，<20 极度高估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≥ 阈值才买；卖出闸门：贪婪且估值点位 ≤ 阈值才卖（贪婪但还不贵就继续拿）；贪恐达到兜底阈值时不看估值直接卖。A股指数用成分一致预期估值，美股指数（QQQ/SPY/SOXX/DIA 自算贪恐来源）用美股ETF估值分析（EVC 成分公允价值 ÷ 持仓净值）；没有对应指数估值的来源（如 CNN）、估值样本不足 120 天的早期日期不设闸。none=关闭。"
+                description="估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖（贪婪但还不贵就继续拿）；贪恐达到兜底阈值时不看估值直接卖。A股指数用成分一致预期估值，美股指数（QQQ/SPY/SOXX/DIA 自算贪恐来源）用美股ETF估值分析（EVC 成分公允价值 ÷ 持仓净值）；没有对应指数估值的来源（如 CNN）、估值样本不足 120 天的早期日期不设闸。none=关闭。"
               />
             </Col>
             <Col xs={24} md={4}>
@@ -1457,13 +1457,13 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="valuation_buy_min_values" label="买入估值点位(>=)候选">
-                <Input placeholder="例如 none,60,80（none=关闭）" />
+              <Form.Item name="valuation_buy_max_values" label="买入估值点位(<=)候选">
+                <Input placeholder="例如 none,20,40（none=关闭）" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="valuation_sell_max_values" label="卖出估值点位(<=)候选">
-                <Input placeholder="例如 none,20,30（none=关闭）" />
+              <Form.Item name="valuation_sell_min_values" label="卖出估值点位(>=)候选">
+                <Input placeholder="例如 none,70,80（none=关闭）" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
@@ -1524,7 +1524,7 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={resultColumns}
-            rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}-${record.swap_threshold}-${record.valuation_window}-${record.valuation_buy_min}-${record.valuation_sell_max}-${record.valuation_force_sell_greed}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}-${record.swap_threshold}-${record.valuation_window}-${record.valuation_buy_max}-${record.valuation_sell_min}-${record.valuation_force_sell_greed}`}
             pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 2210 }}
             onRow={(record) => ({

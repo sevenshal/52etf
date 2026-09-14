@@ -670,8 +670,8 @@ class AStockFearStrategyTrader:
                     config.valuation_window = int(
                         getattr(persisted_config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW
                     )
-                    config.valuation_buy_min = _optional_float(getattr(persisted_config, "valuation_buy_min", None))
-                    config.valuation_sell_max = _optional_float(getattr(persisted_config, "valuation_sell_max", None))
+                    config.valuation_buy_max = _optional_float(getattr(persisted_config, "valuation_buy_max", None))
+                    config.valuation_sell_min = _optional_float(getattr(persisted_config, "valuation_sell_min", None))
                     config.valuation_force_sell_greed = _optional_float(
                         getattr(persisted_config, "valuation_force_sell_greed", None)
                     )
@@ -767,10 +767,10 @@ class AStockFearStrategyTrader:
 
             # 估值点位闸门（可选，与回测同一口径）：各腿用自己恐贪来源指数的信号日估值点位
             valuation_window = int(getattr(config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW)
-            valuation_buy_min = _optional_float(getattr(config, "valuation_buy_min", None))
-            valuation_sell_max = _optional_float(getattr(config, "valuation_sell_max", None))
+            valuation_buy_max = _optional_float(getattr(config, "valuation_buy_max", None))
+            valuation_sell_min = _optional_float(getattr(config, "valuation_sell_min", None))
             valuation_force_sell_greed = _optional_float(getattr(config, "valuation_force_sell_greed", None))
-            valuation_gate_enabled = valuation_buy_min is not None or valuation_sell_max is not None
+            valuation_gate_enabled = valuation_buy_max is not None or valuation_sell_min is not None
             leg_valuations: Dict[str, Optional[float]] = {}
             if valuation_gate_enabled:
                 leg_sources = [("main", fear_source_key, True)]
@@ -963,17 +963,17 @@ class AStockFearStrategyTrader:
             # 估值点位闸门：买入需足够低估；卖出需足够高估（贪恐达到兜底阈值不看估值）
             raw_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal}
             raw_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy}
-            main_signal = main_signal and valuation_buy_allowed(main_valuation, valuation_buy_min)
-            sub_signal = sub_signal and valuation_buy_allowed(sub_valuation, valuation_buy_min)
-            sub2_signal = sub2_signal and valuation_buy_allowed(sub2_valuation, valuation_buy_min)
+            main_signal = main_signal and valuation_buy_allowed(main_valuation, valuation_buy_max)
+            sub_signal = sub_signal and valuation_buy_allowed(sub_valuation, valuation_buy_max)
+            sub2_signal = sub2_signal and valuation_buy_allowed(sub2_valuation, valuation_buy_max)
             main_greedy = main_greedy and valuation_sell_allowed(
-                main_valuation, fear_score, valuation_sell_max, valuation_force_sell_greed,
+                main_valuation, fear_score, valuation_sell_min, valuation_force_sell_greed,
             )
             sub_greedy = sub_greedy and valuation_sell_allowed(
-                sub_valuation, sub_fear_score, valuation_sell_max, valuation_force_sell_greed,
+                sub_valuation, sub_fear_score, valuation_sell_min, valuation_force_sell_greed,
             )
             sub2_greedy = sub2_greedy and valuation_sell_allowed(
-                sub2_valuation, sub2_fear_score, valuation_sell_max, valuation_force_sell_greed,
+                sub2_valuation, sub2_fear_score, valuation_sell_min, valuation_force_sell_greed,
             )
             valuation_blocked_message = ""
             if valuation_gate_enabled:
@@ -983,7 +983,7 @@ class AStockFearStrategyTrader:
                 if shares > 0 and holding and raw_greedy[holding] and not gated_greedy[holding]:
                     valuation_blocked_message = (
                         f"{leg_labels[holding]} 到达贪恐卖出阈值，但估值点位 "
-                        f"{_format_valuation(leg_valuations.get(holding))} > {valuation_sell_max:g}，继续持有"
+                        f"{_format_valuation(leg_valuations.get(holding))} < {valuation_sell_min:g}（还不够贵），继续持有"
                     )
                 elif shares <= 0:
                     blocked_labels = [
@@ -992,7 +992,7 @@ class AStockFearStrategyTrader:
                     ]
                     if blocked_labels:
                         valuation_blocked_message = (
-                            f"{'、'.join(blocked_labels)} 极恐放量，但估值点位低于 {valuation_buy_min:g}，不买入"
+                            f"{'、'.join(blocked_labels)} 极恐放量，但估值点位高于 {valuation_buy_max:g}（还不够便宜），不买入"
                         )
             # 对称双轮动：换仓阈值非空时启用（恐贪超过阈值且另一标的有信号则换仓；空仓任一触发都买更恐慌的）
             use_swap = getattr(config, "swap_threshold", None) is not None
