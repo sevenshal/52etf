@@ -26,7 +26,12 @@ class FedRateMonitorService:
     CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "quant")
     CACHE = Cache(directory=CACHE_DIR)
     CACHE_TIMEOUT = 3600  # 1小时
-    
+    # 抓取失败（如 investing.com 返回 403）也缓存一会儿，避免每次打开页面都重新走代理请求一次
+    FAILURE_CACHE_KEY = 'fed_rate_fetch_failed'
+    FAILURE_CACHE_TIMEOUT = 600
+    # 显式超时：代理或目标站卡住时最多等这么久
+    REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
     # FRED API 配置
     FRED_API_KEY = "f969b4eb2a07325467cffb3f100fa6ea"
     FRED_BASE_URL = "https://api.stlouisfed.org"
@@ -39,27 +44,37 @@ class FedRateMonitorService:
             cached_data = FedRateMonitorService.CACHE.get(cache_key)
             if cached_data is not None:
                 return cached_data
+            if FedRateMonitorService.CACHE.get(FedRateMonitorService.FAILURE_CACHE_KEY):
+                return []
 
         try:
             html_content = FedRateMonitorService._fetch_html()
             if not html_content:
+                FedRateMonitorService._remember_failure()
                 return []
-                
+
             data = FedRateMonitorService._parse_response(html_content)
-            
+
             # 仅缓存解析后的数据
             FedRateMonitorService.CACHE.set(cache_key, data, expire=FedRateMonitorService.CACHE_TIMEOUT)
-            
+
             return data
         except Exception as err:
             print(f"数据获取或解析失败: {err}")
+            FedRateMonitorService._remember_failure()
             return []
+
+    @staticmethod
+    def _remember_failure():
+        FedRateMonitorService.CACHE.set(
+            FedRateMonitorService.FAILURE_CACHE_KEY, True, expire=FedRateMonitorService.FAILURE_CACHE_TIMEOUT
+        )
 
     @staticmethod
     def _fetch_html():
         """单独的HTML获取方法，不涉及缓存和解析"""
         try:
-            with httpx.Client(proxy=FedRateMonitorService.PROXY) as client:
+            with httpx.Client(proxy=FedRateMonitorService.PROXY, timeout=FedRateMonitorService.REQUEST_TIMEOUT) as client:
                 response = client.get(FedRateMonitorService.URL, headers=FedRateMonitorService.HEADERS)
                 response.raise_for_status()
                 return response.text
@@ -154,7 +169,7 @@ class FedRateMonitorService:
             
             # 执行请求
             responses = {}
-            with httpx.Client(proxy=FedRateMonitorService.PROXY) as client:
+            with httpx.Client(proxy=FedRateMonitorService.PROXY, timeout=FedRateMonitorService.REQUEST_TIMEOUT) as client:
                 for rate_name, url in requests_to_make:
                     response = client.get(url)
                     response.raise_for_status()

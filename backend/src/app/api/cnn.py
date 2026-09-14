@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ from ...core.services.etf_fear_greed_clone_service import ETFFearGreedCloneCalcu
 from ...core.services.a_stock_index_valuation import (
     load_a_stock_index_valuation,
     load_a_stock_index_valuation_history,
+    load_a_stock_index_valuations,
 )
 from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL
 from ...core.services.us_index_valuation import load_us_index_valuation, load_us_index_valuation_history
@@ -21,6 +23,8 @@ from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 
 router = APIRouter(prefix="/api/cnn")
 logger = logging.getLogger(__name__)
+# 贪恐摘要接口超过该耗时记一条分阶段告警，便于定位偶发慢请求
+SLOW_SUMMARIES_LOG_SECONDS = 3.0
 
 @router.get("/fear-greed")
 async def get_fear_greed_index():
@@ -206,10 +210,13 @@ async def get_etf_fear_greed_clone_summaries(
             for item in str(symbols or "").split(",")
             if item.strip()
         ]
+        started = time.perf_counter()
+        phase_seconds: Dict[str, float] = {}
         calculator = ETFFearGreedCloneCalculator()
         result = await run_in_threadpool(
             lambda: calculator.load_summaries_from_db(symbol_list)
         )
+        phase_seconds["summaries"] = time.perf_counter() - started
         a_stock_symbols = [
             symbol.upper()
             for symbol in symbol_list
@@ -263,16 +270,14 @@ async def get_etf_fear_greed_clone_summaries(
                 for symbol, snapshot in realtime_results
                 if snapshot
             }
+        phase_started = time.perf_counter()
+        valuation_map = await run_in_threadpool(lambda: _load_summary_valuations(symbol_list))
+        phase_seconds["valuations"] = time.perf_counter() - phase_started
         for item in result.get("data", []):
             symbol = item.get("symbol")
-            if symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
-                item["valuation"] = await run_in_threadpool(
-                    lambda current_symbol=symbol: load_a_stock_index_valuation(current_symbol)
-                )
-            elif str(symbol or "").upper().endswith(".US"):
-                item["valuation"] = await run_in_threadpool(
-                    lambda current_symbol=symbol: load_us_index_valuation(current_symbol)
-                )
+            valuation = valuation_map.get(str(symbol or "").upper())
+            if valuation is not None:
+                item["valuation"] = valuation
             intraday = intraday_map.get(symbol)
             if intraday:
                 item["intraday"] = intraday
@@ -280,6 +285,14 @@ async def get_etf_fear_greed_clone_summaries(
                 realtime = realtime_map.get(symbol)
                 if realtime:
                     item["intraday"] = realtime
+        total_seconds = time.perf_counter() - started
+        if total_seconds >= SLOW_SUMMARIES_LOG_SECONDS:
+            logger.warning(
+                "ETF fear-greed summaries slow: total=%.2fs symbols=%s phases=%s",
+                total_seconds,
+                len(symbol_list),
+                {key: round(value, 2) for key, value in phase_seconds.items()},
+            )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF独立恐贪摘要失败: {str(e)}")
@@ -411,6 +424,18 @@ def _load_intraday_snapshots(symbol_list):
         return {"data": data}
     finally:
         Session.remove()
+
+
+def _load_summary_valuations(symbol_list) -> Dict[str, Dict[str, Any]]:
+    """摘要卡片的估值：A股指数一条 SQL 批量取最新快照，美股指数ETF逐只算（只有几只），
+    全部在同一个线程里完成，不再每只指数 await 一次线程池。"""
+    symbols = [str(item or "").strip().upper() for item in symbol_list if str(item or "").strip()]
+    a_stock_symbols = [symbol for symbol in symbols if symbol in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL]
+    valuations = load_a_stock_index_valuations(a_stock_symbols) if a_stock_symbols else {}
+    for symbol in symbols:
+        if symbol.endswith(".US"):
+            valuations[symbol] = load_us_index_valuation(symbol)
+    return valuations
 
 
 def _load_intraday_snapshot_map(symbol_list, trade_date=None):

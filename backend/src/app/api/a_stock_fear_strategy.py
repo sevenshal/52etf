@@ -78,10 +78,11 @@ class AStockFearStrategyConfigPayload(BaseModel):
     min_position_pct_after_take_profit: float = 0.0
     rebalance_threshold_pct: float = 0.0
     # 估值点位闸门（与回测同一口径，None=关闭）：各腿用自己恐贪来源指数的信号日估值点位，
-    # 越高越低估；A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析，没有估值的来源不设闸
+    # 越大越贵；买入需点位 <= valuation_buy_max，卖出需点位 >= valuation_sell_min；
+    # A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析，没有估值的来源不设闸
     valuation_window: int = VALUATION_POSITION_WINDOWS[0]
-    valuation_buy_min: Optional[float] = None
-    valuation_sell_max: Optional[float] = None
+    valuation_buy_max: Optional[float] = None
+    valuation_sell_min: Optional[float] = None
     valuation_force_sell_greed: Optional[float] = None
 
     @validator("valuation_window", pre=True, always=True)
@@ -92,7 +93,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
             raise ValueError("估值点位窗口仅支持 252 或 504 个交易日")
         return window
 
-    @validator("valuation_buy_min", "valuation_sell_max", "valuation_force_sell_greed")
+    @validator("valuation_buy_max", "valuation_sell_min", "valuation_force_sell_greed")
     def validate_valuation_threshold(cls, value):
         if value is None:
             return None
@@ -387,8 +388,8 @@ CONFIG_FIELDS = [
     "min_position_pct_after_take_profit",
     "rebalance_threshold_pct",
     "valuation_window",
-    "valuation_buy_min",
-    "valuation_sell_max",
+    "valuation_buy_max",
+    "valuation_sell_min",
     "valuation_force_sell_greed",
 ]
 
@@ -663,10 +664,10 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_admin_acco
             "max_take_profit_sells_per_cycle": 2,
             "min_position_pct_after_take_profit": 0.0,
             "rebalance_threshold_pct": 0.0,
-            # 回测最优：卖出需近一年估值点位 <=20，贪恐 >=90 不看估值直接卖
+            # 回测最优：卖出需近一年估值点位 >=80（极度高估），贪恐 >=90 不看估值直接卖
             "valuation_window": VALUATION_POSITION_WINDOWS[0],
-            "valuation_buy_min": None,
-            "valuation_sell_max": 20.0,
+            "valuation_buy_max": None,
+            "valuation_sell_min": 80.0,
             "valuation_force_sell_greed": 90.0,
         },
     }

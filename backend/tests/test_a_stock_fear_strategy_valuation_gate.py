@@ -40,7 +40,7 @@ def _config(**overrides):
         cooldown_days=0, max_take_profit_sells_per_cycle=2, min_position_pct_after_take_profit=0.0,
         rebalance_threshold_pct=0.0, sell_reduction_basis="holdings", sell_price_above_avg_cost=False,
         external_trading_account_id=1, live_sub_account_id=1,
-        valuation_window=252, valuation_buy_min=None, valuation_sell_max=20.0, valuation_force_sell_greed=90.0,
+        valuation_window=252, valuation_buy_max=None, valuation_sell_min=80.0, valuation_force_sell_greed=90.0,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -91,12 +91,13 @@ def _positions(value):
 
 
 def test_live_sell_waits_until_valuation_is_expensive():
+    # 估值点位越大越贵：50 还不够贵，继续持有；90 够贵才卖
     held = _run(_config(), fear=80.0, positions=_positions(50.0))
     assert not held.sync_order.await_count
     assert "继续持有" in held.persist.call_args.kwargs["run_message"]
     assert "valuation_position_252=main=50.0" in held.persist.call_args.kwargs["message"]
 
-    sold = _run(_config(), fear=80.0, positions=_positions(10.0))
+    sold = _run(_config(), fear=80.0, positions=_positions(90.0))
     assert sold.sync_order.await_args.args[2] == "SELL"
     assert sold.sync_order.await_args.kwargs["symbol"] == "510880.SH"
 
@@ -107,7 +108,7 @@ def test_live_force_sell_greed_ignores_valuation():
 
 
 def test_live_skips_when_signal_day_valuation_not_ready():
-    result = _run(_config(), fear=80.0, positions={date(2026, 9, 10): {252: 10.0, 504: 10.0}})
+    result = _run(_config(), fear=80.0, positions={date(2026, 9, 10): {252: 90.0, 504: 90.0}})
     assert not result.snapshot.await_count
     assert not result.sync_order.await_count
     assert result.persist.call_args.kwargs["status"] == "SKIPPED"
@@ -115,18 +116,22 @@ def test_live_skips_when_signal_day_valuation_not_ready():
 
 
 def test_live_without_valuation_gate_keeps_old_behavior():
-    result = _run(_config(valuation_sell_max=None, valuation_force_sell_greed=None), fear=80.0, positions={})
+    result = _run(_config(valuation_sell_min=None, valuation_force_sell_greed=None), fear=80.0, positions={})
     assert not result.valuation_loader.called
     assert result.sync_order.await_args.args[2] == "SELL"
 
 
-def test_gate_helpers_pass_when_valuation_missing():
-    assert valuation_buy_allowed(None, 80)
-    assert valuation_buy_allowed(float("nan"), 80)
-    assert not valuation_buy_allowed(50.0, 80)
-    assert valuation_sell_allowed(None, 80.0, 20, 90)
-    assert not valuation_sell_allowed(50.0, 80.0, 20, 90)
-    assert valuation_sell_allowed(50.0, 90.0, 20, 90)
+def test_gate_helpers_follow_bigger_is_more_expensive():
+    # 买入：点位 <= 上限才买；没有估值不设闸
+    assert valuation_buy_allowed(None, 20)
+    assert valuation_buy_allowed(float("nan"), 20)
+    assert valuation_buy_allowed(15.0, 20)
+    assert not valuation_buy_allowed(50.0, 20)
+    # 卖出：点位 >= 下限才卖；贪恐达到兜底阈值时不看估值
+    assert valuation_sell_allowed(None, 80.0, 80, 90)
+    assert valuation_sell_allowed(90.0, 80.0, 80, 90)
+    assert not valuation_sell_allowed(50.0, 80.0, 80, 90)
+    assert valuation_sell_allowed(50.0, 90.0, 80, 90)
     assert valuation_sell_allowed(50.0, 80.0, None, 90)
 
 
@@ -134,29 +139,35 @@ def test_config_payload_valuation_fields():
     # 存量配置补列后 valuation_window 可能为 NULL
     payload = AStockFearStrategyConfigPayload(valuation_window=None)
     assert payload.valuation_window == 252
-    assert payload.valuation_sell_max is None
-    payload = AStockFearStrategyConfigPayload(valuation_window=504, valuation_sell_max=20, valuation_force_sell_greed=90)
-    assert (payload.valuation_window, payload.valuation_sell_max, payload.valuation_force_sell_greed) == (504, 20, 90)
+    assert payload.valuation_sell_min is None
+    payload = AStockFearStrategyConfigPayload(valuation_window=504, valuation_sell_min=80, valuation_force_sell_greed=90)
+    assert (payload.valuation_window, payload.valuation_sell_min, payload.valuation_force_sell_greed) == (504, 80, 90)
     with pytest.raises(Exception):
         AStockFearStrategyConfigPayload(valuation_window=100)
     with pytest.raises(Exception):
-        AStockFearStrategyConfigPayload(valuation_sell_max=120)
+        AStockFearStrategyConfigPayload(valuation_sell_min=120)
 
 
-def test_schema_upgrade_adds_valuation_columns_to_old_table(tmp_path):
+def test_schema_upgrade_converts_legacy_gate_columns(tmp_path):
+    # 旧表：闸门是旧方向（越大越便宜）的 valuation_buy_min / valuation_sell_max
     engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
     with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE a_stock_fear_strategy_configs (id INTEGER PRIMARY KEY, symbol VARCHAR)"))
-        conn.execute(text("INSERT INTO a_stock_fear_strategy_configs (id, symbol) VALUES (1, '510880.SH')"))
+        conn.execute(text(
+            "CREATE TABLE a_stock_fear_strategy_configs (id INTEGER PRIMARY KEY, symbol VARCHAR, "
+            "valuation_buy_min FLOAT, valuation_sell_max FLOAT)"
+        ))
+        conn.execute(text(
+            "INSERT INTO a_stock_fear_strategy_configs (id, symbol, valuation_buy_min, valuation_sell_max) "
+            "VALUES (1, '510880.SH', 70, 20), (2, '512480.SH', NULL, NULL)"
+        ))
     with patch.object(database, "engine", engine):
         database.ensure_a_stock_fear_strategy_schema()
         database.ensure_a_stock_fear_strategy_schema()  # 幂等
     with engine.connect() as conn:
         columns = {row[1] for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)"))}
-        row = conn.execute(text(
-            "SELECT valuation_window, valuation_buy_min, valuation_sell_max, valuation_force_sell_greed "
-            "FROM a_stock_fear_strategy_configs"
-        )).one()
-    assert {"valuation_window", "valuation_buy_min", "valuation_sell_max", "valuation_force_sell_greed"} <= columns
-    # 存量配置：窗口补默认 252，闸门关闭，实盘行为不变
-    assert tuple(row) == (252, None, None, None)
+        rows = conn.execute(text(
+            "SELECT id, valuation_buy_max, valuation_sell_min FROM a_stock_fear_strategy_configs ORDER BY id"
+        )).all()
+    assert {"valuation_buy_max", "valuation_sell_min"} <= columns
+    # 旧"点位 >= 70 才买 / <= 20 才卖" = 新"点位 <= 30 才买 / >= 80 才卖"；空值保持关闭
+    assert [tuple(row) for row in rows] == [(1, 30.0, 80.0), (2, None, None)]

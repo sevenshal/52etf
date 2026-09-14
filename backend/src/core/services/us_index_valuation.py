@@ -10,6 +10,7 @@ etf_analysis 每行在纽约收盘后（17:30 America/New_York，即上海次日
 """
 from __future__ import annotations
 
+import statistics
 from datetime import date, time as dtime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
@@ -27,6 +28,13 @@ from .a_stock_index_valuation import (
 from .external_trading_market import _is_us_trading_day
 
 INTRADAY_RERUN_CUTOFF = dtime(21, 0)
+# 当天有估值成分的市值覆盖率低于近 20 个有效日中位数的 80%：说明那天 EVC 个股估值同步不完整
+# （如 2026-07-23 只同步到 360 只股票，QQQ 覆盖率从 0.96 掉到 0.11），用剩下少数成分算出的偏离没有代表性，
+# 丢弃当天值、沿用上一个有效值（ffill）。
+COVERAGE_DROP_RATIO = 0.8
+COVERAGE_BASELINE_DAYS = 20
+# 同步不完整都是单日事件；连续这么多天覆盖率都低，说明是覆盖率的新常态，接受并以此重建基准，避免一直 ffill
+MAX_CONSECUTIVE_FFILL_DAYS = 3
 _ANALYSIS_COLUMNS = (
     "date",
     "current_price",
@@ -55,10 +63,24 @@ def _analysis_us_trading_date(row: Any) -> Optional[date]:
     return us_date
 
 
+def _is_coverage_collapse(coverage: Optional[float], recent_coverages: List[float]) -> bool:
+    if not recent_coverages:
+        return False
+    if coverage is None:
+        return True
+    return coverage < COVERAGE_DROP_RATIO * statistics.median(recent_coverages)
+
+
 def build_us_valuation_rows(analysis_rows: Iterable[Any]) -> List[Dict[str, Any]]:
-    """按日期升序的 etf_analysis 行 → 按美股交易日的估值偏离序列（同一交易日保留最早的收盘快照）。"""
+    """按日期升序的 etf_analysis 行 → 按美股交易日的估值偏离序列（同一交易日保留最早的收盘快照）。
+
+    覆盖率骤降（EVC 同步不完整）的日子沿用上一个有效值，并标记 is_ffilled。
+    """
     rows: List[Dict[str, Any]] = []
     seen = set()
+    recent_coverages: List[float] = []
+    last_valid: Optional[Dict[str, Any]] = None
+    consecutive_ffill = 0
     for row in analysis_rows:
         us_date = _analysis_us_trading_date(row)
         if us_date is None or us_date in seen:
@@ -68,9 +90,26 @@ def build_us_valuation_rows(analysis_rows: Iterable[Any]) -> List[Dict[str, Any]
         fair_hi = _positive_number(getattr(row, "forward_stocks_value_hi", None))
         if nav is None or fair_lo is None or fair_hi is None:
             continue
-        fair_mid = (fair_lo + fair_hi) / 2.0
         seen.add(us_date)
-        rows.append({
+        coverage = _positive_number(getattr(row, "forward_stocks_weight", None))
+        if consecutive_ffill < MAX_CONSECUTIVE_FFILL_DAYS and _is_coverage_collapse(coverage, recent_coverages):
+            if last_valid is not None:
+                rows.append({
+                    **last_valid,
+                    "date": us_date,
+                    "analysis_date": row.date,
+                    "coverage_ratio": coverage,
+                    "is_ffilled": True,
+                })
+                consecutive_ffill += 1
+            continue
+        if consecutive_ffill >= MAX_CONSECUTIVE_FFILL_DAYS:
+            recent_coverages = []
+        consecutive_ffill = 0
+        if coverage is not None:
+            recent_coverages = (recent_coverages + [coverage])[-COVERAGE_BASELINE_DAYS:]
+        fair_mid = (fair_lo + fair_hi) / 2.0
+        last_valid = {
             "date": us_date,
             "analysis_date": row.date,
             "index_level": nav,
@@ -79,10 +118,12 @@ def build_us_valuation_rows(analysis_rows: Iterable[Any]) -> List[Dict[str, Any]
             "fair_value_mid": round(fair_mid, 4),
             "fair_value_hi": round(fair_hi, 4),
             "current_gap_pct": _gap_pct(fair_mid, nav),
-            "coverage_ratio": getattr(row, "forward_stocks_weight", None),
+            "coverage_ratio": coverage,
             "valuation_date_min": getattr(row, "min_fair_value_date", None),
             "valuation_date_max": getattr(row, "max_fair_value_date", None),
-        })
+            "is_ffilled": False,
+        }
+        rows.append(last_valid)
     return rows
 
 
@@ -124,22 +165,17 @@ def load_us_index_valuation_history(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> List[Dict[str, Any]]:
-    """贪恐历史曲线用：与 A股 valuation_history 同结构（估值系数 + 估值点位）。"""
-    rows = _load_us_valuation_rows(symbol, end_date)
-    positions = build_valuation_position_history((row["date"], row["current_gap_pct"]) for row in rows)
-    history = []
-    for row in rows:
-        if start_date is not None and row["date"] < start_date:
-            continue
-        position = positions.get(row["date"]) or {}
-        history.append({
+    """贪恐历史曲线用：与 A股 valuation_history 同结构（估值系数）。"""
+    return [
+        {
             "date": row["date"].isoformat(),
             "valuation_ratio": _valuation_ratio(row["current_gap_pct"]),
             "current_gap_pct": row["current_gap_pct"],
-            "valuation_position_252": position.get(VALUATION_POSITION_SHORT_WINDOW),
-            "valuation_position_504": position.get(VALUATION_POSITION_MAX_WINDOW),
-        })
-    return history
+            "is_ffilled": row["is_ffilled"],
+        }
+        for row in _load_us_valuation_rows(symbol, end_date)
+        if start_date is None or row["date"] >= start_date
+    ]
 
 
 def load_us_index_valuation(symbol: str) -> Dict[str, Any]:
@@ -159,6 +195,7 @@ def load_us_index_valuation(symbol: str) -> Dict[str, Any]:
         "fair_value_mid": latest["fair_value_mid"],
         "fair_value_hi": latest["fair_value_hi"],
         "current_gap_pct": latest["current_gap_pct"],
+        "is_ffilled": latest["is_ffilled"],
         "coverage_ratio": latest["coverage_ratio"],
         "effective_coverage_ratio": latest["coverage_ratio"],
         "valuation_date_min": latest["valuation_date_min"].isoformat() if latest["valuation_date_min"] else None,

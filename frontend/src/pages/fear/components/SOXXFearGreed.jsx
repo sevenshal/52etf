@@ -67,10 +67,6 @@ const valuationColor = rating => ({
   极度高估: '#820014',
 }[rating] || '#8c8c8c');
 
-const formatGap = value => (
-  isFiniteNumber(value) ? `${Number(value) >= 0 ? '+' : ''}${Number(value).toFixed(1)}%` : '-'
-);
-
 const formatRange = (low, high) => (
   isFiniteNumber(low) && isFiniteNumber(high)
     ? `${Number(low).toFixed(0)}-${Number(high).toFixed(0)}`
@@ -303,11 +299,6 @@ const SOXXFearGreed = () => {
       valuationHistoryByDate.get(item.date)?.valuation_ratio ?? null
     ));
     const showValuationRatio = valuationRatios.some(isFiniteNumber);
-    // 估值点位（近 252 日分位，越高越低估）与贪恐同为 0~100，画在贪恐轴上
-    const valuationPositions = filteredData.map(item => (
-      valuationHistoryByDate.get(item.date)?.valuation_position_252 ?? null
-    ));
-    const showValuationPosition = valuationPositions.some(isFiniteNumber);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
     const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
     const priceAxisRange = getFocusedAxisRange(prices);
@@ -321,7 +312,6 @@ const SOXXFearGreed = () => {
           '贪恐5日均线',
           priceSeriesName,
           ...(showValuationRatio ? ['估值系数'] : []),
-          ...(showValuationPosition ? ['估值点位(252日)'] : []),
           '成交量',
         ],
         top: 0,
@@ -457,17 +447,6 @@ const SOXXFearGreed = () => {
           lineStyle: { width: 1.8, type: 'dashed', color: '#389e0d' },
           itemStyle: { color: '#389e0d' },
         }] : []),
-        ...(showValuationPosition ? [{
-          name: '估值点位(252日)',
-          type: 'line',
-          yAxisIndex: 0,
-          smooth: true,
-          showSymbol: false,
-          connectNulls: false,
-          data: valuationPositions,
-          lineStyle: { width: 1.5, type: 'dotted', color: '#722ed1' },
-          itemStyle: { color: '#722ed1' },
-        }] : []),
         {
           name: '成交量',
           type: 'bar',
@@ -587,8 +566,8 @@ const SOXXFearGreed = () => {
               <Row gutter={[12, 12]}>
                 <Col xs={12} sm={8}>
                   <Statistic
-                    title="当前低估率"
-                    value={formatGap(valuation.current_gap_pct)}
+                    title="当前估值系数(越大越贵)"
+                    value={isFiniteNumber(valuation.current_gap_pct) ? (1 - valuation.current_gap_pct / 100).toFixed(2) : '-'}
                     valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
                   />
                   <Tag>
@@ -597,7 +576,7 @@ const SOXXFearGreed = () => {
                 </Col>
                 <Col xs={12} sm={8}>
                   <Statistic
-                    title="中期估值位置"
+                    title="中期估值位置(越大越贵)"
                     value={valuation.valuation_position_label || '-'}
                     valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
                   />
@@ -610,7 +589,7 @@ const SOXXFearGreed = () => {
                 </Col>
                 <Col xs={12} sm={8}>
                   <Statistic
-                    title="近252日位置"
+                    title="近252日位置(越大越贵)"
                     value={valuation252Label || '-'}
                     valueStyle={{ color: valuationColor(valuation252Label), fontSize: 20 }}
                   />
@@ -652,7 +631,7 @@ const SOXXFearGreed = () => {
                 </Col>
               </Row>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                低估率按指数成分权重聚合一致预期目标价相对当日价格的空间；成分股按其最新一期定期报告(T期)披露日之后的研报取目标价，每家机构只用最新一篇，给出目标价的机构不足2家时退到T-1期披露日之后，仍没有则沿用此前估值(最多365天)；退到T-1池或沿用旧估值的成分计入"待更新权重"；中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
+                估值系数 = 1 − 低估率（低估率为按指数成分权重聚合的一致预期目标价相对当日价格的空间），越大越贵，大于 1 表示指数已高于估值中枢；成分股按其最新一期定期报告(T期)披露日之后的研报取目标价，每家机构只用最新一篇，给出目标价的机构不足2家时退到T-1期披露日之后，仍没有则沿用此前估值(最多365天)；退到T-1池或沿用旧估值的成分计入"待更新权重"；估值位置是估值系数在历史中的百分位（越大越贵，≥80 极度高估、低于20 极度低估），中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
               </Text>
             </Card>
           )}

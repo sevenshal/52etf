@@ -1016,10 +1016,10 @@ class AStockFearStrategyConfig(Base):
     rebalance_threshold_pct = Column(Float, nullable=False, default=0.0)
     # 估值点位闸门（与回测同一口径）：窗口 252/504 日；阈值 NULL=关闭
     valuation_window = Column(Integer, nullable=True, default=252)
-    # 买入需信号日估值点位 >= 该值
-    valuation_buy_min = Column(Float, nullable=True)
-    # 卖出需信号日估值点位 <= 该值（贪婪但还不贵就继续拿）
-    valuation_sell_max = Column(Float, nullable=True)
+    # 估值点位越大越贵。买入需信号日估值点位 <= 该值（够便宜）
+    valuation_buy_max = Column(Float, nullable=True)
+    # 卖出需信号日估值点位 >= 该值（够贵；贪婪但还不贵就继续拿）
+    valuation_sell_min = Column(Float, nullable=True)
     # 贪恐 >= 该值时不看估值直接卖
     valuation_force_sell_greed = Column(Float, nullable=True)
     last_run_at = Column(DateTime)
@@ -2269,26 +2269,31 @@ ensure_soxl_fear_strategy_multi_config_schema()
 
 
 def ensure_a_stock_fear_strategy_schema():
-    """A股情绪量能策略表结构迁移（幂等）：给 configs 表补估值点位闸门列。
+    """A股情绪量能策略表结构迁移（幂等）：估值点位改成"越大越贵"，闸门列换成 valuation_buy_max / valuation_sell_min。
 
-    候补/第二候补/换仓/log-z 等列已在生产库升级完成，对应 ALTER 已移除。
-    存量配置补列后估值闸门阈值为 NULL（关闭），实盘行为不变。
+    估值窗口/兜底等列已在生产库升级完成，对应 ALTER 已移除。旧方向的 valuation_buy_min / valuation_sell_max
+    列留在表里不再使用（删列需单独确认）；新列首次补上时按 100 − 旧值换算，已保存的闸门含义不变。
     """
     with engine.begin() as conn:
         columns = {
             row[1]
             for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)")).fetchall()
         }
+        # (新列, 旧方向的对应列)
         additions = [
-            ("valuation_window", "INTEGER DEFAULT 252"),
-            ("valuation_buy_min", "FLOAT"),
-            ("valuation_sell_max", "FLOAT"),
-            ("valuation_force_sell_greed", "FLOAT"),
+            ("valuation_buy_max", "valuation_buy_min"),
+            ("valuation_sell_min", "valuation_sell_max"),
         ]
-        for column_name, column_type in additions:
-            if column_name not in columns:
+        for column_name, legacy_column in additions:
+            if column_name in columns:
+                continue
+            conn.execute(text(
+                f"ALTER TABLE a_stock_fear_strategy_configs ADD COLUMN {column_name} FLOAT"
+            ))
+            if legacy_column in columns:
                 conn.execute(text(
-                    f"ALTER TABLE a_stock_fear_strategy_configs ADD COLUMN {column_name} {column_type}"
+                    f"UPDATE a_stock_fear_strategy_configs SET {column_name} = 100 - {legacy_column} "
+                    f"WHERE {legacy_column} IS NOT NULL"
                 ))
 
 ensure_a_stock_fear_strategy_schema()

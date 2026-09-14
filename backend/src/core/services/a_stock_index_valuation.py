@@ -5,6 +5,8 @@ from datetime import date
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
+from sqlalchemy import and_, func
+
 from ..analytics_database import AnalyticsSession
 from ..database import AStockIndexValuationSnapshot, ETFFearGreedCloneHistory, Session
 from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
@@ -15,6 +17,9 @@ VALUATION_POSITION_MAX_WINDOW = 504
 VALUATION_POSITION_SHORT_WINDOW = 252
 VALUATION_POSITION_MIN_SAMPLES = 120
 VALUATION_FULL_CONFIDENCE_REPORT_COUNT = 3
+# 估值点位口径标记：估值系数（=1−估值偏离）在近 N 日里的分位，越大越贵；
+# 旧快照没有这个标记（旧口径是低估率分位，越大越便宜），读取时换算
+VALUATION_POSITION_BASIS = "valuation_ratio"
 
 
 def _positive_number(value: Any) -> Optional[float]:
@@ -293,19 +298,48 @@ def refresh_a_stock_index_valuations(symbols: Iterable[str]) -> Dict[str, Any]:
 
 def load_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
+    return load_a_stock_index_valuations([normalized_symbol]).get(normalized_symbol) or {
+        "status": "unavailable",
+        "reason": "valuation_snapshot_missing",
+    }
+
+
+def load_a_stock_index_valuations(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """批量读取多个指数最新一天的估值快照：贪恐摘要卡片一次查完，不再每只指数各开一次会话。"""
+    normalized_symbols = list(dict.fromkeys(
+        str(item or "").strip().upper() for item in symbols if str(item or "").strip()
+    ))
+    if not normalized_symbols:
+        return {}
     db = Session()
     try:
-        snapshot = (
-            db.query(AStockIndexValuationSnapshot)
-            .filter(AStockIndexValuationSnapshot.symbol == normalized_symbol)
-            .order_by(AStockIndexValuationSnapshot.date.desc())
-            .first()
+        latest_dates = (
+            db.query(
+                AStockIndexValuationSnapshot.symbol.label("symbol"),
+                func.max(AStockIndexValuationSnapshot.date).label("date"),
+            )
+            .filter(AStockIndexValuationSnapshot.symbol.in_(normalized_symbols))
+            .group_by(AStockIndexValuationSnapshot.symbol)
+            .subquery()
         )
-        if snapshot is None:
-            return {"status": "unavailable", "reason": "valuation_snapshot_missing"}
-        return dict(snapshot.payload or {})
+        rows = (
+            db.query(AStockIndexValuationSnapshot.symbol, AStockIndexValuationSnapshot.payload)
+            .join(
+                latest_dates,
+                and_(
+                    AStockIndexValuationSnapshot.symbol == latest_dates.c.symbol,
+                    AStockIndexValuationSnapshot.date == latest_dates.c.date,
+                ),
+            )
+            .all()
+        )
+        payloads = {symbol: _normalize_legacy_position_fields(dict(payload or {})) for symbol, payload in rows}
     finally:
         Session.remove()
+    return {
+        symbol: payloads.get(symbol) or {"status": "unavailable", "reason": "valuation_snapshot_missing"}
+        for symbol in normalized_symbols
+    }
 
 
 def load_a_stock_index_valuation_history(
@@ -317,33 +351,24 @@ def load_a_stock_index_valuation_history(
     normalized_symbol = str(symbol or "").strip().upper()
     db = Session()
     try:
-        # 估值点位要用起始日之前的历史算分位，所以只按结束日过滤，输出时再按起始日截取
         query = db.query(AStockIndexValuationSnapshot.date, AStockIndexValuationSnapshot.payload).filter(
             AStockIndexValuationSnapshot.symbol == normalized_symbol
         )
+        if start_date is not None:
+            query = query.filter(AStockIndexValuationSnapshot.date >= start_date)
         if end_date is not None:
             query = query.filter(AStockIndexValuationSnapshot.date <= end_date)
-        rows = [
-            (snapshot_date, (payload or {}).get("current_gap_pct"))
-            for snapshot_date, payload in query.order_by(AStockIndexValuationSnapshot.date.asc()).all()
-        ]
+        rows = query.order_by(AStockIndexValuationSnapshot.date.asc()).all()
     finally:
         Session.remove()
-
-    positions = build_valuation_position_history(rows)
-    history = []
-    for snapshot_date, current_gap_pct in rows:
-        if start_date is not None and snapshot_date < start_date:
-            continue
-        position = positions.get(snapshot_date) or {}
-        history.append({
+    return [
+        {
             "date": snapshot_date.isoformat(),
-            "valuation_ratio": _valuation_ratio(current_gap_pct),
-            "current_gap_pct": current_gap_pct,
-            "valuation_position_252": position.get(VALUATION_POSITION_SHORT_WINDOW),
-            "valuation_position_504": position.get(VALUATION_POSITION_MAX_WINDOW),
-        })
-    return history
+            "valuation_ratio": _valuation_ratio((payload or {}).get("current_gap_pct")),
+            "current_gap_pct": (payload or {}).get("current_gap_pct"),
+        }
+        for snapshot_date, payload in rows
+    ]
 
 
 def load_a_stock_index_valuation_position_history(
@@ -402,25 +427,25 @@ def _is_finite_number(value: Any) -> bool:
         return False
 
 
-def valuation_buy_allowed(valuation: Any, buy_min: Optional[float]) -> bool:
-    """估值买入闸门（回测与实盘共用）：估值点位 >= buy_min 才买；没有估值（非 A股指数、样本不足）不设闸。"""
-    if buy_min is None or not _is_finite_number(valuation):
+def valuation_buy_allowed(valuation: Any, buy_max: Optional[float]) -> bool:
+    """估值买入闸门（回测与实盘共用）：估值点位（越大越贵）<= buy_max 才买；没有估值（样本不足等）不设闸。"""
+    if buy_max is None or not _is_finite_number(valuation):
         return True
-    return float(valuation) >= float(buy_min)
+    return float(valuation) <= float(buy_max)
 
 
 def valuation_sell_allowed(
     valuation: Any,
     fear: Any,
-    sell_max: Optional[float],
+    sell_min: Optional[float],
     force_sell_greed: Optional[float],
 ) -> bool:
-    """估值卖出闸门（回测与实盘共用）：估值点位 <= sell_max 才卖；贪恐达到兜底阈值时不看估值直接卖。"""
-    if sell_max is None or not _is_finite_number(valuation):
+    """估值卖出闸门（回测与实盘共用）：估值点位（越大越贵）>= sell_min 才卖；贪恐达到兜底阈值时不看估值直接卖。"""
+    if sell_min is None or not _is_finite_number(valuation):
         return True
     if force_sell_greed is not None and _is_finite_number(fear) and float(fear) >= float(force_sell_greed):
         return True
-    return float(valuation) <= float(sell_max)
+    return float(valuation) >= float(sell_min)
 
 
 def _valuation_ratio(current_gap_pct: Any) -> Optional[float]:
@@ -471,6 +496,10 @@ def _percentile_rank(values: Iterable[float], current: float) -> float:
 
 
 def _build_valuation_position_fields(values: Iterable[float], current: float) -> Dict[str, Any]:
+    """估值点位：当天估值系数（=1−估值偏离）在近 ≤504 / 252 日里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
+
+    values / current 传的是估值偏离（current_gap_pct，越大越便宜），这里按相反方向取分位。
+    """
     primary_values = [
         float(value)
         for value in values
@@ -481,12 +510,14 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
     def build_position(sample: List[float]) -> tuple[Optional[float], str]:
         if len(sample) < VALUATION_POSITION_MIN_SAMPLES:
             return None, "样本不足"
-        position_pct = _percentile_rank(sample, current)
+        # 估值系数 = 1 − 偏离/100，与 −偏离 同序
+        position_pct = _percentile_rank([-value for value in sample], -float(current))
         return position_pct, _valuation_position_label(position_pct)
 
     position_pct, position_label = build_position(primary_values)
     short_position_pct, short_position_label = build_position(short_values)
     return {
+        "valuation_position_basis": VALUATION_POSITION_BASIS,
         "valuation_position_pct": position_pct,
         "valuation_position_label": position_label,
         "valuation_history_days": len(primary_values),
@@ -501,11 +532,29 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
 
 def _valuation_position_label(position_pct: float) -> str:
     if position_pct >= 80:
-        return "极度低估"
+        return "极度高估"
     if position_pct >= 60:
-        return "低估"
+        return "高估"
     if position_pct >= 40:
         return "合理"
     if position_pct >= 20:
-        return "高估"
-    return "极度高估"
+        return "低估"
+    return "极度低估"
+
+
+def _normalize_legacy_position_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """过渡代码：估值点位改成"越大越贵"之前刷新的最新快照，点位是旧口径（越大越便宜），
+    读取时按 100 − 旧值换算并重新定标签。生产上估值刷新任务跑过一次后（最新快照都带
+    valuation_position_basis）即可删除。"""
+    if payload.get("valuation_position_basis") == VALUATION_POSITION_BASIS or "valuation_position_pct" not in payload:
+        return payload
+    converted = dict(payload, valuation_position_basis=VALUATION_POSITION_BASIS)
+    for pct_key, label_key in (
+        ("valuation_position_pct", "valuation_position_label"),
+        ("valuation_position_252_pct", "valuation_position_252_label"),
+    ):
+        value = payload.get(pct_key)
+        if value is not None:
+            converted[pct_key] = round(100.0 - float(value), 2)
+            converted[label_key] = _valuation_position_label(converted[pct_key])
+    return converted
