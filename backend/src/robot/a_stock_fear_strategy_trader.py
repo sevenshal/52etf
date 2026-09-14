@@ -42,6 +42,12 @@ from ..core.external_trading_database import (
     ExternalTradingSubAccount,
     get_external_trading_db_ctx,
 )
+from ..core.services.a_stock_index_valuation import (
+    VALUATION_POSITION_SHORT_WINDOW,
+    valuation_buy_allowed,
+    valuation_sell_allowed,
+)
+from ..core.services.index_valuation import load_index_valuation_position_history
 from ..core.services.external_trading_executor import trigger_external_trading_executor
 from ..core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
@@ -125,6 +131,38 @@ def _fear_source_label(fear_source: str) -> str:
     if symbol in custom_index_labels:
         return custom_index_labels[symbol]
     return f"{symbol} 贪恐"
+
+
+def _optional_float(value) -> Optional[float]:
+    return float(value) if value is not None else None
+
+
+def _signal_day_valuation(
+    fear_source: str,
+    signal_date: date,
+    window: int,
+    has_signal_day_fear: bool = True,
+) -> Tuple[Optional[float], bool]:
+    """信号日估值点位（与回测同一函数、同一口径），返回 (估值点位, 数据是否就绪)。
+
+    A股指数用成分一致预期估值，美股指数ETF（QQQ 等）用美股ETF估值分析；没有估值的来源、
+    样本不足 120 天时点位为 None，不设闸，与回测一致。该指数有估值历史、信号日也有恐贪（是它的交易日），
+    但估值还没算出来时返回未就绪，由调用方跳过，避免实盘绕过闸门；信号日不是该指数交易日（如美股休市）
+    时这条腿本来就不出信号，不算未就绪。
+    """
+    index_symbol = _fear_source_index_symbol(fear_source)
+    if not index_symbol:
+        return None, True
+    positions = load_index_valuation_position_history(index_symbol, end_date=signal_date)
+    if not positions:
+        return None, True
+    if signal_date not in positions:
+        return None, not has_signal_day_fear
+    return positions[signal_date].get(window), True
+
+
+def _format_valuation(value: Optional[float]) -> str:
+    return "-" if value is None else f"{value:.1f}"
 
 
 class AStockFearStrategyTrader:
@@ -629,6 +667,14 @@ class AStockFearStrategyTrader:
                     config.rebalance_threshold_pct = float(persisted_config.rebalance_threshold_pct or 0)
                     config.sell_reduction_basis = persisted_config.sell_reduction_basis or "holdings"
                     config.sell_price_above_avg_cost = bool(persisted_config.sell_price_above_avg_cost)
+                    config.valuation_window = int(
+                        getattr(persisted_config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW
+                    )
+                    config.valuation_buy_min = _optional_float(getattr(persisted_config, "valuation_buy_min", None))
+                    config.valuation_sell_max = _optional_float(getattr(persisted_config, "valuation_sell_max", None))
+                    config.valuation_force_sell_greed = _optional_float(
+                        getattr(persisted_config, "valuation_force_sell_greed", None)
+                    )
 
                 state_row = db.query(AStockFearStrategyState).filter(
                     AStockFearStrategyState.config_id == config_id
@@ -718,6 +764,46 @@ class AStockFearStrategyTrader:
                     else:
                         sub2_log_z = None
                     sub2_fear_label = _fear_source_label(getattr(config, "sub2_fear_source", None) or "qqq_clone")
+
+            # 估值点位闸门（可选，与回测同一口径）：各腿用自己恐贪来源指数的信号日估值点位
+            valuation_window = int(getattr(config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW)
+            valuation_buy_min = _optional_float(getattr(config, "valuation_buy_min", None))
+            valuation_sell_max = _optional_float(getattr(config, "valuation_sell_max", None))
+            valuation_force_sell_greed = _optional_float(getattr(config, "valuation_force_sell_greed", None))
+            valuation_gate_enabled = valuation_buy_min is not None or valuation_sell_max is not None
+            leg_valuations: Dict[str, Optional[float]] = {}
+            if valuation_gate_enabled:
+                leg_sources = [("main", fear_source_key, True)]
+                if sub_symbol:
+                    leg_sources.append((
+                        "sub", getattr(config, "sub_fear_source", None) or "a_stock_000688_sh", sub_fear_score is not None,
+                    ))
+                if sub2_symbol:
+                    leg_sources.append((
+                        "sub2", getattr(config, "sub2_fear_source", None) or "qqq_clone", sub2_fear_score is not None,
+                    ))
+                not_ready_labels = []
+                for leg, leg_source, leg_has_fear in leg_sources:
+                    leg_value, leg_ready = _signal_day_valuation(
+                        leg_source, signal_date, valuation_window, has_signal_day_fear=leg_has_fear,
+                    )
+                    leg_valuations[leg] = leg_value
+                    if not leg_ready:
+                        not_ready_labels.append(_fear_source_label(leg_source))
+                if not_ready_labels:
+                    log_message = (
+                        f"信号日 {signal_date} 缺少估值点位（{'、'.join(not_ready_labels)}），跳过。"
+                        f"请确认 A股指数估值刷新已完成"
+                    )
+                    self._persist_run_result(
+                        config_id=config_id, account_id=config.account_id, symbol=symbol,
+                        trigger_source=trigger_source, action="CHECK", status="SKIPPED",
+                        message=log_message, state_values=state, run_message="估值数据未就绪",
+                    )
+                    return
+            main_valuation = leg_valuations.get("main")
+            sub_valuation = leg_valuations.get("sub")
+            sub2_valuation = leg_valuations.get("sub2")
 
             # 实时价格（主+候补+第二候补），hub quote + LongPort 兜底
             price_symbols = [symbol]
@@ -874,6 +960,40 @@ class AStockFearStrategyTrader:
                 and sub2_vol_ok
             )
             sub2_greedy = sub2_symbol is not None and sub2_fear_score is not None and sub2_fear_score >= float(config.greed_threshold)
+            # 估值点位闸门：买入需足够低估；卖出需足够高估（贪恐达到兜底阈值不看估值）
+            raw_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal}
+            raw_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy}
+            main_signal = main_signal and valuation_buy_allowed(main_valuation, valuation_buy_min)
+            sub_signal = sub_signal and valuation_buy_allowed(sub_valuation, valuation_buy_min)
+            sub2_signal = sub2_signal and valuation_buy_allowed(sub2_valuation, valuation_buy_min)
+            main_greedy = main_greedy and valuation_sell_allowed(
+                main_valuation, fear_score, valuation_sell_max, valuation_force_sell_greed,
+            )
+            sub_greedy = sub_greedy and valuation_sell_allowed(
+                sub_valuation, sub_fear_score, valuation_sell_max, valuation_force_sell_greed,
+            )
+            sub2_greedy = sub2_greedy and valuation_sell_allowed(
+                sub2_valuation, sub2_fear_score, valuation_sell_max, valuation_force_sell_greed,
+            )
+            valuation_blocked_message = ""
+            if valuation_gate_enabled:
+                gated_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy}
+                gated_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal}
+                leg_labels = {"main": fear_label, "sub": sub_fear_label, "sub2": sub2_fear_label}
+                if shares > 0 and holding and raw_greedy[holding] and not gated_greedy[holding]:
+                    valuation_blocked_message = (
+                        f"{leg_labels[holding]} 到达贪恐卖出阈值，但估值点位 "
+                        f"{_format_valuation(leg_valuations.get(holding))} > {valuation_sell_max:g}，继续持有"
+                    )
+                elif shares <= 0:
+                    blocked_labels = [
+                        leg_labels[leg] for leg in ("main", "sub", "sub2")
+                        if raw_signals[leg] and not gated_signals[leg]
+                    ]
+                    if blocked_labels:
+                        valuation_blocked_message = (
+                            f"{'、'.join(blocked_labels)} 极恐放量，但估值点位低于 {valuation_buy_min:g}，不买入"
+                        )
             # 对称双轮动：换仓阈值非空时启用（恐贪超过阈值且另一标的有信号则换仓；空仓任一触发都买更恐慌的）
             use_swap = getattr(config, "swap_threshold", None) is not None
             swap_value = float(config.swap_threshold) if use_swap else None
@@ -1151,6 +1271,8 @@ class AStockFearStrategyTrader:
             if log_action != "SKIP" and not order_action and not trade_message:
                 if not can_trade:
                     trade_message = f"处于冷却期，剩余 {state.cooldown_remaining_days} 个交易日"
+                elif valuation_blocked_message:
+                    trade_message = valuation_blocked_message
                 elif main_signal:
                     trade_message = f"{fear_label} 进入买入区（但持仓中或条件未满足）"
                 elif main_greedy:
@@ -1256,6 +1378,13 @@ class AStockFearStrategyTrader:
                 f"{trade_message} | fear_score={trade_fear:.2f} | fear_date={signal_date}"
                 f" | volume_ratio={trade_vr:.4f} | price={current_price:.4f} | symbol={trade_symbol}"
             )
+            if valuation_gate_enabled:
+                valuation_parts = [f"main={_format_valuation(main_valuation)}"]
+                if sub_symbol:
+                    valuation_parts.append(f"sub={_format_valuation(sub_valuation)}")
+                if sub2_symbol:
+                    valuation_parts.append(f"sub2={_format_valuation(sub2_valuation)}")
+                log_message += f" | valuation_position_{valuation_window}={','.join(valuation_parts)}"
             self._persist_run_result(
                 config_id=config_id,
                 account_id=config.account_id,

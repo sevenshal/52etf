@@ -23,6 +23,12 @@ import { useNavigate } from 'react-router-dom';
 import { ExperimentOutlined } from '@ant-design/icons';
 import request from '../utils/request';
 import { subscribeBackendEvent } from '../utils/backendEvents';
+import { formatValuationGate, valuationWindowOptions } from '../utils/valuationGate';
+
+// 回测页的候选输入框：空值传 'none'（关闭），否则按字符串传
+const formatOptionalCandidate = (value) => (
+  value === null || value === undefined || value === '' ? 'none' : String(value)
+);
 
 const sellReductionBasisOptions = [
   { label: '按总资产', value: 'portfolio' },
@@ -36,7 +42,8 @@ const formatRunTime = (value) => {
   return String(value);
 };
 
-// 默认参数 = 回测那套：极恐<30 + 20日量比≥1.3 买100%，极贪>70 卖100%，移动止盈=0（贪恐即卖），冷却0
+// 默认参数 = 回测最优（2023-03-22 起，情绪+量能+估值点位）：红利 恐贪≤35 且量比≥1.6 买100%，
+// 恐贪≥70 且近一年估值点位≤20 卖100%（恐贪≥90 不看估值直接卖），移动止盈=0，冷却0；三标的对称轮动 换仓45
 const defaultValues = {
   enabled: false,
   symbol: '510880.SH',
@@ -45,10 +52,11 @@ const defaultValues = {
   external_trading_account_id: undefined,
   live_sub_account_id: undefined,
   run_time: dayjs('09:30', 'HH:mm'),
-  buy_threshold: 30,
+  buy_threshold: 35,
   greed_threshold: 70,
   volume_ratio_threshold: 1.6,
-  volume_z_threshold: 1.25,
+  // 留空 = 旧量比逻辑（回测最优用的就是量比阈值）
+  volume_z_threshold: null,
   sell_shrink_z: -1,
   buy_position_pct: 100,
   cooldown_days: 0,
@@ -65,14 +73,19 @@ const defaultValues = {
   sub_volume_signal_symbol: '588000.SH',
   sub_buy_threshold: 25,
   sub_volume_ratio_threshold: 1.6,
-  // 第二候补=纳指 159941，量比用 QQQ.US，恐贪 qqq_clone
-  sub2_symbol: '159941.SZ',
+  // 第二候补=纳指科技 159509，量比用 QQQ.US，恐贪 qqq_clone
+  sub2_symbol: '159509.SZ',
   sub2_fear_source: 'qqq_clone',
   sub2_volume_signal_symbol: 'QQQ.US',
   sub2_buy_threshold: 20,
   sub2_volume_ratio_threshold: 1.3,
   // 换仓阈值：对称轮动 45
   swap_threshold: 45,
+  // 估值点位闸门：卖出需近一年估值点位≤20（极度高估），恐贪≥90 不看估值直接卖；买入不设估值闸门
+  valuation_window: 252,
+  valuation_buy_min: null,
+  valuation_sell_max: 20,
+  valuation_force_sell_greed: 90,
 };
 
 const normalizeConfig = (config) => ({
@@ -95,6 +108,11 @@ const normalizeConfig = (config) => ({
   sub2_buy_threshold: config?.sub2_buy_threshold ?? 20,
   sub2_volume_ratio_threshold: config?.sub2_volume_ratio_threshold ?? 1.3,
   swap_threshold: config?.swap_threshold ?? null,
+  // 存量配置没有估值闸门（NULL=关闭），不能被默认值覆盖
+  valuation_window: config?.valuation_window ?? 252,
+  valuation_buy_min: config?.valuation_buy_min ?? null,
+  valuation_sell_max: config?.valuation_sell_max ?? null,
+  valuation_force_sell_greed: config?.valuation_force_sell_greed ?? null,
 });
 
 const normalizeStateFormValues = (state) => ({
@@ -367,6 +385,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
     swap_threshold: values.swap_threshold ?? null,
     volume_z_threshold: values.volume_z_threshold ?? null,
     sell_shrink_z: values.sell_shrink_z ?? -1,
+    valuation_window: values.valuation_window ?? 252,
+    valuation_buy_min: values.valuation_buy_min ?? null,
+    valuation_sell_max: values.valuation_sell_max ?? null,
+    valuation_force_sell_greed: values.valuation_force_sell_greed ?? null,
   });
 
   const handleBacktest = () => {
@@ -409,19 +431,28 @@ const AStockFearStrategy = ({ embedded = false }) => {
             values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
           ),
           execute_next_open_values: ['true'],
-          volume_z_threshold_values: String(values.volume_z_threshold ?? ''),
+          volume_z_threshold_values: formatOptionalCandidate(values.volume_z_threshold),
           sell_shrink_z_values: String(values.sell_shrink_z ?? -1),
           sub_symbol: values.sub_symbol || undefined,
           sub_fear_source: values.sub_fear_source || 'a_stock_000688_sh',
           sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
           sub_buy_threshold_values: String(values.sub_buy_threshold ?? 25),
           sub_volume_ratio_threshold_values: String(values.sub_volume_ratio_threshold ?? 1.6),
-          swap_threshold_values: [values.swap_threshold ?? null],
+          // 回测页是文本输入框：空值必须传 'none'，传 [null] 会被解析成空候选导致后端拒绝
+          swap_threshold_values: formatOptionalCandidate(values.swap_threshold),
           sub2_symbol: values.sub2_symbol || undefined,
           sub2_fear_source: values.sub2_fear_source || 'qqq_clone',
           sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
           sub2_buy_threshold_values: String(values.sub2_buy_threshold ?? 20),
           sub2_volume_ratio_threshold_values: String(values.sub2_volume_ratio_threshold ?? 1.3),
+          // 估值点位闸门按实盘配置原样传过去（留空=关闭 → none）
+          valuation_window_values: [values.valuation_window ?? 252],
+          valuation_buy_min_values: formatOptionalCandidate(values.valuation_buy_min),
+          valuation_sell_max_values: formatOptionalCandidate(values.valuation_sell_max),
+          valuation_force_sell_greed_values: formatOptionalCandidate(values.valuation_force_sell_greed),
+          // 实盘只用原阈值逻辑，不做顶底信号组合搜索
+          buy_turn_signal_mode_values: ['legacy'],
+          sell_turn_signal_mode_values: ['legacy'],
         },
       },
     });
@@ -556,6 +587,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
       render: (value, record) => (value
         ? `${value} 恐慌≤${record.sub2_buy_threshold}/量比≥${record.sub2_volume_ratio_threshold}`
         : '-'),
+    },
+    {
+      title: '估值闸门',
+      dataIndex: 'valuation_sell_max',
+      width: 210,
+      ellipsis: true,
+      render: (_, record) => formatValuationGate(record),
     },
     {
       title: '触发时间',
@@ -788,8 +826,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="统一 log(成交量) 放量阈值：log(vol) 相对前20日均值放大该标准差即放量，默认 1.25；留空=用旧量比阈值">
-                            <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} placeholder="默认 1.25" />
+                          <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="统一 log(成交量) 放量阈值：log(vol) 相对前20日均值放大该标准差即放量（如 1.25）；留空=用旧量比阈值（回测最优）">
+                            <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} placeholder="留空=旧量比" />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
@@ -919,6 +957,35 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
                         </Col>
+                        <Col xs={24} md={24}>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message="估值点位闸门（可选，与回测同一口径）"
+                            description="估值点位 = 恐贪来源指数的估值偏离在近 252/504 个交易日里的分位，越高越低估（≥80 极度低估，<20 极度高估），用信号日（前一交易日）收盘后算出的值。买入闸门：极恐放量且估值点位 ≥ 阈值才买；卖出闸门：恐贪达到卖出阈值且估值点位 ≤ 阈值才卖（贪婪但还不贵就继续拿）；恐贪达到兜底阈值时不看估值直接卖。各腿用自己恐贪来源指数的估值（A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析），没有估值的来源不设闸；信号日估值还没算出来时本次跳过。留空=关闭。"
+                          />
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="valuation_window" label="估值点位窗口">
+                            <Select options={valuationWindowOptions} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="valuation_buy_min" label="买入估值点位(>=)">
+                            <InputNumber min={0} max={100} step={5} placeholder="留空=关闭" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="valuation_sell_max" label="卖出估值点位(<=)">
+                            <InputNumber min={0} max={100} step={5} placeholder="留空=关闭" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="valuation_force_sell_greed" label="兜底直接卖出恐贪(>=)">
+                            <InputNumber min={0} max={100} step={1} placeholder="留空=不兜底" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="enabled" label="启用" valuePropName="checked">
                             <Switch />
@@ -1014,6 +1081,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                 <Descriptions.Item label="移动止盈">
                   {Number(selectedConfig.trailing_stop_pct) === 0 ? '0 = 到达贪恐阈值即卖' : `${selectedConfig.trailing_stop_pct}% 回撤触发`}
                 </Descriptions.Item>
+                <Descriptions.Item label="估值闸门">{formatValuationGate(selectedConfig)}</Descriptions.Item>
                 {selectedConfig.sub_symbol && (
                   <>
                     <Descriptions.Item label="跷跷板候补">{selectedConfig.sub_symbol}</Descriptions.Item>

@@ -32,6 +32,7 @@ from .soxl_fear_backtest import (
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
     FEAR_SOURCE_OPTIONS,
+    VALUATION_POSITION_WINDOWS,
 )
 
 router = APIRouter(prefix="/api/a-stock-fear-strategy", tags=["a-stock-fear-strategy"])
@@ -76,6 +77,28 @@ class AStockFearStrategyConfigPayload(BaseModel):
     max_take_profit_sells_per_cycle: int = 2
     min_position_pct_after_take_profit: float = 0.0
     rebalance_threshold_pct: float = 0.0
+    # 估值点位闸门（与回测同一口径，None=关闭）：各腿用自己恐贪来源指数的信号日估值点位，
+    # 越高越低估；A股指数用成分一致预期，QQQ 等美股指数用美股ETF估值分析，没有估值的来源不设闸
+    valuation_window: int = VALUATION_POSITION_WINDOWS[0]
+    valuation_buy_min: Optional[float] = None
+    valuation_sell_max: Optional[float] = None
+    valuation_force_sell_greed: Optional[float] = None
+
+    @validator("valuation_window", pre=True, always=True)
+    def normalize_valuation_window(cls, value):
+        # 存量配置（后加列）可能为 NULL → 补默认窗口
+        window = int(value or VALUATION_POSITION_WINDOWS[0])
+        if window not in VALUATION_POSITION_WINDOWS:
+            raise ValueError("估值点位窗口仅支持 252 或 504 个交易日")
+        return window
+
+    @validator("valuation_buy_min", "valuation_sell_max", "valuation_force_sell_greed")
+    def validate_valuation_threshold(cls, value):
+        if value is None:
+            return None
+        if value < 0 or value > 100:
+            raise ValueError("估值闸门阈值必须在 0 到 100 之间")
+        return value
 
     @validator("symbol")
     def validate_symbol(cls, value):
@@ -363,6 +386,10 @@ CONFIG_FIELDS = [
     "max_take_profit_sells_per_cycle",
     "min_position_pct_after_take_profit",
     "rebalance_threshold_pct",
+    "valuation_window",
+    "valuation_buy_min",
+    "valuation_sell_max",
+    "valuation_force_sell_greed",
 ]
 
 
@@ -636,6 +663,11 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_admin_acco
             "max_take_profit_sells_per_cycle": 2,
             "min_position_pct_after_take_profit": 0.0,
             "rebalance_threshold_pct": 0.0,
+            # 回测最优：卖出需近一年估值点位 <=20，贪恐 >=90 不看估值直接卖
+            "valuation_window": VALUATION_POSITION_WINDOWS[0],
+            "valuation_buy_min": None,
+            "valuation_sell_max": 20.0,
+            "valuation_force_sell_greed": 90.0,
         },
     }
 
