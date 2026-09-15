@@ -111,7 +111,8 @@ async def execute_trading_strategy(account_id: str, client_id: int = 2):
 
             # 获取账户快照 (Snapshot)
             net_liq = ib_service.get_net_liquidation()
-            available_cash = ib_service.get_available_cash()
+            # 买入只能动用真实现金：AvailableFunds 含持仓的保证金额度，拿它下单就是融资
+            available_cash = ib_service.get_cash_buy_budget()
 
             # 获取持仓数据 (包含数量和价格)
             pos_data = ib_service.get_position(config.etf_code)
@@ -138,7 +139,7 @@ async def execute_trading_strategy(account_id: str, client_id: int = 2):
 
                 if current_value < target_value * 0.1: # 如果当前持仓不足目标的 10%，则买入补齐
                     needed_value = target_value - current_value
-                    # 确保不超过可用资金
+                    # 确保不超过可用现金（不融资）
                     actual_buy_value = min(needed_value, available_cash)
                     quantity = int(actual_buy_value / price)
                     if quantity > 0:
