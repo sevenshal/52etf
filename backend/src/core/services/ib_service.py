@@ -151,6 +151,14 @@ class IBKRService:
                 return float(v.value or 0)
         return 0.0
 
+    def get_total_cash_value(self) -> Optional[float]:
+        """获取账户真实现金 TotalCashValue（负数表示已融资）；未同步到时返回 None"""
+        if not self.ib or not self.ib.isConnected(): return None
+        for v in self.ib.accountValues():
+            if v.tag == 'TotalCashValue':
+                return float(v.value or 0)
+        return None
+
     def get_positions_dict(self) -> Dict[str, dict]:
         """获取当前最实时的持仓字典 (Symbol -> {qty, price})"""
         if not self.ib or not self.ib.isConnected(): 
@@ -174,6 +182,19 @@ class IBKRService:
         """获取指定代码的实时持仓数据 {qty, price, avg_cost}"""
         pos_data = self.get_positions_dict().get(self._normalize_ib_equity_symbol(symbol))
         return pos_data if pos_data else {'qty': 0, 'price': None, 'avg_cost': None}
+
+    def get_cash_buy_budget(self, buffer_pct: float = 0.005) -> float:
+        """按真实现金计算的买入预算（不融资）。
+
+        保证金账户的 AvailableFunds = EquityWithLoanValue - InitMarginReq，含持仓的贷款额度，拿它下单就是融资；
+        TotalCashValue 为负表示已经在借钱，预算为 0。取 max(0, min(TotalCashValue, AvailableFunds))，
+        再为市价单滑点和佣金预留缓冲。TotalCashValue 未同步到时返回 0：宁可这一轮不买，也不按保证金额度下单。
+        """
+        total_cash = self.get_total_cash_value()
+        if total_cash is None:
+            logger.warning(f"IB account TotalCashValue unavailable on port {self.port}, skip cash-funded buys")
+            return 0.0
+        return max(0.0, min(total_cash, self.get_available_cash())) * (1 - buffer_pct)
 
     def get_all_pending_qtys(self) -> Dict[str, float]:
         """批量获取所有代码的待成交订单数量字典"""

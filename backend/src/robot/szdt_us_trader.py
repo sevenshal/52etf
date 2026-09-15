@@ -132,7 +132,8 @@ class SZDTUSTrader:
             
             # 2. Check IB connectivity/NetLiquidation
             net_liq = ib_service.get_net_liquidation()
-            available_cash = ib_service.get_available_cash()
+            # 买入只能动用真实现金：AvailableFunds 含持仓的保证金额度，拿它下单就是融资
+            available_cash = ib_service.get_cash_buy_budget()
             
             # If values are invalid, it might be disconnected or not ready, try re-connect/wait?
             # IBService usually handles re-connect on 'connect' call if needed.
@@ -204,7 +205,7 @@ class SZDTUSTrader:
                         self._log(account_id, 'INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
                         logger.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
                     else:
-                        self._log(account_id, 'INFO', f"{name} 可用资金 {available_cash:.2f} 不足，跳过买入")
+                        self._log(account_id, 'INFO', f"{name} 可用现金 {available_cash:.2f} 不足（不融资），跳过买入")
                 with get_db_ctx() as db:
                     db.add(StockCooldown(
                         account_id=account_id,
