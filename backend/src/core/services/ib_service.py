@@ -151,6 +151,14 @@ class IBKRService:
                 return float(v.value or 0)
         return 0.0
 
+    def get_total_cash_value(self) -> Optional[float]:
+        """获取账户真实现金 TotalCashValue（负数表示已融资）；未同步到时返回 None"""
+        if not self.ib or not self.ib.isConnected(): return None
+        for v in self.ib.accountValues():
+            if v.tag == 'TotalCashValue':
+                return float(v.value or 0)
+        return None
+
     def get_positions_dict(self) -> Dict[str, dict]:
         """获取当前最实时的持仓字典 (Symbol -> {qty, price})"""
         if not self.ib or not self.ib.isConnected(): 
