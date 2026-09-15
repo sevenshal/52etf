@@ -681,10 +681,17 @@ class SoxlFearStrategyTrader:
         service = await self._ensure_ib_connected(ib_port, 3000 + (config.id or 0))
         position = service.get_position(config.symbol)
         shares = int(max(0, round(position.get("qty") or 0)))
-        available_cash = float(service.get_available_cash() or 0)
-        portfolio_value = float(service.get_net_liquidation() or 0)
-        if portfolio_value <= 0:
-            portfolio_value = available_cash + shares * current_price
+        available_funds = float(service.get_available_cash() or 0)
+        net_liquidation = float(service.get_net_liquidation() or 0)
+        # 买入只能动用真实现金：AvailableFunds 含持仓的保证金额度，拿它下单就是融资。
+        # TotalCashValue 为负表示已经在借钱，此时可用现金为 0。
+        total_cash = service.get_total_cash_value()
+        if total_cash is None:
+            logger.warning("IB account TotalCashValue unavailable on port %s, fallback to NetLiquidation - position value", ib_port)
+            total_cash = net_liquidation - shares * current_price if net_liquidation > 0 else 0.0
+        available_cash = max(0.0, min(float(total_cash), available_funds))
+        # 仓位基数只用净值，不能用 AvailableFunds + 持仓市值，否则保证金额度会把净值虚增。
+        portfolio_value = net_liquidation if net_liquidation > 0 else float(total_cash) + shares * current_price
 
         return BrokerSnapshot(
             shares=shares,
@@ -692,7 +699,7 @@ class SoxlFearStrategyTrader:
             avg_cost=float(position.get("avg_cost") or 0),
             current_price=current_price,
             available_cash=available_cash,
-            portfolio_value=max(portfolio_value, available_cash + shares * current_price, 1.0),
+            portfolio_value=max(portfolio_value, 1.0),
             has_today_order=await service.has_today_orders(config.symbol),
             order_service=service,
         )
@@ -1116,12 +1123,13 @@ class SoxlFearStrategyTrader:
                         trade_message = f"处于止盈区，等待进一步回撤。当前回撤 {drawdown_from_peak:.2f}%"
 
                 if log_action != "SKIP" and not order_action and is_fear and volume_ratio >= float(config.volume_ratio_threshold) and can_trade:
-                    buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
-                    # 买入后持仓市值不超过账户净值 100%：IB/长桥的可用资金含保证金
-                    # 额度，若不限制会把仓位打到 100% 净值以上（margin）。
+                    target_buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
+                    # 不融资：买入金额不超过账户现金，也不让持仓市值超过净值。市价单成交价
+                    # 和佣金会略高于报价，预留 0.5% 现金缓冲，避免成交后现金变成小额负数。
+                    cash_budget = max(0.0, available_cash) * (1 - 0.005)
                     max_addable_value = max(0.0, portfolio_value - shares * current_price)
-                    nav_capped = max_addable_value < portfolio_value * (float(config.buy_position_pct) / 100.0) - 1e-9
-                    buy_amount = min(buy_amount, max_addable_value, available_cash)
+                    buy_amount = min(target_buy_amount, max_addable_value, cash_budget)
+                    cash_capped = buy_amount < target_buy_amount - 1e-9
                     trade_quantity = floor(buy_amount / current_price)
                     actual_buy_amount = trade_quantity * current_price
                     trade_pct = (actual_buy_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
@@ -1130,8 +1138,8 @@ class SoxlFearStrategyTrader:
                         order_action = "BUY"
                         order_quantity = trade_quantity
                         order_message_template = f"CNN={cnn_score:.2f} 进入买入区，{volume_detail} 放大，订单ID={{order_id}}"
-                        if nav_capped:
-                            order_message_template += "（仓位已按净值 100% 上限调减）"
+                        if cash_capped:
+                            order_message_template += "（现金不足目标仓位，已按可用现金调减，不融资）"
                         position_ratio_after = ((shares + trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else position_ratio_before
                     else:
                         trade_message = "买入信号成立，但可买数量过小或未达到调仓阈值"
