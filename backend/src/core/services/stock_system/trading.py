@@ -288,10 +288,12 @@ def plan_orders(
                        note=f"剩余额度 {max(room, 0.0):.1f}%（总仓位/板块上限/现金），不足最小仓位 {min_weight:g}%")
             continue
         budget = nav * weight / 100.0
+        # 计划仓位买不满一手时允许买一手，但不超过单只上限，也不越过板块/总仓位的剩余额度
+        max_budget = nav * min(float(position_config["max_single_weight_pct"]), room) / 100.0
         orders.append({
             "signal_date": trade_date, "ts_code": row["ts_code"], "name": row.get("name"),
             "side": paper.SIDE_BUY, "status": paper.ORDER_PENDING, "target_weight_pct": round(weight, 2),
-            "budget": budget, "stop_pct": row.get("stop_pct"),
+            "budget": budget, "max_budget": max_budget, "stop_pct": row.get("stop_pct"),
             "sector_code": sector, "sector_name": row.get("sector_name"),
             "reason": "；".join(f"{item['label']}：{item['detail']}" for item in row["triggers"])
             + (f"；{row['xueqiu_detail']}" if row.get("xueqiu_detail") else ""),

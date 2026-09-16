@@ -373,3 +373,79 @@ def test_signal_and_paper_config_normalization():
     assert [item["key"] for item in system_config.config_definitions()["triggers"]] == [
         "nine_turn_reversal", "support_bounce", "macd_golden_cross", "breakout",
     ]
+
+
+# --- 高价股：计划仓位买不满一手 -------------------------------------------------
+
+@pytest.fixture
+def expensive_db(tmp_path):
+    """中际旭创 2026-09-14 的真实价格：开盘 890，一手就要 8.9 万。"""
+    path = tmp_path / "expensive.duckdb"
+    connection = duckdb.connect(str(path))
+    connection.execute(
+        "CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, open DOUBLE, close DOUBLE, pre_close DOUBLE)"
+    )
+    connection.execute("CREATE TABLE a_stock_adj_factor (ts_code VARCHAR, trade_date DATE, adj_factor DOUBLE)")
+    connection.execute("INSERT INTO a_stock_market_daily VALUES ('300308.SZ', DATE '2026-09-14', 890.0, 873.0, 926.0)")
+    connection.execute("INSERT INTO a_stock_adj_factor VALUES ('300308.SZ', DATE '2026-09-14', 1.0)")
+    connection.close()
+    return path
+
+
+EXPENSIVE_SIGNAL_DAY, EXPENSIVE_FILL_DAY = date(2026, 9, 11), date(2026, 9, 14)
+
+
+def _expensive_book(max_budget):
+    order = {"id": None, "signal_date": EXPENSIVE_SIGNAL_DAY, "ts_code": "300308.SZ", "name": "中际旭创",
+             "side": "buy", "status": "pending", "budget": 50000.0}
+    if max_budget is not None:
+        order["max_budget"] = max_budget
+    return {
+        "account": {"id": None, "initial_capital": 1e6, "cash": 1e6, "started_on": None,
+                    "last_trade_date": EXPENSIVE_SIGNAL_DAY},
+        "positions": {},
+        "pending": [order],
+    }
+
+
+def test_one_lot_is_bought_when_it_fits_the_single_position_cap(expensive_db):
+    # 计划仓位 5 万买不满一手，但一手 8.9 万在 10 万的单只上限内
+    book = _expensive_book(100000.0)
+    paper.settle(book, EXPENSIVE_FILL_DAY, PAPER, connect=lambda: duckdb.connect(str(expensive_db), read_only=True))
+    position = book["positions"]["300308.SZ"]
+    assert position["quantity"] == 100 and position["entry_price"] == 890.0
+
+
+def test_lot_over_the_cap_is_cancelled_with_an_explicit_reason(expensive_db):
+    # 单只上限 8 万 < 一手 8.9 万：撤单，理由要说清是超上限而不是没钱
+    book = _expensive_book(80000.0)
+    paper.settle(book, EXPENSIVE_FILL_DAY, PAPER, connect=lambda: duckdb.connect(str(expensive_db), read_only=True))
+    order = book["pending"][0]
+    assert order["status"] == "cancelled" and not book["positions"]
+    assert "一手 89,027" in order["message"] and "单只仓位上限 80,000" in order["message"]
+    assert "计划仓位 50,000" in order["message"]
+
+
+def test_lot_over_the_available_cash_says_so(expensive_db):
+    # 单只上限够（10 万），但账户只剩 5 万现金：理由要指向现金
+    book = _expensive_book(100000.0)
+    book["account"]["cash"] = 50000.0
+    paper.settle(book, EXPENSIVE_FILL_DAY, PAPER, connect=lambda: duckdb.connect(str(expensive_db), read_only=True))
+    assert "超出可用现金 50,000" in book["pending"][0]["message"]
+
+
+def test_plan_orders_passes_the_single_position_cap_as_the_lot_allowance():
+    book = {"account": {"cash": 1e6}, "positions": {}, "pending": []}
+    allocation = {
+        "run": {"summary": {"exposure_pct": 100.0}},
+        "regimes": [{"index_code": "930851.CSI", "cap_pct": 30.0}],
+        "rows": [],
+    }
+    rows = [{
+        "role": "candidate", "action": "buy", "ts_code": "300308.SZ", "name": "中际旭创", "pool_rank": 1,
+        "sector_code": "930851.CSI", "sector_name": "云计算", "planned_weight_pct": 5.0, "stop_pct": 8.85,
+        "triggers": [{"label": "回踩支撑企稳", "detail": "测试"}], "xueqiu_detail": None, "exits": [],
+    }]
+    orders = trading.plan_orders(D1, rows, book, allocation, DEFAULTS)
+    assert orders[0]["budget"] == pytest.approx(50000.0)      # 计划仓位 5%
+    assert orders[0]["max_budget"] == pytest.approx(80000.0)  # 单只上限 8%
