@@ -2,7 +2,8 @@
 
 撮合规则（只有日线时最接近真实的口径）：
 
-- 买单只在信号日之后的第一个交易日开盘尝试一次：停牌、开盘涨停或资金不足一手就撤单；
+- 买单只在信号日之后的第一个交易日开盘尝试一次：停牌、开盘涨停，或一手的钱超过单只仓位上限/可用现金就撤单。
+  计划仓位买不满一手、但一手仍在单只上限内时买一手（高价股一手可能就超过计划仓位）；
 - 卖单从信号日之后的第一个交易日起每天开盘尝试，停牌或开盘跌停就顺延；
 - 同一天先卖后买，卖出回笼的资金当天可用；
 - 费用：买卖佣金、卖出印花税按配置；股数按 100 股整手；
@@ -240,11 +241,23 @@ def settle(
             if bar["pre_close"] and bar["open"] >= bar["pre_close"] * (1 + price_limit_pct(ts_code)) * (1 - LIMIT_TOLERANCE):
                 finish(order, ORDER_CANCELLED, day, f"{day} 开盘涨停，未成交")
                 continue
-            spend = min(float(order.get("budget") or 0.0), float(account["cash"]))
+            cash = float(account["cash"])
+            spend = min(float(order.get("budget") or 0.0), cash)
+            lot_cost = LOT_SIZE * bar["open"] * (1 + commission)
             quantity = int(spend / (bar["open"] * (1 + commission)) // LOT_SIZE) * LOT_SIZE
             if quantity <= 0:
-                finish(order, ORDER_CANCELLED, day, "资金不足一手")
-                continue
+                # 高价股一手可能就超过计划仓位（900 元的股票一手 9 万，5% 仓位只有 5 万）。
+                # 只要一手的钱不超过单只仓位上限和可用现金，就买一手；否则说清楚差在哪，
+                # 而不是笼统地说"资金不足"——账户里往往有钱，只是这一只买不起整手。
+                single_cap = float(order.get("max_budget") or 0.0)
+                allowance = min(single_cap, cash)
+                if lot_cost <= allowance:
+                    quantity = LOT_SIZE
+                else:
+                    limit = "可用现金" if cash < single_cap else "单只仓位上限"
+                    finish(order, ORDER_CANCELLED, day,
+                           f"一手 {lot_cost:,.0f} 元，超出{limit} {allowance:,.0f} 元（计划仓位 {spend:,.0f} 元）")
+                    continue
             amount = quantity * bar["open"]
             fee = amount * commission
             account["cash"] -= amount + fee

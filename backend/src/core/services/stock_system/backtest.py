@@ -224,6 +224,7 @@ def plan_target_orders(
     targets: Mapping[str, Mapping[str, Any]],
     keep: Sequence[str],
     threshold_pct: float,
+    max_single_weight_pct: float,
 ) -> List[Dict[str, Any]]:
     """把持仓调到目标权重：不在目标里的卖掉（keep 里的除外），超配减仓，低配/新目标买入。"""
     nav = paper.book_nav(book)
@@ -251,6 +252,8 @@ def plan_target_orders(
             orders.append({
                 "signal_date": day, "ts_code": ts_code, "name": target.get("name"),
                 "side": paper.SIDE_BUY, "status": paper.ORDER_PENDING, "budget": nav * gap / 100.0,
+                # 差额买不满一手时允许买一手，上限是单只仓位上限（高价股一手可能就超过目标权重）
+                "max_budget": nav * max_single_weight_pct / 100.0,
                 "target_weight_pct": float(target["weight"]), "allow_add": True,
                 "sector_code": target.get("sector_code"), "sector_name": target.get("sector_name"),
                 "reason": "低配加仓" if position else "新进目标持仓",
@@ -596,7 +599,8 @@ def run_backtest(
                     top = top[: int(position_config["max_positions"])]
                     weight = 100.0 / len(top) if top else 0.0
                     targets = {row["ts_code"]: {"weight": weight, "name": row.get("name")} for row in top}
-                    book["pending"].extend(plan_target_orders(day, book, targets, (), 0.5))
+                    book["pending"].extend(plan_target_orders(
+                        day, book, targets, (), 0.5, position_config["max_single_weight_pct"]))
             elif variant == "sentiment":
                 in_pool_set = {row["ts_code"] for row in in_pool}
                 targets = {
@@ -605,7 +609,8 @@ def run_backtest(
                     for row in built["rows"] if row["status"] == "target"
                 }
                 keep = [code for code in book["positions"] if code in in_pool_set and code not in targets]
-                book["pending"].extend(plan_target_orders(day, book, targets, keep, REBALANCE_THRESHOLD_PCT))
+                book["pending"].extend(plan_target_orders(
+                    day, book, targets, keep, REBALANCE_THRESHOLD_PCT, position_config["max_single_weight_pct"]))
             else:
                 variant_config = variant_configs[variant]
                 signals = compute_signals(

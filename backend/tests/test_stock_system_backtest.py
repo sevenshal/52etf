@@ -119,11 +119,14 @@ def test_plan_target_orders():
         "B": {"name": "B", "market_value": 10000.0},   # 不在目标：卖
         "C": {"name": "C", "market_value": 10000.0},   # 不在目标但要保留
     }, "pending": []}
-    orders = backtest.plan_target_orders(date(2026, 1, 5), book, {"A": {"weight": 20.0}, "D": {"weight": 10.0}}, ["C"], 2.0)
+    orders = backtest.plan_target_orders(
+        date(2026, 1, 5), book, {"A": {"weight": 20.0}, "D": {"weight": 10.0}}, ["C"], 2.0, 8.0)
     by_code = {order["ts_code"]: order for order in orders}
     assert by_code["A"]["side"] == "sell" and by_code["A"]["fraction"] == pytest.approx(1 / 3)
     assert by_code["B"]["side"] == "sell" and "fraction" not in by_code["B"]
     assert by_code["D"]["side"] == "buy" and by_code["D"]["budget"] == pytest.approx(10000.0) and by_code["D"]["allow_add"]
+    # 差额买不满一手时，最多按单只上限买一手
+    assert by_code["D"]["max_budget"] == pytest.approx(8000.0)
     assert "C" not in by_code
 
 
