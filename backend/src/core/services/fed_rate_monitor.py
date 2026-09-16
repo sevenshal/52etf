@@ -1,4 +1,5 @@
 import httpx
+from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup
 from diskcache import Cache
 import os
@@ -23,6 +24,8 @@ class FedRateMonitorService:
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
     }
     PROXY = 'socks5://127.0.0.1:7891'
+    # curl 的 socks5:// 会在本地解析域名（国内 DNS 被污染会卡死），必须用 socks5h:// 让代理端解析
+    CFFI_PROXY = 'socks5h://127.0.0.1:7891'
     CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "quant")
     CACHE = Cache(directory=CACHE_DIR)
     CACHE_TIMEOUT = 3600  # 1小时
@@ -72,14 +75,20 @@ class FedRateMonitorService:
 
     @staticmethod
     def _fetch_html():
-        """单独的HTML获取方法，不涉及缓存和解析"""
+        """单独的HTML获取方法，不涉及缓存和解析
+
+        investing.com 的 Cloudflare 会按 TLS 指纹拦截非浏览器客户端（httpx 直接 403），
+        所以用 curl_cffi 模拟 Chrome 的 TLS/HTTP2 指纹来请求。
+        """
         try:
-            with httpx.Client(proxy=FedRateMonitorService.PROXY, timeout=FedRateMonitorService.REQUEST_TIMEOUT) as client:
-                response = client.get(FedRateMonitorService.URL, headers=FedRateMonitorService.HEADERS)
-                response.raise_for_status()
-                return response.text
-        except httpx.HTTPStatusError as http_err:
-            print(f"HTTP请求错误: {http_err}")
+            response = cffi_requests.get(
+                FedRateMonitorService.URL,
+                impersonate='chrome',
+                proxies={'http': FedRateMonitorService.CFFI_PROXY, 'https': FedRateMonitorService.CFFI_PROXY},
+                timeout=(5, 10),
+            )
+            response.raise_for_status()
+            return response.text
         except Exception as err:
             print(f"网络请求异常: {err}")
         return None
