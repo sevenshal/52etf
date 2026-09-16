@@ -1763,6 +1763,150 @@ class StockSystemConfig(Base):
     updated_by = Column(String(64))
 
 
+
+class SectorNineTurnConfig(Base):
+    """板块九转策略的超参数（全局单份）。
+
+    板块范围、贪恐闸门、布防窗口、卖出口径、组合与模拟盘参数整份存在 payload(JSON) 里，
+    由 ``core.services.sector_nine_turn.config`` 负责和默认值合并、校验；新增参数不需要改表。
+    """
+    __tablename__ = "sector_nine_turn_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payload = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_by = Column(String(64))
+
+
+class SectorNineTurnPaperAccount(Base):
+    """板块九转策略模拟盘账户（全局单份）。重置会清空持仓/订单/净值并重建这一行。"""
+    __tablename__ = "sector_nine_turn_paper_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    initial_capital = Column(Float, nullable=False)
+    cash = Column(Float, nullable=False)
+    started_on = Column(Date)
+    last_trade_date = Column(Date)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class SectorNineTurnPaperPosition(Base):
+    """板块九转策略模拟盘持仓。分红送转按复权因子折算进市值（相当于红利再投）。"""
+    __tablename__ = "sector_nine_turn_paper_positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(16), nullable=False, unique=True)
+    name = Column(String(64))
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    quantity = Column(Integer, nullable=False)
+    entry_date = Column(Date, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    entry_adj_factor = Column(Float)
+    cost = Column(Float, nullable=False)
+    entry_reason = Column(Text)
+    # 卖出规则的状态：买入后是否已经出现过高 9（出现后才允许判定低 2 + 回撤）
+    high9_armed = Column(Boolean, nullable=False, default=False)
+    high9_date = Column(Date)
+    last_price = Column(Float)
+    last_adj_factor = Column(Float)
+    market_value = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class SectorNineTurnPaperOrder(Base):
+    """板块九转策略模拟盘订单：信号日收盘生成，下一交易日开盘撮合。"""
+    __tablename__ = "sector_nine_turn_paper_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    signal_date = Column(Date, nullable=False)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    side = Column(String(8), nullable=False)
+    status = Column(String(16), nullable=False)
+    budget = Column(Float)
+    quantity = Column(Integer)
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    reason = Column(Text)
+    exec_date = Column(Date)
+    fill_price = Column(Float)
+    fill_adj_factor = Column(Float)
+    amount = Column(Float)
+    fee = Column(Float)
+    realized_pnl = Column(Float)
+    message = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class SectorNineTurnPaperNav(Base):
+    """板块九转策略模拟盘逐日净值（按交易日收盘盯市）。"""
+    __tablename__ = "sector_nine_turn_paper_navs"
+
+    trade_date = Column(Date, primary_key=True)
+    cash = Column(Float, nullable=False)
+    market_value = Column(Float, nullable=False)
+    nav = Column(Float, nullable=False)
+    positions = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class SectorNineTurnBacktestRun(Base):
+    """板块九转策略回测任务：独立子进程执行，进度和结果写这里。"""
+    __tablename__ = "sector_nine_turn_backtest_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    status = Column(String(16), nullable=False)
+    progress = Column(Float, nullable=False, default=0.0)
+    message = Column(Text)
+    params = Column(JSON)
+    config = Column(JSON)
+    summary = Column(JSON)
+    pid = Column(Integer)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String(64))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+
+
+class SectorNineTurnBacktestNav(Base):
+    """回测各方案的逐日净值。"""
+    __tablename__ = "sector_nine_turn_backtest_navs"
+
+    run_id = Column(Integer, primary_key=True)
+    variant = Column(String(32), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    nav = Column(Float, nullable=False)
+    positions = Column(Integer)
+
+
+class SectorNineTurnBacktestTrade(Base):
+    """回测各方案的逐笔交易（期末未平仓的按最后收盘价计值，closed=False）。"""
+    __tablename__ = "sector_nine_turn_backtest_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, nullable=False, index=True)
+    variant = Column(String(32), nullable=False)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    sector_signal_date = Column(Date)
+    sector_fear_score = Column(Float)
+    entry_date = Column(Date)
+    exit_date = Column(Date)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    closed = Column(Boolean, nullable=False, default=False)
+    sell_drawdown_atr = Column(Float)
+    return_pct = Column(Float)
+    holding_days = Column(Integer)
+    taken = Column(Boolean, nullable=False, default=False)
+
+
 Base.metadata.create_all(engine)
 
 

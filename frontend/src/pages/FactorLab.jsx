@@ -44,7 +44,7 @@ import AStockFundFlow from './AStockFundFlow';
 import ValuationSimulation from './ValuationSimulation';
 import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
 import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
-import NineTurnBreadthResearch from './NineTurnBreadthResearch';
+import SectorNineTurn from './SectorNineTurn';
 import ValueInvestingScreen from './ValueInvestingScreen';
 import StockSystem from './StockSystem';
 import './FactorLab.css';
@@ -62,7 +62,7 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'fund-flow', label: '资金流向' },
   { key: 'xueqiu-holdings', label: '雪球持仓' },
   { key: 'eastmoney-holdings', label: '东方财富' },
-  { key: 'nine-turn-breadth', label: '九转宽度' },
+  { key: 'sector-nine-turn', label: '板块九转' },
   { key: 'value-investing', label: '价值投资' },
   { key: 'stock-system', label: '选股系统' },
   { key: 'db', label: 'DB' },
@@ -3096,7 +3096,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const isFundFlowTab = activeTab === 'fund-flow';
   const isXueqiuHoldingsTab = activeTab === 'xueqiu-holdings';
   const isEastmoneyHoldingsTab = activeTab === 'eastmoney-holdings';
-  const isNineTurnBreadthTab = activeTab === 'nine-turn-breadth';
+  const isSectorNineTurnTab = activeTab === 'sector-nine-turn';
   const handleRun = activeTab === 'composite'
     ? runCompositeAnalysis
     : (activeTab === 'backtest' ? runBacktest : (activeTab === 'timing' ? runTimingAnalysis : runAnalysis));
@@ -3219,7 +3219,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               <h1>研究</h1>
               <Tag color="blue">{activeTabLabel}</Tag>
             </div>
-            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isNineTurnBreadthTab && activeTab !== 'stock-system' && (
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isSectorNineTurnTab && activeTab !== 'stock-system' && (
               <Space className="factor-lab-actions">
                 <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3267,7 +3267,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
 
       {activeTab === 'eastmoney-holdings' && <EastmoneyHoldingsResearch />}
 
-      {activeTab === 'nine-turn-breadth' && <NineTurnBreadthResearch />}
+      {activeTab === 'sector-nine-turn' && <SectorNineTurn />}
 
       {activeTab === 'value-investing' && <ValueInvestingScreen />}
 
