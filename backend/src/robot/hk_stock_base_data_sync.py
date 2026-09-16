@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from ..core.duckdb_utils import connect_duckdb
 from ..core.services.tushare import TushareService
 from .hk_stock_base_data_config import (
     HANG_SENG_REVIEW_RELEASE_DATES,
+    HK_CSI_INDEX_WEIGHT_DEFAULT_START_DATE,
     HK_INDEX_FEAR_GREED_TARGETS,
     HK_STOCK_DEFAULT_START_DATE,
 )
@@ -539,15 +541,28 @@ class HKStockBaseDataSyncService:
     def sync_index_daily(self, start_date: date, end_date: date) -> Dict:
         saved_by_symbol = {}
         for target in HK_INDEX_FEAR_GREED_TARGETS:
-            provider_code = target.get("tushare_index_code")
+            if target.get("csi_index_code"):
+                provider_code = target["csi_index_code"]
+                fetch = self.tushare.pro.index_daily
+                source = "tushare_index_daily"
+            else:
+                provider_code = target.get("tushare_index_code")
+                fetch = self.tushare.pro.index_global
+                source = "tushare_index_global"
             if not provider_code:
                 saved_by_symbol[target["symbol"]] = 0
                 continue
+            # 新加入的指数没有任何点位时，增量窗口不够算贪恐，从默认起点整段补齐。
+            target_start = (
+                start_date
+                if self._index_has_rows(target["index_code"])
+                else min(start_date, HK_STOCK_DEFAULT_START_DATE)
+            )
             frames = []
-            for year in range(start_date.year, end_date.year + 1):
-                chunk_start = max(start_date, date(year, 1, 1))
+            for year in range(target_start.year, end_date.year + 1):
+                chunk_start = max(target_start, date(year, 1, 1))
                 chunk_end = min(end_date, date(year, 12, 31))
-                frame = self.tushare.pro.index_global(
+                frame = fetch(
                     ts_code=provider_code,
                     start_date=chunk_start.strftime("%Y%m%d"),
                     end_date=chunk_end.strftime("%Y%m%d"),
@@ -563,7 +578,7 @@ class HKStockBaseDataSyncService:
             result["trade_date"] = _date_column(frame, "trade_date")
             for column in ("open", "high", "low", "close", "pre_close", "change", "pct_chg", "swing", "vol"):
                 result[column] = _numeric_column(frame, column)
-            result["source"] = "tushare_index_global"
+            result["source"] = source
             now = datetime.now()
             result["created_at"] = now
             result["updated_at"] = now
@@ -635,6 +650,145 @@ class HKStockBaseDataSyncService:
         return {
             "snapshots": int(frame[["index_code", "effective_date"]].drop_duplicates().shape[0]),
             "rows": saved,
+        }
+
+    def sync_csi_index_weights(self, start_date: date, end_date: date) -> Dict:
+        """Import CSI monthly weights for HK-listed CSI index targets.
+
+        Tushare index_weight covers CSI indexes whose constituents trade in Hong
+        Kong. Codes of delisted re-coded listings (e.g. ``06600!AB.HK``) keep
+        their numeric part, and each month is rescaled to 100 because early
+        CSI snapshots sum to roughly 99.
+        """
+        rows = []
+        for target in HK_INDEX_FEAR_GREED_TARGETS:
+            provider_code = target.get("csi_index_code")
+            if not provider_code:
+                continue
+            frames = []
+            for year in range(start_date.year, end_date.year + 1):
+                frame = self.tushare.pro.index_weight(
+                    index_code=provider_code,
+                    start_date=max(start_date, date(year, 1, 1)).strftime("%Y%m%d"),
+                    end_date=min(end_date, date(year, 12, 31)).strftime("%Y%m%d"),
+                )
+                if frame is not None and not frame.empty:
+                    frames.append(frame)
+            if not frames:
+                continue
+            frame = pd.concat(frames, ignore_index=True)
+            frame["con_code"] = frame["con_code"].map(normalize_csi_hk_constituent)
+            frame["effective_date"] = _date_column(frame, "trade_date")
+            frame["weight"] = pd.to_numeric(frame["weight"], errors="coerce")
+            frame = frame.dropna(subset=["con_code", "effective_date", "weight"])
+            frame = frame[frame["weight"] > 0].drop_duplicates(
+                ["effective_date", "con_code"], keep="last"
+            )
+            for effective_date, group in frame.groupby("effective_date"):
+                total = float(group["weight"].sum())
+                for item in group.itertuples(index=False):
+                    rows.append(
+                        {
+                            "index_code": target["index_code"],
+                            "effective_date": effective_date,
+                            "con_code": item.con_code,
+                            "weight": float(item.weight) * 100.0 / total,
+                        }
+                    )
+        if not rows:
+            return {"snapshots": 0, "rows": 0, "new_symbols": []}
+        result = pd.DataFrame(rows)
+        self._validate_weight_snapshots(result)
+        previous = self._snapshot_symbols(result["index_code"].unique().tolist())
+        names = self._hk_stock_names(result["con_code"].unique().tolist())
+        now = datetime.now()
+        result["con_name"] = result["con_code"].map(names)
+        result["free_float_factor"] = None
+        result["reference_date"] = result["effective_date"]
+        result["source_url"] = None
+        result["source_document"] = "tushare_index_weight"
+        result["extraction_method"] = "tushare_index_weight"
+        result["verified"] = 1.0
+        result["created_at"] = now
+        result["updated_at"] = now
+        saved = _upsert_frame(
+            "hk_index_weight_snapshot",
+            [
+                "index_code", "effective_date", "con_code", "con_name", "weight",
+                "free_float_factor", "reference_date", "source_url", "source_document",
+                "extraction_method", "verified", "created_at", "updated_at",
+            ],
+            result,
+        )
+        return {
+            "snapshots": int(result[["index_code", "effective_date"]].drop_duplicates().shape[0]),
+            "rows": saved,
+            "new_symbols": sorted(set(result["con_code"]) - previous),
+        }
+
+    @staticmethod
+    def _snapshot_symbols(index_codes: List[str]) -> set:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        try:
+            return {
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT con_code FROM hk_index_weight_snapshot WHERE index_code IN (SELECT UNNEST(?))",
+                    [index_codes],
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _hk_stock_names(symbols: List[str]) -> Dict[str, str]:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        try:
+            return dict(
+                connection.execute(
+                    "SELECT ts_code, name FROM hk_stock_basic WHERE ts_code IN (SELECT UNNEST(?))",
+                    [symbols],
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+
+    def sync_symbols_history(
+        self,
+        symbols: List[str],
+        start_date: date,
+        end_date: date,
+        workers: int = 8,
+    ) -> Dict:
+        """Bootstrap constituent history: Yahoo first, Tushare hk_daily for the rest.
+
+        Yahoo has no delisted listings, while hk_daily keeps them but is limited
+        to about one call per minute, so it only handles Yahoo's failures.
+        """
+        result = self.sync_symbols_history_yahoo(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            workers=workers,
+            skip_covered=True,
+        )
+        fallback_rows = 0
+        errors = []
+        for item in result.get("errors") or []:
+            try:
+                rows = self.sync_market_symbol(item["symbol"], start_date, end_date)
+            except Exception as exc:
+                errors.append({"symbol": item["symbol"], "error": str(exc)})
+                continue
+            if rows:
+                fallback_rows += rows
+            else:
+                errors.append({"symbol": item["symbol"], "error": "empty"})
+        return {
+            **result,
+            "rows": int(result.get("rows") or 0) + fallback_rows,
+            "tushare_fallback_symbols": len(result.get("errors") or []),
+            "errors": errors,
         }
 
     def download_official_review_documents(
@@ -742,9 +896,11 @@ class HKStockBaseDataSyncService:
             "market": self.sync_market_daily(market_start, end_value, max_days=max_market_days),
             "indexes": self.sync_index_daily(index_start, end_value),
             "weights": None,
+            "csi_weights": None,
             "review_documents": None,
             "review_automation": None,
         }
+        result["csi_weights"] = self._sync_csi_weights_incremental(end_value)
         if download_review_documents:
             result["review_documents"] = self.download_official_review_documents(review_cache_dir)
         if weight_manifest_path:
@@ -759,6 +915,45 @@ class HKStockBaseDataSyncService:
             ).run(as_of=end_value)
         return result
 
+    def _sync_csi_weights_incremental(self, end_date: date) -> Optional[Dict]:
+        index_codes = [
+            target["index_code"]
+            for target in HK_INDEX_FEAR_GREED_TARGETS
+            if target.get("csi_index_code")
+        ]
+        if not index_codes:
+            return None
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        try:
+            latest_by_code = dict(
+                connection.execute(
+                    """
+                    SELECT index_code, MAX(effective_date)
+                    FROM hk_index_weight_snapshot
+                    WHERE index_code IN (SELECT UNNEST(?))
+                    GROUP BY index_code
+                    """,
+                    [index_codes],
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+        # 任一目标还没有权重时从头导入，已有的只回看最近 40 天覆盖月末快照。
+        latest = (
+            min(latest_by_code.values())
+            if len(latest_by_code) == len(index_codes)
+            else None
+        )
+        start = latest - timedelta(days=40) if latest else HK_CSI_INDEX_WEIGHT_DEFAULT_START_DATE
+        weights = self.sync_csi_index_weights(start, end_date)
+        if weights["new_symbols"]:
+            weights["history"] = self.sync_symbols_history(
+                weights["new_symbols"],
+                start_date=min(start, end_date - timedelta(days=900)),
+                end_date=end_date,
+            )
+        return weights
+
     @staticmethod
     def _max_date(table: str) -> Optional[date]:
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
@@ -768,12 +963,32 @@ class HKStockBaseDataSyncService:
         finally:
             connection.close()
 
+    @staticmethod
+    def _index_has_rows(index_code: str) -> bool:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM hk_index_daily WHERE ts_code = ? LIMIT 1", [index_code]
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
 
 def normalize_hk_symbol(value) -> Optional[str]:
     text = str(value or "").strip().upper().replace(".HK", "")
     if not text or not text.isdigit():
         return None
     return f"{int(text):05d}.HK"
+
+
+def normalize_csi_hk_constituent(value) -> Optional[str]:
+    """``06600!AB.HK`` -> ``06600.HK``; returns None for non-HK codes."""
+    text = str(value or "").strip().upper()
+    if not text.endswith(".HK"):
+        return None
+    match = re.match(r"\d+", text)
+    return normalize_hk_symbol(match.group(0)) if match else None
 
 
 def sync_hk_stock_base_data(

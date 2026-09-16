@@ -23,20 +23,20 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         name="HK Index Momentum",
         raw_label="index close / 125-day moving average - 1",
         source="hk_index_daily",
-        proxy_note="Momentum of the target Hang Seng benchmark.",
+        proxy_note="Momentum of the target Hong Kong index.",
     ),
     "stock_price_strength": ComponentSpec(
         key="stock_price_strength",
         name="Constituent Price Strength",
         raw_label="drift-weighted constituent 52-week range position",
-        source="official review weights + hk_stock_daily_qfq",
-        proxy_note="Official quarterly weights drift with adjusted constituent returns until the next review.",
+        source="official index weights + hk_stock_daily_qfq",
+        proxy_note="Official weights (Hang Seng quarterly reviews or CSI monthly snapshots) drift with adjusted constituent returns until the next snapshot.",
     ),
     "stock_price_breadth": ComponentSpec(
         key="stock_price_breadth",
         name="Constituent Price Breadth",
         raw_label="5-day drift-weighted advancing turnover ratio",
-        source="official review weights + Tushare hk_daily",
+        source="official index weights + Tushare hk_daily",
         proxy_note="Uses turnover, so no volume adjustment is required for corporate actions.",
     ),
     "put_call_options": ComponentSpec(
@@ -51,7 +51,7 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         name="HK Index Volatility",
         raw_label="-(20-day realized volatility / 50-day average - 1)",
         source="hk_index_daily",
-        proxy_note="Realized-volatility proxy used consistently across HSI and HSTECH.",
+        proxy_note="Realized-volatility proxy used consistently across Hong Kong index targets.",
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",
@@ -545,8 +545,8 @@ class HKStockFearGreedCalculator:
     @staticmethod
     def _warnings():
         return [
-            "This is an independent Hong Kong benchmark sentiment index, not an official Hang Seng index.",
-            "Constituent weights start from verified official review snapshots and drift with adjusted prices.",
+            "This is an independent Hong Kong index sentiment gauge, not an official index product.",
+            "Constituent weights start from verified official weight snapshots and drift with adjusted prices.",
             "Corporate-action adjustment is derived from Tushare pre_close versus prior raw close.",
             "HKEX put/call is omitted until sufficient local option history is available.",
             "USD Treasury and FRED credit spreads are global proxies, not Hong Kong local bond spreads.",

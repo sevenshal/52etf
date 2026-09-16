@@ -24,6 +24,13 @@ def main():
 
     sync = HKStockBaseDataSyncService()
     print(json.dumps({"basic_rows": sync.sync_basic()}, ensure_ascii=False), flush=True)
+    csi_weights = sync.sync_csi_index_weights(calculation_start, end_date)
+    print(json.dumps({"csi_weights": csi_weights}, ensure_ascii=False), flush=True)
+    # 中证港股指数含已退市成分股，Yahoo 取不到的由 Tushare hk_daily 补齐。
+    csi_history = sync.sync_symbols_history(
+        csi_weights["new_symbols"], calculation_start, end_date
+    )
+    print(json.dumps({"csi_constituent_history": csi_history}, ensure_ascii=False), flush=True)
     history = sync.sync_constituent_history_yahoo(
         calculation_start,
         end_date,
