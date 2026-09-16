@@ -772,6 +772,54 @@ class StockSystemSignalSnapshot(AnalyticsBase):
     note = Column(Text)
 
 
+class SectorNineTurnSectorSnapshot(AnalyticsBase):
+    """板块九转策略的板块层快照：每个交易日每个板块一行，记录九转计数、贪恐和是否触发。"""
+    __tablename__ = "sector_nine_turn_sector_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    index_code = Column(String(16), primary_key=True)
+    index_name = Column(String(64))
+    category = Column(String(16))
+    close = Column(Double)
+    high_count = Column(Integer)
+    low_count = Column(Integer)
+    fear_score = Column(Double)
+    # 低 9 已经出现、还在等第一个高 2
+    low9_armed = Column(Boolean)
+    low9_date = Column(Date)
+    # 低 9 后首次高 2（不看贪恐）
+    turn_signal = Column(Boolean)
+    # 布防窗口内（含贪恐闸门通过），当天可以从这个板块里选股
+    armed = Column(Boolean)
+    armed_since = Column(Date)
+    fear_passed = Column(Boolean)
+    note = Column(Text)
+
+
+class SectorNineTurnSignalSnapshot(AnalyticsBase):
+    """板块九转策略的个股层快照：每个交易日评估过的股票（板块成分候选 + 模拟盘持仓）逐只一行。"""
+    __tablename__ = "sector_nine_turn_signal_snapshot"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    name = Column(String(64))
+    role = Column(String(16))
+    sector_code = Column(String(16))
+    sector_name = Column(String(64))
+    sector_fear_score = Column(Double)
+    sector_signal_date = Column(Date)
+    close = Column(Double)
+    atr = Column(Double)
+    high_count = Column(Integer)
+    low_count = Column(Integer)
+    low9_date = Column(Date)
+    high9_date = Column(Date)
+    rising_drawdown_atr = Column(Double)
+    action = Column(String(16))
+    rank = Column(Integer)
+    note = Column(Text)
+
+
 def _financial_statement_column_types(date_fields, text_fields, numeric_fields):
     """财务报表表的「列名 -> DuckDB 类型」映射，与 ORM 模型生成用的是同一份字段清单。"""
     columns = {name: "DATE" for name in date_fields}

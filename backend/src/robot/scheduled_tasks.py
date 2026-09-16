@@ -117,6 +117,7 @@ SYMBOLS_RUN_TASK_KEYS = frozenset({
     "a_stock_index_valuation_refresh",
 })
 STOCK_SYSTEM_POOL_TASK_KEY = "stock_system_pool_refresh"
+SECTOR_NINE_TURN_TASK_KEY = "sector_nine_turn_daily"
 
 
 def _parse_optional_symbol_list(value: Any) -> Optional[List[str]]:
@@ -829,6 +830,30 @@ def _run_stock_system_pool_refresh(as_of: Optional[str] = None, only_allocation:
         + (f" {trading_summary.get('paper_note')}" if trading_summary.get("paper_note") else "")
     )
     return "；".join(messages)
+
+
+def _run_sector_nine_turn_daily(as_of: Optional[str] = None):
+    """板块九转策略：板块状态 → 个股信号 → 模拟盘出单。"""
+    from ..core.services.sector_nine_turn.daily import run_trading_day
+
+    as_of_date = _parse_optional_task_date(as_of, "交易日")
+    result = run_trading_day(as_of=as_of_date)
+    if result.get("status") != "completed":
+        raise RuntimeError(result.get("message") or f"板块九转计算失败: {result.get('status')}")
+    summary = result.get("summary") or {}
+    nav = summary.get("nav")
+    message = (
+        f"板块九转 trade_date={result.get('trade_date')} 板块={summary.get('sectors')} "
+        f"触发={summary.get('sectors_triggered')} 布防={summary.get('sectors_armed')} "
+        f"候选={summary.get('candidates')} 买入信号={summary.get('buy_signals')} "
+        f"卖出信号={summary.get('sell_signals')} 持仓={summary.get('holdings')} "
+        f"成交={summary.get('fills')} 耗时={result.get('duration_seconds')}s"
+    )
+    if nav is not None:
+        message += f" 净值={nav:,.0f}"
+    if summary.get("paper_note"):
+        message += f" {summary['paper_note']}"
+    return message
 
 
 def _run_a_stock_daily_basic_backfill(
@@ -1674,6 +1699,29 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=False,
                         description="打开后沿用已有的股票池快照，只重算情绪择时与目标仓位。",
+                    ),
+                ),
+            ),
+            SECTOR_NINE_TURN_TASK_KEY: TaskDefinition(
+                task_key=SECTOR_NINE_TURN_TASK_KEY,
+                name="板块九转策略",
+                description=(
+                    "按「研究 → 板块九转」里的配置计算：①板块层——板块自身出现神奇九转低9后首次高2，"
+                    "且当天自算贪恐分数不高于闸门（默认 ≤40）就进入布防；②个股层——布防中的板块里，"
+                    "成分股自己也出现低9后首次高2的记为买入信号，持仓出现高9后首次低2且回撤超过 2 个 ATR "
+                    "记为卖出信号；③模拟盘——把账户结算到当天，再按空仓位生成下一交易日开盘执行的订单。"
+                ),
+                default_time="19:20",
+                default_enabled=True,
+                sort_order=81,
+                runner=_run_sector_nine_turn_daily,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="as_of",
+                        label="交易日",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时按今天(取最近一个交易日)计算。",
                     ),
                 ),
             ),

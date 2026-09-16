@@ -1,0 +1,24 @@
+{
+  "start": "2023-01-01",
+  "end": "2026-09-15",
+  "indexes": 64,
+  "fear_threshold": 40.0,
+  "arm_window": 5,
+  "sell_atr_threshold": 2.0,
+  "max_positions": 10,
+  "commission_rate": 0.0003,
+  "stamp_duty_rate": 0.0005,
+  "sector_triggers": 761,
+  "sector_triggers_fear_pass": 164,
+  "candidate_stocks": 5630,
+  "benchmark": {
+    "code": "000985.SH",
+    "label": "中证全指",
+    "total_return": 0.18849420547485352,
+    "cagr": 0.04779387264461077,
+    "annual_volatility": 0.19909823987284897,
+    "sharpe_like": 0.2400517085190386,
+    "max_drawdown": -0.2938664337015927,
+    "calmar": 0.1626380803094482
+  }
+}

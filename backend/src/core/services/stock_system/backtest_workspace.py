@@ -14,7 +14,7 @@ import logging
 import os
 import time
 from datetime import date, timedelta
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ...duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb, is_duckdb_lock_conflict
 
@@ -25,8 +25,9 @@ ATTACH_ATTEMPTS = 120
 ATTACH_SLEEP_SECONDS = 5.0
 
 
-def workspace_path(source_path: str) -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(source_path)), WORKSPACE_FILENAME)
+def workspace_path(source_path: str, filename: str = WORKSPACE_FILENAME) -> str:
+    """工作区文件和生产分析库放同一个目录；不同回测用不同文件名，互不干扰。"""
+    return os.path.join(os.path.dirname(os.path.abspath(source_path)), filename)
 
 
 def _in(values: Sequence[str]) -> str:
@@ -83,7 +84,9 @@ def build_workspace(
     *,
     log: Callable[[str], None] = lambda message: None,
     sleep: Callable[[float], None] = time.sleep,
+    plan: Optional[Sequence[Tuple[str, str, List[Any], bool]]] = None,
 ) -> Dict[str, int]:
+    """``plan`` 默认是选股系统那份；别的回测（如板块九转）传自己的表清单，只复制它要读的表。"""
     workspace = ANALYTICS_DB_PATH
     if os.path.abspath(workspace) == os.path.abspath(source_path):
         raise RuntimeError("回测工作区不能是生产分析库本身")
@@ -91,7 +94,7 @@ def build_workspace(
     main_db = connection.execute("SELECT current_database()").fetchone()[0]
     counts: Dict[str, int] = {}
     try:
-        for table, where, params, create in table_plan(start, end):
+        for table, where, params, create in (plan if plan is not None else table_plan(start, end)):
             _attach(connection, source_path, sleep)
             try:
                 exists = connection.execute(
