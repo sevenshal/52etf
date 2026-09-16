@@ -20,6 +20,7 @@ export const US_ETF_OPTIONS = [
 export const HK_ETF_OPTIONS = [
   { symbol: 'HSI.HK', ticker: '恒生指数', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
   { symbol: 'HSTECH.HK', ticker: '恒生科技', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
+  { symbol: '931250.CSI', ticker: '香港创新药', label: '港股', market: 'HK', realtime: false, priceLabel: '点位', pricePrecision: 2 },
 ];
 
 export const CN_GENERAL_GROUPS = [

@@ -18,7 +18,19 @@ HK_INDEX_FEAR_GREED_TARGETS = [
         "index_code": "HSTECH",
         "tushare_index_code": "HKTECH",
     },
+    {
+        # 中证指数发布的港股主题指数：点位取 Tushare index_daily，
+        # 权重取 Tushare index_weight 月度快照（恒生检讨公告里没有它）。
+        "symbol": "931250.CSI",
+        "ticker": "香港创新药",
+        "label": "中证香港创新药",
+        "index_code": "931250",
+        "csi_index_code": "931250.CSI",
+    },
 ]
+
+# Tushare index_weight 从 2022-09 起才有 931250 的权重。
+HK_CSI_INDEX_WEIGHT_DEFAULT_START_DATE = date(2022, 1, 1)
 
 HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL = {
     item["symbol"]: item for item in HK_INDEX_FEAR_GREED_TARGETS

@@ -904,9 +904,23 @@ def _run_hk_stock_base_data_sync(
         f"market_rows={result.get('market', {}).get('rows')} "
         f"indexes={result.get('indexes')} "
         f"weights={result.get('weights')}"
+        f" csi_weights={_summarize_csi_weights(result.get('csi_weights'))}"
         f" review_documents={result.get('review_documents')}"
         f" review_automation={result.get('review_automation')}"
     )
+
+
+def _summarize_csi_weights(result):
+    if not result:
+        return result
+    history = result.get("history") or {}
+    return {
+        "snapshots": result.get("snapshots"),
+        "rows": result.get("rows"),
+        "new_symbols": len(result.get("new_symbols") or []),
+        "history_rows": history.get("rows"),
+        "history_errors": (history.get("errors") or [])[:5],
+    }
 
 
 def _run_hk_index_fear_greed_backfill(
@@ -1782,7 +1796,7 @@ class ScheduledTaskManager:
             "hk_stock_base_data_sync": TaskDefinition(
                 task_key="hk_stock_base_data_sync",
                 name="港股基础数据同步",
-                description="按交易日从 Tushare 同步港股全市场原始日线、HSI/HSTECH 指数日线，并可导入已复核的恒生季度权重快照；复权由本地根据前收盘跳变推导。",
+                description="按交易日从 Tushare 同步港股全市场原始日线、HSI/HSTECH/中证香港创新药指数日线和中证月度权重，并可导入已复核的恒生季度权重快照；复权由本地根据前收盘跳变推导。",
                 default_time="17:20",
                 default_enabled=True,
                 sort_order=77,
@@ -1830,7 +1844,7 @@ class ScheduledTaskManager:
             "hk_index_fear_greed_backfill": TaskDefinition(
                 task_key="hk_index_fear_greed_backfill",
                 name="港股指数贪恐回跑入库",
-                description="计算恒生指数、恒生国企指数和恒生科技指数贪恐值，使用官方季度权重锚点及按复权收益漂移的日权重。",
+                description="计算恒生指数、恒生科技指数和中证香港创新药指数贪恐值，使用官方权重锚点（恒生季度检讨/中证月度权重）及按复权收益漂移的日权重。",
                 default_time="17:30",
                 default_enabled=True,
                 sort_order=78,
