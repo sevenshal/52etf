@@ -1,25 +1,39 @@
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.core.services.market_volume import build_volume_compare, parse_trends_lines
+from src.core.services.market_volume import build_volume_compare, frame_to_minute_rows, merge_minute_rows
 
 
 def _lines(date, rows):
-    return [f"{date} {minute},0.00,{close},{close},{close},100,{amount},{close}" for minute, close, amount in rows]
+    return [(f"{date} {minute}:00", close, amount) for minute, close, amount in rows]
 
 
-def test_parse_trends_lines_groups_by_date():
+def parse_trends_lines(lines):
+    frame = pd.DataFrame(lines, columns=["trade_time", "close", "amount"])
+    frame["trade_time"] = pd.to_datetime(frame["trade_time"])
+    return frame_to_minute_rows(frame)
+
+
+def test_frame_to_minute_rows_groups_by_date_and_sorts():
     parsed = parse_trends_lines(
-        _lines("2026-09-16", [("09:30", 10.0, 1e8), ("09:31", 10.1, 2e8)])
-        + _lines("2026-09-17", [("09:30", 10.2, 3e8)])
-        + ["bad line"]
+        _lines("2026-09-17", [("09:30", 10.2, 3e8)])
+        + _lines("2026-09-16", [("09:31", 10.1, 2e8), ("09:30", 10.0, 1e8)])
     )
     assert parsed["2026-09-16"] == [("09:30", 10.0, 1e8), ("09:31", 10.1, 2e8)]
     assert parsed["2026-09-17"] == [("09:30", 10.2, 3e8)]
+    assert frame_to_minute_rows(pd.DataFrame()) == {}
+
+
+def test_merge_minute_rows_only_fills_missing_minutes():
+    history = {"2026-09-17": [("09:30", 10.0, 1e8), ("09:31", 10.1, 2e8)]}
+    realtime = {"2026-09-17": [("09:31", 99.0, 9e8), ("09:32", 10.2, 3e8)]}
+    merged = merge_minute_rows(history, realtime)
+    assert merged["2026-09-17"] == [("09:30", 10.0, 1e8), ("09:31", 10.1, 2e8), ("09:32", 10.2, 3e8)]
 
 
 def test_build_volume_compare_intraday_against_previous_day():
@@ -51,6 +65,7 @@ def test_build_volume_compare_intraday_against_previous_day():
     assert first["sz_pct"] == 2.0
     assert second["target_cum"] == 14.0 and second["compare_cum"] == 15.0 and second["diff_cum"] == -1.0
     assert second["deviation_pct"] == -60.0
+    assert third["target_amount"] is None
     assert third["target_cum"] is None and third["compare_cum"] == 20.0 and third["deviation_pct"] is None
 
 
@@ -58,3 +73,57 @@ def test_build_volume_compare_rejects_earliest_day_as_target():
     sh = parse_trends_lines(_lines("2026-09-16", [("09:30", 1, 1)]) + _lines("2026-09-17", [("09:30", 1, 1)]))
     with pytest.raises(ValueError):
         build_volume_compare(sh, sh, target_date="2026-09-16")
+
+
+def _frame(rows):
+    frame = pd.DataFrame(rows, columns=["trade_time", "close", "amount"])
+    frame["trade_time"] = pd.to_datetime(frame["trade_time"])
+    return frame
+
+
+def test_fetch_index_minutes_tops_up_today_with_realtime(monkeypatch):
+    from datetime import datetime
+
+    from src.core.services import market_volume
+
+    class FakeService:
+        def get_index_historical_minute_frame(self, ts_code, start, end):
+            return _frame([("2026-09-16 15:00:00", 100.0, 5e8), ("2026-09-17 09:30:00", 101.0, 1e8)])
+
+        def get_index_realtime_minute_frame(self, ts_code):
+            return _frame([("2026-09-17 09:30:00", 999.0, 9e8), ("2026-09-17 09:31:00", 102.0, 2e8)])
+
+    market_volume._cache.clear()
+    monkeypatch.setattr(market_volume.TushareService, "get_instance", classmethod(lambda cls: FakeService()))
+    rows = market_volume._fetch_index_minutes("000001.SH", now=datetime(2026, 9, 17, 9, 32))
+    assert rows["2026-09-17"] == [("09:30", 101.0, 1e8), ("09:31", 102.0, 2e8)]
+    market_volume._cache.clear()
+
+
+def test_fetch_index_minutes_wraps_history_error(monkeypatch):
+    from datetime import datetime
+
+    from src.core.services import market_volume
+
+    class BrokenService:
+        def get_index_historical_minute_frame(self, ts_code, start, end):
+            raise RuntimeError("抱歉，您没有接口访问权限")
+
+    market_volume._cache.clear()
+    monkeypatch.setattr(market_volume.TushareService, "get_instance", classmethod(lambda cls: BrokenService()))
+    with pytest.raises(market_volume.MarketVolumeDataError, match="idx_mins"):
+        market_volume._fetch_index_minutes("000001.SH", now=datetime(2026, 9, 17, 9, 32))
+
+
+def test_deviation_skipped_when_compare_minute_is_tiny():
+    sh = parse_trends_lines(
+        _lines("2026-09-16", [("14:58", 100.0, 5e6)])
+        + _lines("2026-09-17", [("14:58", 100.0, 2e8)])
+    )
+    sz = parse_trends_lines(
+        _lines("2026-09-16", [("14:58", 50.0, 1e6)])
+        + _lines("2026-09-17", [("14:58", 50.0, 1e8)])
+    )
+    point = build_volume_compare(sh, sz)["points"][0]
+    assert point["compare_amount"] == 0.06
+    assert point["deviation_pct"] is None

@@ -754,6 +754,49 @@ class TushareService(QuoteProvider):
             result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["ts_code", "trade_time", "open", "close", "high", "low"])
 
+    @staticmethod
+    def _normalize_index_minute_frame(frame, time_column: str) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame(columns=["ts_code", "trade_time", "close", "vol", "amount"])
+        result = frame.rename(columns={time_column: "trade_time", "code": "ts_code"}).copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("open", "close", "high", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["trade_time", "close", "amount"]).sort_values(["ts_code", "trade_time"])
+
+    def get_index_historical_minute_frame(
+        self,
+        ts_code: str,
+        start_time: datetime,
+        end_time: datetime,
+        freq: str = "1min",
+    ) -> pd.DataFrame:
+        """交易所指数历史分钟线（idx_mins），异常直接抛出由调用方决定如何提示。"""
+        self._minute_rate_limiter.wait()
+        frame = self.pro.idx_mins(
+            ts_code=self.normalize_symbol(ts_code),
+            freq=freq,
+            start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            fields="ts_code,trade_time,open,close,high,low,vol,amount",
+        )
+        return self._normalize_index_minute_frame(frame, "trade_time")
+
+    def get_index_realtime_minute_frame(self, ts_code: str, freq: str = "1MIN") -> pd.DataFrame:
+        """交易所指数当日全部实时分钟线（rt_idx_min_daily）。
+
+        idx_mins 当天收盘后也不含当日数据；rt_idx_min 只返回最新一根，所以当天分钟走 rt_idx_min_daily。
+        """
+        self._minute_rate_limiter.wait()
+        frame = self.pro.rt_idx_min_daily(
+            ts_code=self.normalize_symbol(ts_code),
+            freq=freq,
+            fields="ts_code,time,open,close,high,low,vol,amount",
+        )
+        return self._normalize_index_minute_frame(frame, "time")
+
     def get_a_stock_realtime_index_frame(
         self, ts_codes, fields: Optional[str] = None
     ) -> pd.DataFrame:
