@@ -40,7 +40,7 @@ const indexPctSeries = points => ([
     data: points.map(point => point.sh_pct),
   },
   {
-    name: '深证%',
+    name: '深综%',
     type: 'line',
     yAxisIndex: 1,
     showSymbol: false,
@@ -267,7 +267,7 @@ const MarketVolumeCompare = () => {
       </Spin>
       {data && (
         <Text type="secondary" className="market-footnote">
-          数据源：tushare 指数分钟线（上证指数 + 深证成指成交额），近 5 个交易日；更新于 {data.fetched_at}
+          数据源：tushare 指数分钟线（上证指数 + 深证综指成交额），近 5 个交易日；更新于 {data.fetched_at}
           {isLiveView ? '，盘中每分钟自动刷新' : ''}
         </Text>
       )}

@@ -1,7 +1,8 @@
 """沪深两市分时成交额对比（缩放量）。
 
-数据源：tushare 指数分钟线。历史分钟用 idx_mins，当天盘中尚未入库的分钟用 rt_idx_min 补齐。
-沪+深成交额 = 上证指数 000001.SH 成交额 + 深证成指 399001.SZ 成交额。
+数据源：tushare 指数分钟线。历史分钟用 idx_mins（不含当天），当天分钟用 rt_idx_min_daily 补齐。
+沪+深成交额 = 上证指数 000001.SH 成交额 + 深证综指 399106.SZ 成交额。
+注意不能用深证成指 399001.SZ：它的成交额只统计 500 只成分股，约为深市全部的一半。
 """
 from __future__ import annotations
 
@@ -18,12 +19,14 @@ from .tushare import TushareService
 logger = logging.getLogger(__name__)
 
 SH_TS_CODE = "000001.SH"
-SZ_TS_CODE = "399001.SZ"
+SZ_TS_CODE = "399106.SZ"
 MAX_TRADE_DAYS = 6  # 5 个可选目标日 + 最早一天作为前收基准
 HISTORY_LOOKBACK_CALENDAR_DAYS = 12
 MARKET_CLOSE_MINUTE = "15:00"
 CACHE_TTL_SECONDS = 20
 YI = 1e8
+# 对比日该分钟成交额低于此值（如尾盘集合竞价 14:57~14:59）时不算偏离，避免极小分母放大成几千%
+DEVIATION_MIN_COMPARE_AMOUNT = 1e8
 
 MinuteRows = Dict[str, List[Tuple[str, float, float]]]
 _cache: Dict[str, Tuple[float, MinuteRows]] = {}
@@ -82,7 +85,7 @@ def _fetch_index_minutes(ts_code: str, now: Optional[datetime] = None) -> Minute
         try:
             realtime = frame_to_minute_rows(service.get_index_realtime_minute_frame(ts_code))
         except Exception as exc:  # 盘中实时补齐失败时仍返回历史数据
-            logger.warning("tushare rt_idx_min 获取 %s 失败: %s", ts_code, exc)
+            logger.warning("tushare rt_idx_min_daily 获取 %s 失败: %s", ts_code, exc)
 
     rows = merge_minute_rows(history, realtime)
     if not rows:
@@ -145,7 +148,7 @@ def build_volume_compare(
             last_time = minute
             compare_same_time_cum = compare_cum
         deviation = None
-        if has_target and compare_amount:
+        if has_target and compare_amount is not None and compare_amount >= DEVIATION_MIN_COMPARE_AMOUNT:
             deviation = round((target_amount / compare_amount - 1) * 100, 2)
         sh_pct = (sh_close[minute] / sh_prev_close - 1) * 100 if minute in sh_close and sh_prev_close else None
         sz_pct = (sz_close[minute] / sz_prev_close - 1) * 100 if minute in sz_close and sz_prev_close else None
@@ -163,7 +166,7 @@ def build_volume_compare(
 
     diff = target_cum - compare_same_time_cum
     return {
-        "source": "tushare idx_mins / rt_idx_min（上证指数 + 深证成指成交额）",
+        "source": "tushare idx_mins / rt_idx_min_daily（上证指数 + 深证综指成交额）",
         "dates": dates,
         "selectable_dates": list(reversed(selectable)),
         "target_date": target,

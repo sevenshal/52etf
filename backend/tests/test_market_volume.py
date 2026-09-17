@@ -65,6 +65,7 @@ def test_build_volume_compare_intraday_against_previous_day():
     assert first["sz_pct"] == 2.0
     assert second["target_cum"] == 14.0 and second["compare_cum"] == 15.0 and second["diff_cum"] == -1.0
     assert second["deviation_pct"] == -60.0
+    assert third["target_amount"] is None
     assert third["target_cum"] is None and third["compare_cum"] == 20.0 and third["deviation_pct"] is None
 
 
@@ -112,3 +113,17 @@ def test_fetch_index_minutes_wraps_history_error(monkeypatch):
     monkeypatch.setattr(market_volume.TushareService, "get_instance", classmethod(lambda cls: BrokenService()))
     with pytest.raises(market_volume.MarketVolumeDataError, match="idx_mins"):
         market_volume._fetch_index_minutes("000001.SH", now=datetime(2026, 9, 17, 9, 32))
+
+
+def test_deviation_skipped_when_compare_minute_is_tiny():
+    sh = parse_trends_lines(
+        _lines("2026-09-16", [("14:58", 100.0, 5e6)])
+        + _lines("2026-09-17", [("14:58", 100.0, 2e8)])
+    )
+    sz = parse_trends_lines(
+        _lines("2026-09-16", [("14:58", 50.0, 1e6)])
+        + _lines("2026-09-17", [("14:58", 50.0, 1e8)])
+    )
+    point = build_volume_compare(sh, sz)["points"][0]
+    assert point["compare_amount"] == 0.06
+    assert point["deviation_pct"] is None

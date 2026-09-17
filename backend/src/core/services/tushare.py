@@ -785,9 +785,12 @@ class TushareService(QuoteProvider):
         return self._normalize_index_minute_frame(frame, "trade_time")
 
     def get_index_realtime_minute_frame(self, ts_code: str, freq: str = "1MIN") -> pd.DataFrame:
-        """交易所指数实时分钟线（rt_idx_min），用于补当天盘中尚未进入 idx_mins 的分钟。"""
+        """交易所指数当日全部实时分钟线（rt_idx_min_daily）。
+
+        idx_mins 当天收盘后也不含当日数据；rt_idx_min 只返回最新一根，所以当天分钟走 rt_idx_min_daily。
+        """
         self._minute_rate_limiter.wait()
-        frame = self.pro.rt_idx_min(
+        frame = self.pro.rt_idx_min_daily(
             ts_code=self.normalize_symbol(ts_code),
             freq=freq,
             fields="ts_code,time,open,close,high,low,vol,amount",
