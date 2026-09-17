@@ -267,7 +267,7 @@ const MarketVolumeCompare = () => {
       </Spin>
       {data && (
         <Text type="secondary" className="market-footnote">
-          数据源：东方财富分时（上证指数 + 深证成指成交额），近 5 个交易日；更新于 {data.fetched_at}
+          数据源：tushare 指数分钟线（上证指数 + 深证成指成交额），近 5 个交易日；更新于 {data.fetched_at}
           {isLiveView ? '，盘中每分钟自动刷新' : ''}
         </Text>
       )}

@@ -1,87 +1,94 @@
 """沪深两市分时成交额对比（缩放量）。
 
-数据源：东方财富分时接口 trends2（ndays=5），上证指数 1.000001 成交额 + 深证成指 0.399001 成交额
-= 沪深两市 A 股成交额。每行格式：``时间,开,收,高,低,成交量,成交额,均价``。
+数据源：tushare 指数分钟线。历史分钟用 idx_mins，当天盘中尚未入库的分钟用 rt_idx_min 补齐。
+沪+深成交额 = 上证指数 000001.SH 成交额 + 深证成指 399001.SZ 成交额。
 """
 from __future__ import annotations
 
+import logging
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+import pandas as pd
+
+from .tushare import TushareService
 
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-TRENDS_URLS = (
-    "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
-    "https://push2.eastmoney.com/api/qt/stock/trends2/get",
-)
-SH_SECID = "1.000001"
-SZ_SECID = "0.399001"
-TRENDS_NDAYS = 5
-FULL_DAY_MINUTES = 241  # 09:30 集合竞价 + 上午 120 + 下午 120
+logger = logging.getLogger(__name__)
+
+SH_TS_CODE = "000001.SH"
+SZ_TS_CODE = "399001.SZ"
+MAX_TRADE_DAYS = 6  # 5 个可选目标日 + 最早一天作为前收基准
+HISTORY_LOOKBACK_CALENDAR_DAYS = 12
+MARKET_CLOSE_MINUTE = "15:00"
 CACHE_TTL_SECONDS = 20
 YI = 1e8
 
-_cache: Dict[str, Tuple[float, Dict[str, List[Tuple[str, float, float]]]]] = {}
+MinuteRows = Dict[str, List[Tuple[str, float, float]]]
+_cache: Dict[str, Tuple[float, MinuteRows]] = {}
 
 
 class MarketVolumeDataError(RuntimeError):
     pass
 
 
-def _safe_float(value: Any) -> Optional[float]:
-    if value in (None, "", "-"):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def frame_to_minute_rows(frame: Optional[pd.DataFrame]) -> MinuteRows:
+    """按交易日分组：{date: [(HH:MM, close, amount), ...]}，同一分钟保留最后一条，保持时间顺序。"""
+    if frame is None or frame.empty:
+        return {}
+    by_date: Dict[str, Dict[str, Tuple[float, float]]] = {}
+    for row in frame.sort_values("trade_time").itertuples(index=False):
+        stamp = pd.Timestamp(row.trade_time)
+        by_date.setdefault(stamp.strftime("%Y-%m-%d"), {})[stamp.strftime("%H:%M")] = (
+            float(row.close),
+            float(row.amount),
+        )
+    return {
+        date: [(minute, close, amount) for minute, (close, amount) in sorted(minutes.items())]
+        for date, minutes in by_date.items()
+    }
 
 
-def parse_trends_lines(lines: List[str]) -> Dict[str, List[Tuple[str, float, float]]]:
-    """按交易日分组：{date: [(HH:MM, close, amount), ...]}，保持时间顺序。"""
-    by_date: Dict[str, List[Tuple[str, float, float]]] = {}
-    for line in lines or []:
-        parts = str(line).split(",")
-        if len(parts) < 7 or " " not in parts[0]:
-            continue
-        date, minute = parts[0].split(" ", 1)
-        close = _safe_float(parts[2])
-        amount = _safe_float(parts[6])
-        if close is None or amount is None:
-            continue
-        by_date.setdefault(date, []).append((minute, close, amount))
-    return by_date
+def merge_minute_rows(history: MinuteRows, realtime: MinuteRows) -> MinuteRows:
+    """实时分钟只补历史里没有的分钟，不覆盖已入库数据。"""
+    merged = {date: list(rows) for date, rows in history.items()}
+    for date, rows in realtime.items():
+        existing = {minute for minute, _, _ in merged.get(date, [])}
+        extra = [row for row in rows if row[0] not in existing]
+        if extra:
+            merged[date] = sorted(merged.get(date, []) + extra)
+    return merged
 
 
-def _fetch_trends(secid: str) -> Dict[str, List[Tuple[str, float, float]]]:
-    cached = _cache.get(secid)
-    now = time.time()
-    if cached and now - cached[0] < CACHE_TTL_SECONDS:
+def _fetch_index_minutes(ts_code: str, now: Optional[datetime] = None) -> MinuteRows:
+    cached = _cache.get(ts_code)
+    now_ts = time.time()
+    if cached and now_ts - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]
 
-    params = {
-        "secid": secid,
-        "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
-        "ndays": TRENDS_NDAYS,
-        "iscr": 0,
-    }
-    last_error: Optional[Exception] = None
-    for url in (url for url in TRENDS_URLS for _ in range(2)):
+    now = now or datetime.now()
+    service = TushareService.get_instance()
+    start = (now - timedelta(days=HISTORY_LOOKBACK_CALENDAR_DAYS)).replace(hour=9, minute=0, second=0, microsecond=0)
+    try:
+        history = frame_to_minute_rows(service.get_index_historical_minute_frame(ts_code, start, now))
+    except Exception as exc:
+        raise MarketVolumeDataError(f"tushare idx_mins 获取 {ts_code} 分钟线失败: {exc}") from exc
+
+    today = now.strftime("%Y-%m-%d")
+    today_rows = history.get(today) or []
+    realtime: MinuteRows = {}
+    if now.weekday() < 5 and (not today_rows or today_rows[-1][0] < MARKET_CLOSE_MINUTE):
         try:
-            response = requests.get(url, params=params, headers={"User-Agent": UA}, timeout=15)
-            response.raise_for_status()
-            lines = ((response.json() or {}).get("data") or {}).get("trends") or []
-            parsed = parse_trends_lines(lines)
-            if parsed:
-                _cache[secid] = (now, parsed)
-                return parsed
-            last_error = MarketVolumeDataError(f"{secid} 分时数据为空")
-        except (requests.RequestException, ValueError) as exc:
-            last_error = exc
-    raise MarketVolumeDataError(f"东方财富分时数据获取失败({secid}): {last_error}")
+            realtime = frame_to_minute_rows(service.get_index_realtime_minute_frame(ts_code))
+        except Exception as exc:  # 盘中实时补齐失败时仍返回历史数据
+            logger.warning("tushare rt_idx_min 获取 %s 失败: %s", ts_code, exc)
+
+    rows = merge_minute_rows(history, realtime)
+    if not rows:
+        raise MarketVolumeDataError(f"tushare 未返回 {ts_code} 分钟线")
+    _cache[ts_code] = (now_ts, rows)
+    return rows
 
 
 def _yi(value: Optional[float]) -> Optional[float]:
@@ -89,12 +96,12 @@ def _yi(value: Optional[float]) -> Optional[float]:
 
 
 def build_volume_compare(
-    sh: Dict[str, List[Tuple[str, float, float]]],
-    sz: Dict[str, List[Tuple[str, float, float]]],
+    sh: MinuteRows,
+    sz: MinuteRows,
     target_date: Optional[str] = None,
     compare_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    dates = sorted(set(sh) & set(sz))
+    dates = sorted(set(sh) & set(sz))[-MAX_TRADE_DAYS:]
     if len(dates) < 2:
         raise MarketVolumeDataError("分时数据不足两个交易日，无法对比")
 
@@ -156,12 +163,12 @@ def build_volume_compare(
 
     diff = target_cum - compare_same_time_cum
     return {
-        "source": "eastmoney trends2（上证指数 + 深证成指成交额）",
+        "source": "tushare idx_mins / rt_idx_min（上证指数 + 深证成指成交额）",
         "dates": dates,
         "selectable_dates": list(reversed(selectable)),
         "target_date": target,
         "compare_date": compare,
-        "is_intraday": len(target_amounts) < FULL_DAY_MINUTES,
+        "is_intraday": bool(last_time) and last_time < MARKET_CLOSE_MINUTE,
         "last_time": last_time,
         "target_total": _yi(target_cum),
         "compare_same_time_total": _yi(compare_same_time_cum),
@@ -176,8 +183,8 @@ def fetch_intraday_volume_compare(
     target_date: Optional[str] = None,
     compare_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    sh = _fetch_trends(SH_SECID)
-    sz = _fetch_trends(SZ_SECID)
+    sh = _fetch_index_minutes(SH_TS_CODE)
+    sz = _fetch_index_minutes(SZ_TS_CODE)
     result = build_volume_compare(sh, sz, target_date=target_date, compare_date=compare_date)
     result["fetched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     return result
