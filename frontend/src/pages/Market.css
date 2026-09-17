@@ -1,0 +1,86 @@
+.market-page {
+  min-height: 100%;
+  padding: 14px;
+  background: #f4f7fb;
+}
+
+.market-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.market-header h1 {
+  margin: 0;
+  color: #172033;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.market-header .ant-typography {
+  font-size: 12px;
+}
+
+.market-tab-strip {
+  margin-bottom: 12px;
+  padding: 0 10px;
+  background: #fff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.market-tab-strip .ant-tabs-nav {
+  margin: 0;
+}
+
+.market-page .ant-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(23, 36, 58, 0.06);
+}
+
+.market-page .ant-card-head-title {
+  font-weight: 600;
+}
+
+.market-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.market-date-select {
+  width: 170px;
+}
+
+.market-alert {
+  margin-bottom: 12px;
+}
+
+.market-volume .is-up {
+  color: #e5484d;
+}
+
+.market-volume .is-down {
+  color: #2f9e63;
+}
+
+.market-footnote {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .market-page {
+    padding: 10px;
+  }
+
+  .market-date-select {
+    width: 140px;
+  }
+}

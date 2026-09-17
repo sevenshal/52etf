@@ -4,6 +4,7 @@ import {
   DollarOutlined,
   ExperimentOutlined,
   FireOutlined,
+  FundOutlined,
   HomeOutlined,
   RobotOutlined,
   StockOutlined,
@@ -16,7 +17,7 @@ import './Layout.css';
 
 const { Content } = Layout;
 
-const TAB_KEYS = ['/', '/fear', '/evc', '/factor-lab', '/ai-stock', '/chan-analysis', '/live', '/profile'];
+const TAB_KEYS = ['/market', '/', '/fear', '/evc', '/factor-lab', '/ai-stock', '/chan-analysis', '/live', '/profile'];
 
 const PROFILE_ROUTES = [
   '/automated-trading',
@@ -45,6 +46,10 @@ const getActiveTabKey = (pathname, state) => {
   const stateTabKey = state?.mainTabKey;
   if (TAB_KEYS.includes(stateTabKey)) {
     return stateTabKey;
+  }
+
+  if (isRouteOrChild(pathname, '/market')) {
+    return '/market';
   }
 
   if (pathname === '/' || pathname.startsWith('/etf/')) {
@@ -105,6 +110,14 @@ const AppLayout = () => {
   );
 
   const items = [
+    // 市场：仅管理员可见，放在 ETF 前面
+    ...(accountId && isAdmin ? [
+      {
+        key: '/market',
+        label: renderTabLabel(<FundOutlined />, '市场'),
+        disabled: false
+      }
+    ] : []),
     {
       key: '/',
       label: renderTabLabel(<HomeOutlined />, 'ETF'),
