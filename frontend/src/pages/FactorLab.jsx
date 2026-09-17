@@ -40,7 +40,6 @@ import { subscribeBackendEvent } from '../utils/backendEvents';
 import DatabaseManager from './DatabaseManager';
 import AStockInnovation100 from './AStockInnovation100';
 import AStockMicro400 from './AStockMicro400';
-import AStockFundFlow from './AStockFundFlow';
 import ValuationSimulation from './ValuationSimulation';
 import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
 import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
@@ -59,7 +58,6 @@ const FACTOR_LAB_TAB_ITEMS = [
   { key: 'valuation-sim', label: '估值模拟盘' },
   { key: 'innovation100', label: 'A创100' },
   { key: 'micro400', label: '微盘400' },
-  { key: 'fund-flow', label: '资金流向' },
   { key: 'xueqiu-holdings', label: '雪球持仓' },
   { key: 'eastmoney-holdings', label: '东方财富' },
   { key: 'sector-nine-turn', label: '板块九转' },
@@ -3093,7 +3091,6 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const isValuationSimTab = activeTab === 'valuation-sim';
   const isInnovationTab = activeTab === 'innovation100';
   const isMicro400Tab = activeTab === 'micro400';
-  const isFundFlowTab = activeTab === 'fund-flow';
   const isXueqiuHoldingsTab = activeTab === 'xueqiu-holdings';
   const isEastmoneyHoldingsTab = activeTab === 'eastmoney-holdings';
   const isSectorNineTurnTab = activeTab === 'sector-nine-turn';
@@ -3219,7 +3216,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
               <h1>研究</h1>
               <Tag color="blue">{activeTabLabel}</Tag>
             </div>
-            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isFundFlowTab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isSectorNineTurnTab && activeTab !== 'stock-system' && (
+            {!isDatabaseTab && !isLiveTab && !isValuationSimTab && !isInnovationTab && !isMicro400Tab && !isXueqiuHoldingsTab && !isEastmoneyHoldingsTab && !isSectorNineTurnTab && activeTab !== 'stock-system' && (
               <Space className="factor-lab-actions">
                 <Button icon={<ReloadOutlined />} onClick={loadOptions} loading={loadingOptions} />
                 <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleRun} loading={activeRunning}>
@@ -3260,8 +3257,6 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       {activeTab === 'innovation100' && <AStockInnovation100 embedded />}
 
       {activeTab === 'micro400' && <AStockMicro400 embedded />}
-
-      {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
 
       {activeTab === 'xueqiu-holdings' && <XueqiuTopHoldingsResearch />}
 

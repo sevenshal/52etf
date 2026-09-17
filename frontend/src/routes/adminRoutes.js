@@ -14,6 +14,15 @@ import { lazy } from 'react';
  */
 export const adminRouteDescriptors = [
   {
+    path: '/market',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
+  },
+  {
+    path: '/market/fund-flow',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
+    props: { initialTab: 'fund-flow' },
+  },
+  {
     path: '/chan-analysis',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/ChanAnalysis')),
   },
@@ -25,11 +34,6 @@ export const adminRouteDescriptors = [
   {
     path: '/factor-lab',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
-  },
-  {
-    path: '/factor-lab/fund-flow',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
-    props: { initialTab: 'fund-flow' },
   },
   {
     path: '/factor-lab/xueqiu-holdings',
