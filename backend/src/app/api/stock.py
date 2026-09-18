@@ -252,6 +252,54 @@ def get_a_stock_chart_events(
         AnalyticsSession.remove()
 
 
+@router.get("/a-stock/fund-flow/{symbol}")
+def get_a_stock_fund_flow_history(
+    symbol: str,
+    start_date: Optional[calendar_date] = Query(default=None, description="默认近5年"),
+    end_date: Optional[calendar_date] = Query(default=None, description="默认今天"),
+    _: str = Depends(valid_account),
+):
+    """个股历史日级资金流（a_stock_fund_flow_daily，由基础数据同步写入），金额单位：元。
+
+    主力 = 超大单 + 大单；净额为正是净流入、为负是净流出。
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    end = end_date or calendar_date.today()
+    start = start_date or (end - timedelta(days=365 * 5 + 2))
+    analytics_db = AnalyticsSession()
+    try:
+        rows = analytics_db.execute(
+            text(
+                """
+                SELECT trade_date, main_net, main_net_pct, super_net, large_net,
+                       mid_net, small_net, source
+                FROM a_stock_fund_flow_daily
+                WHERE ts_code = :symbol
+                  AND trade_date BETWEEN :start AND :end
+                ORDER BY trade_date
+                """
+            ),
+            {"symbol": normalized_symbol, "start": start, "end": end},
+        ).mappings().all()
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
+    return [
+        {
+            "trade_date": row["trade_date"].isoformat() if row["trade_date"] else None,
+            "main_net": _safe_quote_number(row["main_net"]),
+            "main_net_pct": _safe_quote_number(row["main_net_pct"]),
+            "super_net": _safe_quote_number(row["super_net"]),
+            "large_net": _safe_quote_number(row["large_net"]),
+            "mid_net": _safe_quote_number(row["mid_net"]),
+            "small_net": _safe_quote_number(row["small_net"]),
+            "source": row["source"],
+        }
+        for row in rows
+    ]
+
+
 @router.get("/a-stock/fear-indexes/{symbol}")
 def get_a_stock_fear_indexes(
     symbol: str,

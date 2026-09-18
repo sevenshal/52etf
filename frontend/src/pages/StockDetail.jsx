@@ -73,6 +73,20 @@ const StockDetail = () => {
     [xueqiuPayload],
   );
 
+  // 历史日级主力资金流：K 线下方的主力资金副图
+  const [fundFlowHistory, setFundFlowHistory] = useState([]);
+  useEffect(() => {
+    setFundFlowHistory([]);
+    if (!isAStock) return undefined;
+    let cancelled = false;
+    request.get(`/api/stock/a-stock/fund-flow/${normalizedSymbol}`)
+      .then(({ data }) => {
+        if (!cancelled) setFundFlowHistory(data || []);
+      })
+      .catch(error => console.error('获取历史资金流失败:', error));
+    return () => { cancelled = true; };
+  }, [isAStock, normalizedSymbol]);
+
   useEffect(() => {
     register(isAStock ? [normalizedSymbol] : []);
   }, [isAStock, normalizedSymbol, register]);
@@ -244,6 +258,7 @@ const StockDetail = () => {
           realtimeQuote={isAStock ? quotes[normalizedSymbol] : null}
           eventsUrl={isAStock ? `/api/stock/a-stock/chart-events/${normalizedSymbol}` : undefined}
           xueqiuHistory={xueqiuHistoryRows}
+          fundFlowHistory={fundFlowHistory}
           onKlinesChange={setKlines}
           height={600}
         />
