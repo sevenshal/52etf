@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
+import logging
 import math
 from datetime import datetime, time, timedelta
 from datetime import date as calendar_date
@@ -16,12 +17,18 @@ from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
 from ...core.services.a_stock_financials import DEFAULT_PERIOD_COUNT, load_a_stock_financials
 from ...core.services.a_stock_chart_events import load_a_stock_chart_events
+from ...core.services.a_stock_fund_flow import fetch_stock_fund_flow_daily
 from .xueqiu_holdings import load_a_stock_fear_index_memberships
 from ...core.services.tushare import TushareService
 from sqlalchemy.orm import Session
 
 # db_session removed, use dependency injection
 router = APIRouter(prefix="/api/stock")
+logger = logging.getLogger(__name__)
+
+# 库里最新一天之后的资金流从东财日级资金流接口补（和「市场 → 资金流向」同一接口），
+# 只取最近几天：日终同步通常只落后一两个交易日
+LIVE_FUND_FLOW_DAYS = 5
 
 class KLineData(BaseModel):
     """K线数据"""
@@ -250,6 +257,91 @@ def get_a_stock_chart_events(
     finally:
         analytics_db.close()
         AnalyticsSession.remove()
+
+
+@router.get("/a-stock/fund-flow/{symbol}")
+def get_a_stock_fund_flow_history(
+    symbol: str,
+    start_date: Optional[calendar_date] = Query(default=None, description="默认近5年"),
+    end_date: Optional[calendar_date] = Query(default=None, description="默认今天"),
+    _: str = Depends(valid_account),
+):
+    """个股历史日级资金流（a_stock_fund_flow_daily，由基础数据同步写入），金额单位：元。
+
+    主力 = 超大单 + 大单；净额为正是净流入、为负是净流出。区间包含今天时，
+    库里最新一天之后的日子（含今天盘中）用东财实时数据补上，这些行 live=True。
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    end = end_date or calendar_date.today()
+    start = start_date or (end - timedelta(days=365 * 5 + 2))
+    analytics_db = AnalyticsSession()
+    try:
+        rows = analytics_db.execute(
+            text(
+                """
+                SELECT trade_date, main_net, main_net_pct, super_net, large_net,
+                       mid_net, small_net, source
+                FROM a_stock_fund_flow_daily
+                WHERE ts_code = :symbol
+                  AND trade_date BETWEEN :start AND :end
+                ORDER BY trade_date
+                """
+            ),
+            {"symbol": normalized_symbol, "start": start, "end": end},
+        ).mappings().all()
+    finally:
+        analytics_db.close()
+        AnalyticsSession.remove()
+
+    history = [
+        {
+            "trade_date": row["trade_date"].isoformat() if row["trade_date"] else None,
+            "main_net": _safe_quote_number(row["main_net"]),
+            "main_net_pct": _safe_quote_number(row["main_net_pct"]),
+            "super_net": _safe_quote_number(row["super_net"]),
+            "large_net": _safe_quote_number(row["large_net"]),
+            "mid_net": _safe_quote_number(row["mid_net"]),
+            "small_net": _safe_quote_number(row["small_net"]),
+            "source": row["source"],
+            "live": False,
+        }
+        for row in rows
+    ]
+    if end >= calendar_date.today():
+        history.extend(_load_live_fund_flow_rows(normalized_symbol, history, end))
+    return history
+
+
+def _load_live_fund_flow_rows(symbol: str, history: List[dict], end) -> List[dict]:
+    """日终同步还没写入的日子（含今天盘中）从东财日级资金流接口补，失败就只返回库里的数据。"""
+    latest_synced = history[-1]["trade_date"] if history else None
+    try:
+        daily = fetch_stock_fund_flow_daily(symbol, daily_limit=LIVE_FUND_FLOW_DAYS).get("daily") or []
+    except Exception as exc:
+        logger.warning("Live fund flow fetch failed for %s: %s", symbol, exc)
+        return []
+    live_rows = []
+    for item in daily:
+        trade_date = str(item.get("date") or "")[:10]
+        if not trade_date or trade_date > end.isoformat():
+            continue
+        if latest_synced and trade_date <= latest_synced:
+            continue
+        main_net = _safe_quote_number(item.get("main_net"))
+        if main_net is None:
+            continue
+        live_rows.append({
+            "trade_date": trade_date,
+            "main_net": main_net,
+            "main_net_pct": _safe_quote_number(item.get("main_net_pct")),
+            "super_net": _safe_quote_number(item.get("super_net")),
+            "large_net": _safe_quote_number(item.get("large_net")),
+            "mid_net": _safe_quote_number(item.get("mid_net")),
+            "small_net": _safe_quote_number(item.get("small_net")),
+            "source": "eastmoney_push2",
+            "live": True,
+        })
+    return live_rows
 
 
 @router.get("/a-stock/fear-indexes/{symbol}")

@@ -37,8 +37,39 @@ const EMPTY_EVENTS = { research_days: [], financial_reports: [] };
 const XUEQIU_WEIGHT_SERIES_NAME = '雪球综合权重';
 const XUEQIU_DIRECTION_SERIES_NAME = '5日权价比方向';
 const XUEQIU_WEIGHT_COLOR = '#1677ff';
+const FUND_FLOW_SERIES_NAME = '主力净流入';
 // 默认空历史用模块级常量：参数默认值写 [] 每次渲染都是新数组，会让依赖它的 useMemo 每次重算
 const EMPTY_XUEQIU_HISTORY = [];
+const EMPTY_FUND_FLOW_HISTORY = [];
+
+// 资金金额(元)：上亿显示亿，否则显示万
+const formatFlowAmount = (value, digits = 2) => {
+  if (!Number.isFinite(value)) return '-';
+  if (Math.abs(value) >= 1e8) return `${formatNumber(value / 1e8, digits)}亿`;
+  return `${formatNumber(value / 1e4, Math.abs(value) >= 1e6 ? 0 : digits)}万`;
+};
+
+/** 日级资金流按日期对齐到 K 线下标，没有资金数据的那天是 null */
+const alignFundFlowHistory = (dates, rows = []) => {
+  const byDate = {};
+  (rows || []).forEach(row => {
+    if (row?.trade_date) byDate[String(row.trade_date).slice(0, 10)] = row;
+  });
+  return dates.map(dateStr => {
+    const row = byDate[dateStr];
+    const mainNet = toFiniteNumber(row?.main_net);
+    if (!row || mainNet === null) return null;
+    return {
+      mainNet,
+      mainNetPct: toFiniteNumber(row.main_net_pct),
+      superNet: toFiniteNumber(row.super_net),
+      largeNet: toFiniteNumber(row.large_net),
+      midNet: toFiniteNumber(row.mid_net),
+      smallNet: toFiniteNumber(row.small_net),
+      live: Boolean(row.live),
+    };
+  });
+};
 // 副图图例：放在各自副图正上方的缝隙里，只管本副图的系列，不和主图的 K线/MA20 混在一起
 const SUB_LEGEND_STYLE = { left: '10%', itemWidth: 12, itemHeight: 8, itemGap: 12, textStyle: { fontSize: 11 } };
 
@@ -185,6 +216,8 @@ const StockKlineChart = ({
   eventsUrl,
   // 雪球持仓历史由页面取好传进来（行情摘要的「雪球持仓排行」也用同一份，避免重复请求）
   xueqiuHistory = EMPTY_XUEQIU_HISTORY,
+  // 个股历史日级主力资金流（A股），有数据时在 MACD 下面加一个副图
+  fundFlowHistory = EMPTY_FUND_FLOW_HISTORY,
   height = 600,
 }) => {
   const [loading, setLoading] = useState(true);
@@ -314,9 +347,19 @@ const StockKlineChart = ({
     [processedKlines, xueqiuHistory],
   );
   const hasXueqiuPane = useMemo(() => xueqiuPoints.some(point => point && point.weight !== null), [xueqiuPoints]);
+  const fundFlowPoints = useMemo(
+    () => alignFundFlowHistory(processedKlines.map(item => formatDateKey(item.timestamp)), fundFlowHistory),
+    [processedKlines, fundFlowHistory],
+  );
+  const hasFundFlowPane = useMemo(() => fundFlowPoints.some(Boolean), [fundFlowPoints]);
   const paneLayout = useMemo(
-    () => buildKlinePaneLayout(height, hasXueqiuPane ? ['volume', 'macd', 'xueqiu'] : ['volume', 'macd']),
-    [height, hasXueqiuPane],
+    () => buildKlinePaneLayout(height, [
+      'volume',
+      'macd',
+      ...(hasFundFlowPane ? ['fundflow'] : []),
+      ...(hasXueqiuPane ? ['xueqiu'] : []),
+    ]),
+    [height, hasFundFlowPane, hasXueqiuPane],
   );
 
   const getChartOption = useCallback(() => {
@@ -535,6 +578,34 @@ const StockKlineChart = ({
         tooltip: { show: false },
       },
     );
+
+    // 主力资金副图：每日主力(超大单+大单)净额，红柱净流入、绿柱净流出
+    const fundFlowPaneIndex = paneLayout.indexOf('fundflow');
+    if (fundFlowPaneIndex >= 0) {
+      series.push({
+        name: FUND_FLOW_SERIES_NAME,
+        type: 'bar',
+        xAxisIndex: fundFlowPaneIndex,
+        yAxisIndex: fundFlowPaneIndex,
+        data: fundFlowPoints.map(point => (point
+          ? {
+            value: point.mainNet,
+            // 东财实时补的（日终同步前、含今天盘中）画半透明，和已同步的定稿数据区分开
+            itemStyle: { color: point.mainNet >= 0 ? UP_COLOR : DOWN_COLOR, opacity: point.live ? 0.55 : 1 },
+          }
+          : null)),
+        itemStyle: { color: UP_COLOR },
+        barWidth: '60%',
+        tooltip: { show: false },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          label: { show: false },
+          lineStyle: { color: '#bfbfbf', width: 1, type: 'solid' },
+          data: [{ yAxis: 0 }],
+        },
+      });
+    }
 
     // 雪球持仓副图：综合权重曲线 + 每个快照日的 5 日权价比方向（新/平/加/吸/抛/减）
     const xueqiuPaneIndex = paneLayout.indexOf('xueqiu');
@@ -848,6 +919,21 @@ const StockKlineChart = ({
                 </div>
               `;
             }
+            const fundFlowPoint = fundFlowPoints[dataIndex];
+            if (fundFlowPoint) {
+              const flowColor = value => (value >= 0 ? UP_COLOR : DOWN_COLOR);
+              const flowSpan = (label, value) => (Number.isFinite(value)
+                ? `<span style="color:#999;margin-left:8px;">${label} <span style="color:${flowColor(value)};">${formatFlowAmount(value)}</span></span>`
+                : '');
+              result += `
+                <div style="margin-bottom: 4px;">
+                  <span style="color: #666;">主力净流入：</span><span style="color: ${flowColor(fundFlowPoint.mainNet)};">${formatFlowAmount(fundFlowPoint.mainNet)}</span>
+                  ${Number.isFinite(fundFlowPoint.mainNetPct) ? `<span style="color:#999;margin-left:8px;">占比 ${formatNumber(fundFlowPoint.mainNetPct, 2)}%</span>` : ''}
+                  ${flowSpan('超大单', fundFlowPoint.superNet)}${flowSpan('大单', fundFlowPoint.largeNet)}
+                  ${fundFlowPoint.live ? '<span style="color:#999;margin-left:8px;">(东财实时，未同步)</span>' : ''}
+                </div>
+              `;
+            }
             const xueqiuPoint = xueqiuPoints[dataIndex];
             if (xueqiuPoint && xueqiuPoint.weight !== null) {
               const meta = XUEQIU_DIRECTION_META[xueqiuPoint.direction];
@@ -957,7 +1043,12 @@ const StockKlineChart = ({
         top: paneLayout.legendTops.macd,
         data: [MACD_HISTOGRAM_SERIES_NAME, 'DIF', 'DEA'],
         formatter: name => (name === MACD_HISTOGRAM_SERIES_NAME ? `${macdLabel} 柱` : name),
-      }, ...(xueqiuPaneIndex >= 0 ? [{
+      }, ...(fundFlowPaneIndex >= 0 ? [{
+        ...SUB_LEGEND_STYLE,
+        top: paneLayout.legendTops.fundflow,
+        data: [FUND_FLOW_SERIES_NAME],
+        formatter: name => `${name}（超大单+大单，红=流入 / 绿=流出）`,
+      }] : []), ...(xueqiuPaneIndex >= 0 ? [{
         ...SUB_LEGEND_STYLE,
         top: paneLayout.legendTops.xueqiu,
         data: [XUEQIU_WEIGHT_SERIES_NAME, XUEQIU_DIRECTION_SERIES_NAME],
@@ -965,7 +1056,7 @@ const StockKlineChart = ({
           ? `${name}（新进/持平/顺势加仓/逆势吸筹/借涨减仓/减仓）`
           : name),
       }] : [])],
-      // 窗格上下叠放：主图 / 成交量 / MACD / (雪球持仓)，像素位置由 buildKlinePaneLayout 统一给出。
+      // 窗格上下叠放：主图 / 成交量 / MACD / (主力资金) / (雪球持仓)，像素位置由 buildKlinePaneLayout 统一给出。
       // 日期标签只留在最下面那个窗格上，中间几处重复的日期轴纯属噪声。
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       grid: paneLayout.grids.map(grid => ({ left: '10%', right: '8%', top: grid.top, height: grid.height })),
@@ -1011,6 +1102,15 @@ const StockKlineChart = ({
           splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
           axisLabel: { fontSize: 10, formatter: value => formatNumber(value, 2) }
         },
+        ...(fundFlowPaneIndex >= 0 ? [{
+          // 不开 scale：窗口里全是净流入(或全是净流出)时柱子也要从 0 起画
+          gridIndex: fundFlowPaneIndex,
+          splitNumber: 2,
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: true, lineStyle: { color: '#f0f0f0' } },
+          axisLabel: { fontSize: 10, formatter: value => formatFlowAmount(value, 1) }
+        }] : []),
         ...(xueqiuPaneIndex >= 0 ? [{
           scale: true,
           gridIndex: xueqiuPaneIndex,
@@ -1044,6 +1144,7 @@ const StockKlineChart = ({
     chartEvents,
     macdParams,
     paneLayout,
+    fundFlowPoints,
     xueqiuPoints,
     processedKlines,
     showSupportResistance,
@@ -1202,7 +1303,7 @@ const StockKlineChart = ({
         <Spin size="large" />
       ) : (
         <ReactECharts
-          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}-${macdParams.fast}-${macdParams.slow}-${macdParams.signal}-${hasXueqiuPane}`}
+          key={`${symbol}-${supportResistanceWindow}-${volumeStdDevMultiplier}-${showSupportResistance}-${enableTurnoverDecay}-${valuationHistory.length}-${valuationDateOffsetDays}-${macdParams.fast}-${macdParams.slow}-${macdParams.signal}-${hasFundFlowPane}-${hasXueqiuPane}`}
           option={chartOption}
           notMerge={false}
           onChartReady={handleChartReady}

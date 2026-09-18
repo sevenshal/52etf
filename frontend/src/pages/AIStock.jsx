@@ -642,7 +642,7 @@ const AIStock = () => {
   }, [paperEnabled, paperTopPositions, paperBottomPositions, paperBuyTopN, paperBuyMinConfidence, paperPositionPct, paperStopLossFullPct, paperTradingStartMinute, paperHoldEvalEnabled, paperChanEngine, paperChanBuyTypes, paperChanSellTypes, paperAiSellGraceDays, paperTargetProfitPct]);
 
   const curveOption = useMemo(() => {
-    const rows = curve.slice(-600);
+    const rows = curve;
     if (!rows.length) return null;
     return {
       grid: { left: 58, right: 22, top: 28, bottom: 42 },

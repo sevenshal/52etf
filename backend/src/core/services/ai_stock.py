@@ -2885,9 +2885,21 @@ class AIStockPaperTradingService:
             }
 
     def equity_curve(self) -> List[Dict[str, Any]]:
+        """日频净值曲线：每个交易日取最后一个分钟点（当天即最新点）。
+
+        净值按分钟落库，一天 200+ 条；不能对原始行做升序 limit，否则只剩最早几天。
+        """
         with get_db_ctx() as db:
-            rows = db.query(AIStockPaperEquity).filter(AIStockPaperEquity.portfolio_id == 1).order_by(AIStockPaperEquity.recorded_at).limit(2000).all()
-            return [{"recorded_at": row.recorded_at, "total_equity": row.total_equity, "cash": row.cash, "market_value": row.market_value} for row in rows]
+            rows = (
+                db.query(AIStockPaperEquity.recorded_at, AIStockPaperEquity.total_equity, AIStockPaperEquity.cash, AIStockPaperEquity.market_value)
+                .filter(AIStockPaperEquity.portfolio_id == 1)
+                .order_by(AIStockPaperEquity.recorded_at)
+                .all()
+            )
+        daily: Dict[date, Any] = {}
+        for row in rows:
+            daily[row.recorded_at.date()] = row
+        return [{"recorded_at": row.recorded_at, "total_equity": row.total_equity, "cash": row.cash, "market_value": row.market_value} for _, row in sorted(daily.items())]
 
 
 def _nested_payload_rows(payload: Any, keys: Tuple[str, ...]) -> List[Dict[str, Any]]:

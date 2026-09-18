@@ -25,6 +25,7 @@ import {
 import ReactECharts from 'echarts-for-react';
 import dayjs from 'dayjs';
 import request from '../utils/request';
+import StockDetailLink from '../components/StockDetailLink';
 import './AStockFundFlow.css';
 
 const { Text } = Typography;
@@ -123,7 +124,9 @@ const industryColumns = [
     width: 150,
     render: (_, record) => (
       <Space direction="vertical" size={0}>
-        <Text>{record.leader || '-'}</Text>
+        {record.leader_code
+          ? <StockDetailLink symbol={record.leader_code}>{record.leader || record.leader_code}</StockDetailLink>
+          : <Text>{record.leader || '-'}</Text>}
         <SignedPercent value={record.leader_change_pct} />
       </Space>
     ),
@@ -239,7 +242,7 @@ const AStockFundFlow = ({ embedded = false }) => {
         <Space className="fund-flow-stock-cell" size={6}>
           <Space direction="vertical" size={0}>
             <Text strong>{record.name || record.code}</Text>
-            <Text type="secondary">{record.code}</Text>
+            <StockDetailLink symbol={record.code}>{record.code}</StockDetailLink>
           </Space>
           <Tooltip title="查询资金流向">
             <Button
@@ -565,7 +568,7 @@ const AStockFundFlow = ({ embedded = false }) => {
                 <Card
                   className="fund-flow-chart-card"
                   title={`${stock.name || stock.code} 分钟资金`}
-                  extra={<Tag>{stock.code}</Tag>}
+                  extra={<Tag><StockDetailLink symbol={stock.code}>{stock.code}</StockDetailLink></Tag>}
                 >
                   {stockMinuteOption ? (
                     <ReactECharts option={stockMinuteOption} style={{ height: 300 }} notMerge lazyUpdate />
