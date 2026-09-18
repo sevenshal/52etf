@@ -66,6 +66,7 @@ const alignFundFlowHistory = (dates, rows = []) => {
       largeNet: toFiniteNumber(row.large_net),
       midNet: toFiniteNumber(row.mid_net),
       smallNet: toFiniteNumber(row.small_net),
+      live: Boolean(row.live),
     };
   });
 };
@@ -587,7 +588,11 @@ const StockKlineChart = ({
         xAxisIndex: fundFlowPaneIndex,
         yAxisIndex: fundFlowPaneIndex,
         data: fundFlowPoints.map(point => (point
-          ? { value: point.mainNet, itemStyle: { color: point.mainNet >= 0 ? UP_COLOR : DOWN_COLOR } }
+          ? {
+            value: point.mainNet,
+            // 东财实时补的（日终同步前、含今天盘中）画半透明，和已同步的定稿数据区分开
+            itemStyle: { color: point.mainNet >= 0 ? UP_COLOR : DOWN_COLOR, opacity: point.live ? 0.55 : 1 },
+          }
           : null)),
         itemStyle: { color: UP_COLOR },
         barWidth: '60%',
@@ -925,6 +930,7 @@ const StockKlineChart = ({
                   <span style="color: #666;">主力净流入：</span><span style="color: ${flowColor(fundFlowPoint.mainNet)};">${formatFlowAmount(fundFlowPoint.mainNet)}</span>
                   ${Number.isFinite(fundFlowPoint.mainNetPct) ? `<span style="color:#999;margin-left:8px;">占比 ${formatNumber(fundFlowPoint.mainNetPct, 2)}%</span>` : ''}
                   ${flowSpan('超大单', fundFlowPoint.superNet)}${flowSpan('大单', fundFlowPoint.largeNet)}
+                  ${fundFlowPoint.live ? '<span style="color:#999;margin-left:8px;">(东财实时，未同步)</span>' : ''}
                 </div>
               `;
             }

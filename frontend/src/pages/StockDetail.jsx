@@ -17,6 +17,15 @@ const FIVE_YEAR_TRADING_BARS = 1260;
 // 雪球历史接口一次最多 2000 条；5 年 K 线约 1250 个交易日，1300 足够覆盖
 const XUEQIU_HISTORY_LIMIT = 1300;
 const PE_BAND_STORAGE_KEY = 'stockDetail.peBandEnabled';
+const FUND_FLOW_REFRESH_MS = 60 * 1000;
+
+// 工作日 9:25–15:05（北京时间）才刷新盘中资金流；节假日多请求几次无妨，库里没有新数据
+const isAStockTradingTime = () => {
+  const beijing = new Date(Date.now() + (new Date().getTimezoneOffset() + 480) * 60 * 1000);
+  const day = beijing.getDay();
+  const minutes = beijing.getHours() * 60 + beijing.getMinutes();
+  return day >= 1 && day <= 5 && minutes >= 9 * 60 + 25 && minutes <= 15 * 60 + 5;
+};
 
 const readPeBandPreference = () => {
   try {
@@ -73,18 +82,26 @@ const StockDetail = () => {
     [xueqiuPayload],
   );
 
-  // 历史日级主力资金流：K 线下方的主力资金副图
+  // 历史日级主力资金流：K 线下方的主力资金副图。后端把日终同步还没写入的日子
+  // （含今天盘中）用东财实时数据补上，盘中每分钟刷新一次，跟实时 K 线同步
   const [fundFlowHistory, setFundFlowHistory] = useState([]);
   useEffect(() => {
     setFundFlowHistory([]);
     if (!isAStock) return undefined;
     let cancelled = false;
-    request.get(`/api/stock/a-stock/fund-flow/${normalizedSymbol}`)
+    const load = () => request.get(`/api/stock/a-stock/fund-flow/${normalizedSymbol}`)
       .then(({ data }) => {
         if (!cancelled) setFundFlowHistory(data || []);
       })
       .catch(error => console.error('获取历史资金流失败:', error));
-    return () => { cancelled = true; };
+    load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && isAStockTradingTime()) load();
+    }, FUND_FLOW_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [isAStock, normalizedSymbol]);
 
   useEffect(() => {
