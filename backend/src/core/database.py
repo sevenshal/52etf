@@ -949,6 +949,8 @@ class SoxlFearStrategyState(Base):
     cooldown_remaining_days = Column(Integer, nullable=False, default=0)
     greed_peak_price = Column(Float)
     take_profit_cycle_sell_count = Column(Integer, nullable=False, default=0)
+    # 卖出信号已成立、等待跌破 MA5 确认的信号日；NULL = 没有挂起的卖出信号
+    pending_sell_signal_date = Column(Date)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -1004,6 +1006,15 @@ class AStockFearStrategyConfig(Base):
     sub2_volume_signal_symbol = Column(String, nullable=True)
     sub2_buy_threshold = Column(Float, nullable=False, default=20.0)
     sub2_volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
+    # 第三候补（四标的轮动，可选）
+    sub3_symbol = Column(String, nullable=True)
+    sub3_fear_source = Column(String, nullable=True)
+    sub3_volume_signal_symbol = Column(String, nullable=True)
+    sub3_buy_threshold = Column(Float, nullable=False, default=20.0)
+    sub3_volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
+    # 卖出跌破MA5确认（与回测 sell_ma5_confirm 同口径）：off=贪婪即卖；all=都等跌破5日均线；
+    # non_main=只有候补等，主标的照旧。等待期间卖出信号一直挂着，且不发起换仓。
+    sell_ma5_confirm = Column(String(16), nullable=False, default="off")
     # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
     swap_threshold = Column(Float, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=30.0)
@@ -1052,6 +1063,8 @@ class AStockFearStrategyState(Base):
     cooldown_remaining_days = Column(Integer, nullable=False, default=0)
     greed_peak_price = Column(Float)
     take_profit_cycle_sell_count = Column(Integer, nullable=False, default=0)
+    # 卖出信号已成立、等待跌破 MA5 确认的信号日；NULL = 没有挂起的卖出信号
+    pending_sell_signal_date = Column(Date)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -2448,6 +2461,31 @@ def ensure_a_stock_fear_strategy_schema():
                     f"UPDATE a_stock_fear_strategy_configs SET {column_name} = 100 - {legacy_column} "
                     f"WHERE {legacy_column} IS NOT NULL"
                 ))
+
+        # 第三候补 + 卖出跌破MA5确认（老库补列，默认值保持原有行为：无第三候补、不等 MA5）
+        config_additions = [
+            ("sub3_symbol", "VARCHAR"),
+            ("sub3_fear_source", "VARCHAR"),
+            ("sub3_volume_signal_symbol", "VARCHAR"),
+            ("sub3_buy_threshold", "FLOAT NOT NULL DEFAULT 20.0"),
+            ("sub3_volume_ratio_threshold", "FLOAT NOT NULL DEFAULT 1.3"),
+            ("sell_ma5_confirm", "VARCHAR(16) NOT NULL DEFAULT 'off'"),
+        ]
+        for column_name, column_type in config_additions:
+            if column_name in columns:
+                continue
+            conn.execute(text(
+                f"ALTER TABLE a_stock_fear_strategy_configs ADD COLUMN {column_name} {column_type}"
+            ))
+
+        state_columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_states)")).fetchall()
+        }
+        if state_columns and "pending_sell_signal_date" not in state_columns:
+            conn.execute(text(
+                "ALTER TABLE a_stock_fear_strategy_states ADD COLUMN pending_sell_signal_date DATE"
+            ))
 
 ensure_a_stock_fear_strategy_schema()
 

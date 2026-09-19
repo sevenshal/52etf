@@ -76,6 +76,11 @@ logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_RUN_TIME = "09:30"
 VOLUME_WINDOW = 20
+# 卖出跌破 MA5 确认用的均线窗口（与回测 soxl_fear_backtest.MA5_WINDOW 同口径）
+MA5_WINDOW = 5
+SELL_MA5_CONFIRM_OFF = "off"
+SELL_MA5_CONFIRM_ALL = "all"
+SELL_MA5_CONFIRM_NON_MAIN = "non_main"
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 MAIN_DB_WRITE_RETRY_ATTEMPTS = 4
 MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
@@ -285,6 +290,23 @@ class AStockFearStrategyTrader:
         return frame.dropna(subset=["close"]).sort_values("trade_date").reset_index(drop=True)
 
     @staticmethod
+    def _below_ma5_at(bars: pd.DataFrame, signal_date: date) -> Optional[bool]:
+        """量比来源标的在信号日收盘是否跌破自身 5 日均线；数据不足返回 None（视为未确认）。"""
+        if bars is None or bars.empty:
+            return None
+        history = bars[bars["trade_date"] <= signal_date].sort_values("trade_date")
+        if len(history) < MA5_WINDOW:
+            return None
+        last_row = history.iloc[-1]
+        if last_row["trade_date"] != signal_date:
+            return None
+        closes = pd.to_numeric(history["close"].tail(MA5_WINDOW), errors="coerce")
+        if closes.isna().any():
+            return None
+        close_value = float(last_row["close"])
+        return bool(close_value < float(closes.mean()))
+
+    @staticmethod
     def _volume_ratio_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
         """信号日量比 = 当日成交量 / 前 20 日均量（shift(1) 语义，与回测一致）。"""
         if bars is None or bars.empty:
@@ -326,6 +348,7 @@ class AStockFearStrategyTrader:
         main_symbol = normalize_external_symbol(config.symbol)
         sub_symbol = normalize_external_symbol(config.sub_symbol) if getattr(config, "sub_symbol", None) else None
         sub2_symbol = normalize_external_symbol(config.sub2_symbol) if getattr(config, "sub2_symbol", None) else None
+        sub3_symbol = normalize_external_symbol(config.sub3_symbol) if getattr(config, "sub3_symbol", None) else None
         if not main_symbol:
             raise ValueError("交易标的格式不正确")
 
@@ -367,6 +390,7 @@ class AStockFearStrategyTrader:
             main_info = _position_info(main_symbol)
             sub_info = _position_info(sub_symbol) if sub_symbol else {"shares": 0, "available_shares": 0, "avg_cost": 0.0}
             sub2_info = _position_info(sub2_symbol) if sub2_symbol else {"shares": 0, "available_shares": 0, "avg_cost": 0.0}
+            sub3_info = _position_info(sub3_symbol) if sub3_symbol else {"shares": 0, "available_shares": 0, "avg_cost": 0.0}
 
             try:
                 valuation = await calculate_sub_account_net_asset(db, sub_account)
@@ -395,7 +419,9 @@ class AStockFearStrategyTrader:
                 ExternalTradingOrder.account_id == config.account_id,
                 ExternalTradingOrder.external_trading_account_id == account.id,
                 ExternalTradingOrder.sub_account_id == sub_account.id,
-                ExternalTradingOrder.symbol.in_([main_symbol, sub_symbol, sub2_symbol] if sub2_symbol else ([main_symbol, sub_symbol] if sub_symbol else [main_symbol])),
+                ExternalTradingOrder.symbol.in_(
+                    [item for item in (main_symbol, sub_symbol, sub2_symbol, sub3_symbol) if item]
+                ),
                 ExternalTradingOrder.status.in_(list(ACTIVE_ORDER_STATUSES)),
             ).first() is not None
 
@@ -405,6 +431,7 @@ class AStockFearStrategyTrader:
                 symbol=main_symbol,
                 sub_symbol=sub_symbol,
                 sub2_symbol=sub2_symbol,
+                sub3_symbol=sub3_symbol,
                 shares=max(0, main_info["shares"]),
                 available_shares=max(0, main_info["available_shares"]),
                 avg_cost=main_info["avg_cost"],
@@ -414,6 +441,9 @@ class AStockFearStrategyTrader:
                 sub2_shares=max(0, sub2_info["shares"]),
                 sub2_available_shares=max(0, sub2_info["available_shares"]),
                 sub2_avg_cost=sub2_info["avg_cost"],
+                sub3_shares=max(0, sub3_info["shares"]),
+                sub3_available_shares=max(0, sub3_info["available_shares"]),
+                sub3_avg_cost=sub3_info["avg_cost"],
                 available_cash=available_cash,
                 portfolio_value=max(portfolio_value, 1.0),
                 has_today_order=has_open_order,
@@ -423,14 +453,17 @@ class AStockFearStrategyTrader:
 
     @staticmethod
     def _position_shares_for_symbol(snapshot: SimpleNamespace, symbol: str, config: SimpleNamespace) -> int:
-        """按标的取快照持仓（区分主/sub/sub2，换仓目标可能是 sub2）。"""
+        """按标的取快照持仓（区分主/sub/sub2/sub3，换仓目标可能是任一候补）。"""
         main_symbol = normalize_external_symbol(config.symbol)
         sub_symbol = normalize_external_symbol(config.sub_symbol) if getattr(config, "sub_symbol", None) else None
         sub2_symbol = normalize_external_symbol(config.sub2_symbol) if getattr(config, "sub2_symbol", None) else None
+        sub3_symbol = normalize_external_symbol(config.sub3_symbol) if getattr(config, "sub3_symbol", None) else None
         if symbol == main_symbol:
             return int(snapshot.shares)
         if sub2_symbol and symbol == sub2_symbol:
             return int(snapshot.sub2_shares or 0)
+        if sub3_symbol and symbol == sub3_symbol:
+            return int(snapshot.sub3_shares or 0)
         return int(snapshot.sub_shares or 0)
 
     async def _sync_target_order(
@@ -543,6 +576,7 @@ class AStockFearStrategyTrader:
                 state.cooldown_remaining_days = int(state_values.cooldown_remaining_days or 0)
                 state.greed_peak_price = state_values.greed_peak_price
                 state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
+                state.pending_sell_signal_date = getattr(state_values, "pending_sell_signal_date", None)
 
                 db.add(
                     AStockFearStrategyLog(
@@ -675,6 +709,9 @@ class AStockFearStrategyTrader:
                     config.valuation_force_sell_greed = _optional_float(
                         getattr(persisted_config, "valuation_force_sell_greed", None)
                     )
+                    config.sell_ma5_confirm = (
+                        getattr(persisted_config, "sell_ma5_confirm", None) or SELL_MA5_CONFIRM_OFF
+                    )
 
                 state_row = db.query(AStockFearStrategyState).filter(
                     AStockFearStrategyState.config_id == config_id
@@ -687,6 +724,7 @@ class AStockFearStrategyTrader:
                     cooldown_remaining_days=int(getattr(state_row, "cooldown_remaining_days", 0) or 0),
                     greed_peak_price=getattr(state_row, "greed_peak_price", None),
                     take_profit_cycle_sell_count=int(getattr(state_row, "take_profit_cycle_sell_count", 0) or 0),
+                    pending_sell_signal_date=getattr(state_row, "pending_sell_signal_date", None),
                 )
 
             # 已完成数据：恐贪 + ETF 日线（含量比）
@@ -765,6 +803,33 @@ class AStockFearStrategyTrader:
                         sub2_log_z = None
                     sub2_fear_label = _fear_source_label(getattr(config, "sub2_fear_source", None) or "qqq_clone")
 
+            # 第三候补数据（可选，四标的轮动）：恐贪 + 量比（独立阈值）
+            sub3_symbol = normalize_external_symbol(config.sub3_symbol) if getattr(config, "sub3_symbol", None) else None
+            sub3_fear_score = None
+            sub3_volume_ratio = None
+            sub3_log_z = None
+            sub3_fear_label = ""
+            sub3_bars = None
+            sub3_fear_map: Dict[date, float] = {}
+            if sub3_symbol:
+                sub3_index_symbol = _fear_source_index_symbol(
+                    getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi"
+                )
+                if sub3_index_symbol:
+                    sub3_fear_map = self._fetch_fear_map(sub3_index_symbol, lookback_start, signal_date)
+                    if signal_date in sub3_fear_map:
+                        sub3_fear_score = float(sub3_fear_map[signal_date])
+                    sub3_volume_symbol = normalize_external_symbol(config.sub3_volume_signal_symbol or sub3_symbol) or sub3_symbol
+                    sub3_bars = self._fetch_etf_bars(sub3_volume_symbol, lookback_start, signal_date)
+                    sub3_volume_ratio = self._volume_ratio_at(sub3_bars, signal_date)
+                    if use_log_z:
+                        sub3_log_z = self._log_z_at(sub3_bars, signal_date)
+                    else:
+                        sub3_log_z = None
+                    sub3_fear_label = _fear_source_label(
+                        getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi"
+                    )
+
             # 估值点位闸门（可选，与回测同一口径）：各腿用自己恐贪来源指数的信号日估值点位
             valuation_window = int(getattr(config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW)
             valuation_buy_max = _optional_float(getattr(config, "valuation_buy_max", None))
@@ -781,6 +846,11 @@ class AStockFearStrategyTrader:
                 if sub2_symbol:
                     leg_sources.append((
                         "sub2", getattr(config, "sub2_fear_source", None) or "qqq_clone", sub2_fear_score is not None,
+                    ))
+                if sub3_symbol:
+                    leg_sources.append((
+                        "sub3", getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi",
+                        sub3_fear_score is not None,
                     ))
                 not_ready_labels = []
                 for leg, leg_source, leg_has_fear in leg_sources:
@@ -804,6 +874,7 @@ class AStockFearStrategyTrader:
             main_valuation = leg_valuations.get("main")
             sub_valuation = leg_valuations.get("sub")
             sub2_valuation = leg_valuations.get("sub2")
+            sub3_valuation = leg_valuations.get("sub3")
 
             # 实时价格（主+候补+第二候补），hub quote + LongPort 兜底
             price_symbols = [symbol]
@@ -811,6 +882,8 @@ class AStockFearStrategyTrader:
                 price_symbols.append(sub_symbol)
             if sub2_symbol:
                 price_symbols.append(sub2_symbol)
+            if sub3_symbol:
+                price_symbols.append(sub3_symbol)
             price_map: Dict[str, float] = {}
             try:
                 price_details = await get_realtime_price_details(
@@ -829,7 +902,13 @@ class AStockFearStrategyTrader:
             main_price = price_map.get(normalize_external_symbol(symbol), 0.0)
             sub_price = price_map.get(normalize_external_symbol(sub_symbol), 0.0) if sub_symbol else 0.0
             sub2_price = price_map.get(normalize_external_symbol(sub2_symbol), 0.0) if sub2_symbol else 0.0
-            if main_price <= 0 and (not sub_symbol or sub_price <= 0) and (not sub2_symbol or sub2_price <= 0):
+            sub3_price = price_map.get(normalize_external_symbol(sub3_symbol), 0.0) if sub3_symbol else 0.0
+            if (
+                main_price <= 0
+                and (not sub_symbol or sub_price <= 0)
+                and (not sub2_symbol or sub2_price <= 0)
+                and (not sub3_symbol or sub3_price <= 0)
+            ):
                 log_message = "无法获取标的实时价格，跳过本次检查。"
                 self._persist_run_result(
                     config_id=config_id, account_id=config.account_id, symbol=symbol,
@@ -841,11 +920,19 @@ class AStockFearStrategyTrader:
             portfolio_value = float(snapshot.portfolio_value or 0)
             available_cash = float(snapshot.available_cash or 0)
 
-            # 持仓推断：sub2 > sub > main > 空仓（子账户同时只持有其中一只）
+            # 持仓推断：sub3 > sub2 > sub > main > 空仓（子账户同时只持有其中一只）
             main_shares = int(snapshot.shares)
             sub_shares = int(snapshot.sub_shares or 0) if sub_symbol else 0
             sub2_shares = int(snapshot.sub2_shares or 0) if sub2_symbol else 0
-            if sub2_shares > 0:
+            sub3_shares = int(snapshot.sub3_shares or 0) if sub3_symbol else 0
+            if sub3_shares > 0:
+                holding = "sub3"
+                holding_symbol = sub3_symbol
+                shares = sub3_shares
+                available_shares = int(snapshot.sub3_available_shares or sub3_shares)
+                avg_cost = float(snapshot.sub3_avg_cost or 0)
+                current_price = sub3_price
+            elif sub2_shares > 0:
                 holding = "sub2"
                 holding_symbol = sub2_symbol
                 shares = sub2_shares
@@ -872,7 +959,7 @@ class AStockFearStrategyTrader:
                 shares = 0
                 available_shares = 0
                 avg_cost = 0.0
-                current_price = main_price or sub_price or sub2_price
+                current_price = main_price or sub_price or sub2_price or sub3_price
             position_value = shares * current_price if holding else 0.0
             position_ratio_before = (position_value / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
@@ -883,6 +970,8 @@ class AStockFearStrategyTrader:
                 holding_bars, holding_fear_map = sub_bars, sub_fear_map
             elif holding == "sub2":
                 holding_bars, holding_fear_map = sub2_bars, sub2_fear_map
+            elif holding == "sub3":
+                holding_bars, holding_fear_map = sub3_bars, sub3_fear_map
             else:
                 holding_bars, holding_fear_map = bars, fear_map
 
@@ -960,12 +1049,27 @@ class AStockFearStrategyTrader:
                 and sub2_vol_ok
             )
             sub2_greedy = sub2_symbol is not None and sub2_fear_score is not None and sub2_fear_score >= float(config.greed_threshold)
+            # 第三候补信号（四标的轮动）
+            sub3_vol_ok = False
+            if sub3_symbol is not None and sub3_volume_ratio is not None:
+                if use_log_z:
+                    sub3_vol_ok = sub3_log_z is not None and sub3_log_z >= float(config.volume_z_threshold)
+                else:
+                    sub3_vol_ok = sub3_volume_ratio >= float(getattr(config, "sub3_volume_ratio_threshold", 1.3) or 1.3)
+            sub3_signal = (
+                sub3_symbol is not None
+                and sub3_fear_score is not None
+                and sub3_fear_score <= float(getattr(config, "sub3_buy_threshold", 20.0) or 20.0)
+                and sub3_vol_ok
+            )
+            sub3_greedy = sub3_symbol is not None and sub3_fear_score is not None and sub3_fear_score >= float(config.greed_threshold)
             # 估值点位闸门：买入需足够低估；卖出需足够高估（贪恐达到兜底阈值不看估值）
-            raw_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal}
-            raw_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy}
+            raw_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal, "sub3": sub3_signal}
+            raw_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy, "sub3": sub3_greedy}
             main_signal = main_signal and valuation_buy_allowed(main_valuation, valuation_buy_max)
             sub_signal = sub_signal and valuation_buy_allowed(sub_valuation, valuation_buy_max)
             sub2_signal = sub2_signal and valuation_buy_allowed(sub2_valuation, valuation_buy_max)
+            sub3_signal = sub3_signal and valuation_buy_allowed(sub3_valuation, valuation_buy_max)
             main_greedy = main_greedy and valuation_sell_allowed(
                 main_valuation, fear_score, valuation_sell_min, valuation_force_sell_greed,
             )
@@ -975,11 +1079,17 @@ class AStockFearStrategyTrader:
             sub2_greedy = sub2_greedy and valuation_sell_allowed(
                 sub2_valuation, sub2_fear_score, valuation_sell_min, valuation_force_sell_greed,
             )
+            sub3_greedy = sub3_greedy and valuation_sell_allowed(
+                sub3_valuation, sub3_fear_score, valuation_sell_min, valuation_force_sell_greed,
+            )
             valuation_blocked_message = ""
             if valuation_gate_enabled:
-                gated_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy}
-                gated_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal}
-                leg_labels = {"main": fear_label, "sub": sub_fear_label, "sub2": sub2_fear_label}
+                gated_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy, "sub3": sub3_greedy}
+                gated_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal, "sub3": sub3_signal}
+                leg_labels = {
+                    "main": fear_label, "sub": sub_fear_label,
+                    "sub2": sub2_fear_label, "sub3": sub3_fear_label,
+                }
                 if shares > 0 and holding and raw_greedy[holding] and not gated_greedy[holding]:
                     valuation_blocked_message = (
                         f"{leg_labels[holding]} 到达贪恐卖出阈值，但估值点位 "
@@ -987,13 +1097,48 @@ class AStockFearStrategyTrader:
                     )
                 elif shares <= 0:
                     blocked_labels = [
-                        leg_labels[leg] for leg in ("main", "sub", "sub2")
+                        leg_labels[leg] for leg in ("main", "sub", "sub2", "sub3")
                         if raw_signals[leg] and not gated_signals[leg]
                     ]
                     if blocked_labels:
                         valuation_blocked_message = (
                             f"{'、'.join(blocked_labels)} 极恐放量，但估值点位高于 {valuation_buy_max:g}（还不够便宜），不买入"
                         )
+            # 卖出跌破 MA5 确认：卖出信号成立后挂起，等持仓标的的量比来源收盘跌破 5 日均线再卖。
+            # 挂起期间持仓腿一直按"已出卖出信号"处理（即使贪恐回落），因此也不会发起换仓。
+            sell_ma5_mode = str(getattr(config, "sell_ma5_confirm", None) or SELL_MA5_CONFIRM_OFF)
+            sell_ma5_required = bool(holding) and shares > 0 and (
+                sell_ma5_mode == SELL_MA5_CONFIRM_ALL
+                or (sell_ma5_mode == SELL_MA5_CONFIRM_NON_MAIN and holding != "main")
+            )
+            sell_ma5_ok = True
+            sell_ma5_wait_message = ""
+            if not sell_ma5_required:
+                state.pending_sell_signal_date = None
+            else:
+                held_greedy_now = {
+                    "main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy, "sub3": sub3_greedy,
+                }.get(holding, False)
+                if held_greedy_now and not state.pending_sell_signal_date:
+                    state.pending_sell_signal_date = signal_date
+                if state.pending_sell_signal_date:
+                    if holding == "main":
+                        main_greedy = True
+                    elif holding == "sub":
+                        sub_greedy = True
+                    elif holding == "sub2":
+                        sub2_greedy = True
+                    elif holding == "sub3":
+                        sub3_greedy = True
+                    below_ma5 = self._below_ma5_at(holding_bars, signal_date)
+                    sell_ma5_ok = below_ma5 is True
+                    if not sell_ma5_ok:
+                        ma5_source_label = "数据不足" if below_ma5 is None else "未跌破5日均线"
+                        sell_ma5_wait_message = (
+                            f"卖出信号已成立（{state.pending_sell_signal_date}），"
+                            f"但 {holding_symbol} {ma5_source_label}，等待跌破5日均线再卖"
+                        )
+
             # 对称双轮动：换仓阈值非空时启用（恐贪超过阈值且另一标的有信号则换仓；空仓任一触发都买更恐慌的）
             use_swap = getattr(config, "swap_threshold", None) is not None
             swap_value = float(config.swap_threshold) if use_swap else None
@@ -1024,6 +1169,8 @@ class AStockFearStrategyTrader:
                     candidates.append(("sub", sub_symbol, sub_price, sub_fear_label, sub_fear_score))
                 if held_key != "sub2" and sub2_signal and sub2_price > 0 and sub2_fear_score is not None:
                     candidates.append(("sub2", sub2_symbol, sub2_price, sub2_fear_label, sub2_fear_score))
+                if held_key != "sub3" and sub3_signal and sub3_price > 0 and sub3_fear_score is not None:
+                    candidates.append(("sub3", sub3_symbol, sub3_price, sub3_fear_label, sub3_fear_score))
                 return min(candidates, key=lambda c: c[4]) if candidates else None
 
             # ---- 状态机：持有主/持有候补/空仓（use_swap=对称双轮动，否则主辅跷跷板） ----
@@ -1047,6 +1194,9 @@ class AStockFearStrategyTrader:
                     elif not shrink_sell_ok:
                         drawdown_reached = False
                         trailing_reason = "到达贪恐阈值但未缩量，等待缩量确认"
+                    if not sell_ma5_ok:
+                        drawdown_reached = False
+                        trailing_reason = sell_ma5_wait_message or "等待跌破5日均线确认"
                     sell_price_guard_passed = (not config.sell_price_above_avg_cost) or current_price > avg_cost
                     min_hold_shares = (
                         ceil(portfolio_value * (float(config.min_position_pct_after_take_profit) / 100.0) / current_price)
@@ -1101,7 +1251,7 @@ class AStockFearStrategyTrader:
                 elif holding == "sub":
                     if use_swap:
                         # 对称双轮动：候补贪恐>=卖出阈值 → 卖；候补恐贪>换仓阈值 且 主有信号 → 换主
-                        if sub_greedy and shrink_sell_ok:
+                        if sub_greedy and shrink_sell_ok and sell_ma5_ok:
                             order_action = "SELL"
                             order_symbol = holding_symbol
                             order_quantity = int(available_shares)
@@ -1151,8 +1301,11 @@ class AStockFearStrategyTrader:
                             trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
                     elif sub_greedy:
                         drawdown_from_peak = 0.0
-                        drawdown_reached = True
-                        trailing_reason = "到达贪恐阈值即卖（移动止盈=0）"
+                        drawdown_reached = sell_ma5_ok
+                        trailing_reason = (
+                            "到达贪恐阈值即卖（移动止盈=0）" if sell_ma5_ok
+                            else (sell_ma5_wait_message or "等待跌破5日均线确认")
+                        )
                         if float(config.trailing_stop_pct) > 0:
                             drawdown_from_peak = (
                                 (float(state.greed_peak_price) - current_price) / float(state.greed_peak_price) * 100
@@ -1180,8 +1333,8 @@ class AStockFearStrategyTrader:
                             trade_message = "候补处于止盈区，等待触发"
                 elif holding == "sub2":
                     if use_swap:
-                        # 三标的对称：第二候补贪恐>=卖出阈值 → 卖；恐贪>换仓阈值 且 其他有信号 → 换仓
-                        if sub2_greedy and shrink_sell_ok:
+                        # 多标的对称：第二候补贪恐>=卖出阈值 → 卖；恐贪>换仓阈值 且 其他有信号 → 换仓
+                        if sub2_greedy and shrink_sell_ok and sell_ma5_ok:
                             order_action = "SELL"
                             order_symbol = holding_symbol
                             order_quantity = int(available_shares)
@@ -1208,6 +1361,36 @@ class AStockFearStrategyTrader:
                                     )
                                 else:
                                     trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
+                elif holding == "sub3":
+                    if use_swap:
+                        # 多标的对称：第三候补贪恐>=卖出阈值 → 卖；恐贪>换仓阈值 且 其他有信号 → 换仓
+                        if sub3_greedy and shrink_sell_ok and sell_ma5_ok:
+                            order_action = "SELL"
+                            order_symbol = holding_symbol
+                            order_quantity = int(available_shares)
+                            order_message_template = (
+                                f"{sub3_fear_label} {sub3_fear_score:.2f}（{signal_date}）第三候补到达贪恐阈值即卖，"
+                                f"保持空仓，订单ID={{order_id}}"
+                            )
+                            position_ratio_after = 0.0
+                        elif sub3_fear_score is not None and sub3_fear_score > swap_value:
+                            target = _pick_swap_target("sub3")
+                            if target:
+                                t_key, t_symbol, t_price, t_label, t_fear = target
+                                sell_quantity = int(available_shares)
+                                sell_amount = sell_quantity * current_price
+                                trade_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
+                                if sell_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
+                                    order_action = "SELL_AND_BUY"
+                                    order_symbol = holding_symbol
+                                    order_target_symbol = t_symbol
+                                    order_quantity = sell_quantity
+                                    order_message_template = (
+                                        f"{sub3_fear_label} {sub3_fear_score:.2f} 恐贪>{swap_value:g} 且 {t_label} 出买入信号，"
+                                        f"卖出 {holding_symbol} 换到 {t_symbol}，订单ID={{order_id}}"
+                                    )
+                                else:
+                                    trade_message = "换仓信号成立，但可卖数量过小或未达到调仓阈值"
             elif log_action != "SKIP" and can_trade and not order_action:
                 # 空仓：对称双轮动=谁触发买谁（都触发买恐贪最低的）；主辅跷跷板=主标的优先
                 if use_swap:
@@ -1218,6 +1401,8 @@ class AStockFearStrategyTrader:
                         cands.append((sub_symbol, sub_price, sub_fear_label, sub_fear_score))
                     if sub2_signal and sub2_price > 0 and sub2_fear_score is not None:
                         cands.append((sub2_symbol, sub2_price, sub2_fear_label, sub2_fear_score))
+                    if sub3_signal and sub3_price > 0 and sub3_fear_score is not None:
+                        cands.append((sub3_symbol, sub3_price, sub3_fear_label, sub3_fear_score))
                     if cands:
                         t_symbol, t_price, t_label, t_fear = min(cands, key=lambda c: c[3])
                         buy_amount = portfolio_value * (float(config.buy_position_pct) / 100.0)
@@ -1268,6 +1453,9 @@ class AStockFearStrategyTrader:
                     else:
                         trade_message = "候补买入信号成立，但可买数量过小或未达到调仓阈值"
 
+            if log_action != "SKIP" and not order_action and sell_ma5_wait_message:
+                # 挂起的卖出信号优先说明，避免被"处于止盈区未触发"这类兜底文案盖掉
+                trade_message = sell_ma5_wait_message
             if log_action != "SKIP" and not order_action and not trade_message:
                 if not can_trade:
                     trade_message = f"处于冷却期，剩余 {state.cooldown_remaining_days} 个交易日"
@@ -1300,6 +1488,8 @@ class AStockFearStrategyTrader:
                         target_price = main_price
                     elif sub2_symbol and target_symbol == sub2_symbol:
                         target_price = sub2_price
+                    elif sub3_symbol and target_symbol == sub3_symbol:
+                        target_price = sub3_price
                     else:
                         target_price = sub_price
                     buy_cash = available_cash + order_quantity * current_price
@@ -1334,6 +1524,7 @@ class AStockFearStrategyTrader:
                     state.cooldown_remaining_days = int(config.cooldown_days)
                     state.greed_peak_price = None
                     state.take_profit_cycle_sell_count = 0
+                    state.pending_sell_signal_date = None
                 else:
                     order_id = await self._sync_target_order(
                         config,
@@ -1347,6 +1538,7 @@ class AStockFearStrategyTrader:
                     trade_action = order_action
                     trade_quantity = order_quantity
                     state.cooldown_remaining_days = int(config.cooldown_days)
+                    state.pending_sell_signal_date = None
                     if trade_action == "SELL":
                         state.take_profit_cycle_sell_count += 1
                         if shares - trade_quantity <= 0 or state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
@@ -1369,6 +1561,10 @@ class AStockFearStrategyTrader:
                 trade_fear = sub2_fear_score if sub2_fear_score is not None else fear_score
                 trade_vr = sub2_volume_ratio if sub2_volume_ratio is not None else volume_ratio
                 trade_fear_label = sub2_fear_label or fear_label
+            elif sub3_symbol and order_symbol == sub3_symbol:
+                trade_fear = sub3_fear_score if sub3_fear_score is not None else fear_score
+                trade_vr = sub3_volume_ratio if sub3_volume_ratio is not None else volume_ratio
+                trade_fear_label = sub3_fear_label or fear_label
             else:
                 trade_fear = fear_score
                 trade_vr = volume_ratio
@@ -1384,6 +1580,8 @@ class AStockFearStrategyTrader:
                     valuation_parts.append(f"sub={_format_valuation(sub_valuation)}")
                 if sub2_symbol:
                     valuation_parts.append(f"sub2={_format_valuation(sub2_valuation)}")
+                if sub3_symbol:
+                    valuation_parts.append(f"sub3={_format_valuation(sub3_valuation)}")
                 log_message += f" | valuation_position_{valuation_window}={','.join(valuation_parts)}"
             self._persist_run_result(
                 config_id=config_id,

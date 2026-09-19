@@ -171,3 +171,37 @@ def test_schema_upgrade_converts_legacy_gate_columns(tmp_path):
     assert {"valuation_buy_max", "valuation_sell_min"} <= columns
     # 旧"点位 >= 70 才买 / <= 20 才卖" = 新"点位 <= 30 才买 / >= 80 才卖"；空值保持关闭
     assert [tuple(row) for row in rows] == [(1, 30.0, 80.0), (2, None, None)]
+
+
+def test_schema_upgrade_adds_sub3_and_sell_ma5_columns(tmp_path):
+    # 旧表：没有第三候补与卖出MA5确认列，也没有状态表的挂起列
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE a_stock_fear_strategy_configs (id INTEGER PRIMARY KEY, symbol VARCHAR, "
+            "valuation_buy_max FLOAT, valuation_sell_min FLOAT)"
+        ))
+        conn.execute(text(
+            "INSERT INTO a_stock_fear_strategy_configs (id, symbol) VALUES (1, '510880.SH')"
+        ))
+        conn.execute(text(
+            "CREATE TABLE a_stock_fear_strategy_states (config_id INTEGER PRIMARY KEY, symbol VARCHAR)"
+        ))
+        conn.execute(text("INSERT INTO a_stock_fear_strategy_states (config_id, symbol) VALUES (1, '510880.SH')"))
+    with patch.object(database, "engine", engine):
+        database.ensure_a_stock_fear_strategy_schema()
+        database.ensure_a_stock_fear_strategy_schema()  # 幂等
+    with engine.connect() as conn:
+        config_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)"))}
+        state_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_states)"))}
+        row = conn.execute(text(
+            "SELECT sub3_symbol, sub3_buy_threshold, sub3_volume_ratio_threshold, sell_ma5_confirm "
+            "FROM a_stock_fear_strategy_configs WHERE id = 1"
+        )).one()
+    assert {
+        "sub3_symbol", "sub3_fear_source", "sub3_volume_signal_symbol",
+        "sub3_buy_threshold", "sub3_volume_ratio_threshold", "sell_ma5_confirm",
+    } <= config_columns
+    assert "pending_sell_signal_date" in state_columns
+    # 存量配置补列后行为不变：没有第三候补，卖出不等 MA5
+    assert tuple(row) == (None, 20.0, 1.3, "off")
