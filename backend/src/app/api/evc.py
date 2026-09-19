@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
 from typing import Literal, Optional, List
@@ -12,6 +13,7 @@ from ...core.services.a_stock_consensus import (
     search_a_stock_consensus_candidates,
 )
 from ...core.services.a_stock_consensus_pe_band import load_a_stock_consensus_pe_bands
+from ...core.services.a_stock_chart_events import attach_consensus_eps_revisions
 
 router = APIRouter(prefix="/api/evc")
 
@@ -261,7 +263,16 @@ def get_a_stock_consensus_detail(
 ):
     analytics_db = AnalyticsSession()
     try:
-        return load_a_stock_consensus_detail(analytics_db, symbol, use_pe_band=use_pe_band)
+        detail = load_a_stock_consensus_detail(analytics_db, symbol, use_pe_band=use_pe_band)
+        try:
+            # 盈利预测指引的「较上次」与 K 线研报侧栏同一实现；它只是辅助信息，
+            # 算不出来时照常返回估值详情，不能让整个估值弹窗打不开
+            attach_consensus_eps_revisions(analytics_db, symbol, detail)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "attach consensus eps revisions failed for %s", symbol, exc_info=True
+            )
+        return detail
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:

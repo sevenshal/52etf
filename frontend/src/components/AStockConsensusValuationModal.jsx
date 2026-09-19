@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { Alert, Modal, Segmented, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { describeRevision, revisionTooltip } from '../utils/epsRevision';
 
 const { Text } = Typography;
 
@@ -123,12 +124,26 @@ const AStockConsensusValuationModal = ({
     {
       title: '盈利预测指引',
       key: 'forecasts',
-      width: 250,
+      width: 320,
       render: (_, record) => (
         <Space size={[4, 4]} wrap>
-          {(record.forecasts || []).map(item => (
-            <Tag key={item.quarter}>{item.quarter} EPS {formatFixed(item.eps)}</Tag>
-          ))}
+          {(record.forecasts || []).map(item => {
+            const tag = (
+              <Tag key={item.quarter}>
+                {item.quarter} EPS {formatFixed(item.eps)}
+                {item.revision ? (
+                  <span style={{ color: describeRevision(item.revision).color, marginInlineStart: 4 }}>
+                    {describeRevision(item.revision).text}
+                    {item.revision.match === 'org' ? ' 换人' : ''}
+                  </span>
+                ) : null}
+              </Tag>
+            );
+            // revision 字段不存在（后端没算出来）时不加说明，避免把"没算"说成"没有更早预测"
+            return item.revision === undefined
+              ? tag
+              : <Tooltip key={item.quarter} title={revisionTooltip(item.revision)}>{tag}</Tooltip>;
+          })}
         </Space>
       ),
     },
@@ -203,7 +218,7 @@ const AStockConsensusValuationModal = ({
         columns={columns}
         dataSource={rows}
         pagination={false}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1280 }}
         onRow={record => ({
           style: record.org_name === highlightedOrg ? { background: '#fffbe6' } : undefined,
         })}
@@ -211,7 +226,8 @@ const AStockConsensusValuationModal = ({
       <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         每家机构只取它在研报池里最新一篇带目标价的研报；当前财年估值 = 目标价，下财年 / 下下财年
         = 目标价 × 该研报对应财年 EPS ÷ 当前财年 EPS（缺 EPS 时用净利润之比）。研报发布后发生除权的，目标价按复权因子
-        换算到当前股价口径；盈利预测指引展示研报原始 EPS。开启 PE 通道后，没给目标价的机构 = 通道 20% / 80% 分位
+        换算到当前股价口径；盈利预测指引展示研报原始 EPS，后面的 ↑/↓ 是较同机构同预测年度上一篇研报的修正
+        （优先有共同分析师的上一篇，没有则同机构上一篇并标"换人"；按除权换算后的 EPS 比较，与 K 线研报侧栏同一口径）。开启 PE 通道后，没给目标价的机构 = 通道 20% / 80% 分位
         × 该机构未来 12 个月 EPS（当年、次年 EPS 按年内已过时间加权）。上下限分别取各家机构的最低 / 最高值。
       </Text>
     </Modal>

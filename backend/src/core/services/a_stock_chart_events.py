@@ -303,3 +303,58 @@ def load_a_stock_chart_events(db: Any, symbol: str, *, start: date, end: date) -
         "research_days": _research_days(db, normalized, start, end, disclosures),
         "financial_reports": _financial_reports(db, normalized, start, end, disclosures),
     }
+
+
+def load_a_stock_eps_revisions(
+    db: Any,
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+) -> Dict[Tuple[str, str, str, str], Dict[int, Optional[Dict[str, Any]]]]:
+    """按研报 (日期, 机构, 作者, 标题) 索引每个预测年度的「较上次」。
+
+    直接跑 K 线研报侧栏同一条流水线（`_research_days` → `_attach_eps_revisions`），
+    其他地方（如卖方一致预期估值弹窗）要显示修正时用它，和侧栏永远是同一个数：
+    匹配规则、前复权口径、同日排序、回看区间都不会分叉。
+    """
+    normalized = normalize_a_stock_symbol(symbol)
+    if not normalized:
+        return {}
+    disclosures = load_a_stock_disclosure_dates(
+        db,
+        [normalized],
+        since=start - timedelta(days=REVISION_LOOKBACK_DAYS + DISCLOSURE_LOOKBACK_DAYS),
+    ).get(normalized, [])
+    index: Dict[Tuple[str, str, str, str], Dict[int, Optional[Dict[str, Any]]]] = {}
+    for day in _research_days(db, normalized, start, end, disclosures):
+        for report in day["reports"]:
+            key = (day["date"], report["org_name"], report["author_name"], report["report_title"])
+            index[key] = {forecast["fiscal_year"]: forecast["revision"] for forecast in report["forecasts"]}
+    return index
+
+
+def attach_consensus_eps_revisions(db: Any, symbol: str, detail: Dict[str, Any]) -> Dict[str, Any]:
+    """给卖方一致预期估值详情里每家机构的盈利预测指引补上「较上次」(`forecast["revision"]`)。
+
+    机构视图里的研报标识（研报日期、别名归一后的机构名、作者、标题）和研报侧栏的研报键是
+    同一套，按它对上即可。找不到这篇研报时 revision 为 None（前端显示为没有可比的上一篇）。
+    """
+    organizations = (detail or {}).get("organizations") or []
+    report_days = [day for day in (_row_to_date(org.get("report_date")) for org in organizations) if day]
+    if not report_days:
+        return detail
+    end = _row_to_date(detail.get("as_of")) or max(report_days)
+    revisions = load_a_stock_eps_revisions(db, symbol, start=min(report_days), end=max(end, max(report_days)))
+    for org in organizations:
+        day = _row_to_date(org.get("report_date"))
+        key = (
+            day.isoformat() if day else "",
+            org.get("org_name") or "",
+            str(org.get("author_name") or "").strip(),
+            str(org.get("report_title") or "").strip(),
+        )
+        by_year = revisions.get(key, {})
+        for forecast in org.get("forecasts") or []:
+            forecast["revision"] = by_year.get(forecast.get("fiscal_year"))
+    return detail
