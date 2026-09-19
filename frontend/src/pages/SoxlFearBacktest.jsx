@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -181,6 +181,18 @@ const SoxlFearBacktest = () => {
     ? backtestOptions.fear_source_options
     : DEFAULT_FEAR_SOURCE_OPTIONS;
   const aStockPresetPairs = backtestOptions.a_stock_preset_pairs || [];
+  // 标的展示名：下拉里的 label 形如「红利ETF 510880.SH」，去掉代码只留名字；美股等没有名字的回退成代码
+  const symbolNameMap = useMemo(
+    () => new Map(symbolOptions.map(item => [item.value, item.label])),
+    [symbolOptions],
+  );
+  const symbolDisplayName = useCallback((symbol) => {
+    if (!symbol) return '';
+    const label = symbolNameMap.get(symbol);
+    if (!label) return symbol;
+    const name = label.endsWith(symbol) ? label.slice(0, -symbol.length).trim() : label;
+    return name || symbol;
+  }, [symbolNameMap]);
   const getFearSourceLabel = (value) => getFearSourceLabelFromOptions(fearSourceOptions, value);
   const formatFearSourceLabels = (value) => formatFearSourceLabelsFromOptions(fearSourceOptions, value);
   const selectedSymbol = Form.useWatch('symbol', form) || 'SOXL.US';
@@ -679,7 +691,14 @@ const SoxlFearBacktest = () => {
 
   const tradeColumns = [
     { title: '日期', dataIndex: 'date', width: 110 },
-    { title: '标的', dataIndex: 'symbol', width: 110, render: value => (value ? <Tag color={value === '510880.SH' ? 'orange' : 'purple'}>{value}</Tag> : '-') },
+    {
+      title: '标的',
+      dataIndex: 'symbol',
+      width: 120,
+      render: value => (value
+        ? <Tag color={value === selectedSymbol ? 'orange' : 'purple'} title={value}>{symbolDisplayName(value)}</Tag>
+        : '-'),
+    },
     {
       title: '方向',
       dataIndex: 'action',
@@ -855,86 +874,84 @@ const SoxlFearBacktest = () => {
     }));
     const volumeMA20Data = detailedResult.daily_data.map(item => item.volume_ma20);
 
-    // 跷跷板候补：K线/成交量叠加到同一图（蓝色系区分主次）
-    const firstSub = detailedResult.daily_data.find(item => item.sub_symbol);
-    const subSymbol = firstSub?.sub_symbol || null;
-    // 第二候补（三标的）
-    const firstSub2 = detailedResult.daily_data.find(item => item.sub2_symbol);
-    const sub2Symbol = firstSub2?.sub2_symbol || null;
-    const subKlineData = detailedResult.daily_data.map(item => (
-      item.sub_open == null ? '-' : [item.sub_open, item.sub_close, item.sub_low, item.sub_high]
-    ));
-    const subVolumeData = detailedResult.daily_data.map(item => ({
-      value: Number.isFinite(item.sub_volume) ? item.sub_volume : 0,
-      itemStyle: { color: '#13c2c2' },
-    }));
+    // 主标的 + 候补（最多三个）：K线/成交量/买卖点都叠加到同一图，图例与标注一律用中文名
+    const candidateConfigs = [
+      {
+        field: 'sub',
+        kline_style: { color: 'rgba(19,194,194,0.55)', color0: 'rgba(47,84,235,0.45)', borderColor: '#13c2c2', borderColor0: '#2f54eb' },
+        volumeColor: '#13c2c2', buyColor: '#722ed1', sellColor: '#13c2c2', barWidth: 6, symbolSize: 24,
+      },
+      {
+        field: 'sub2',
+        kline_style: { color: 'rgba(235,47,150,0.4)', color0: 'rgba(250,140,22,0.4)', borderColor: '#eb2f96', borderColor0: '#fa8c16' },
+        volumeColor: '#eb2f96', buyColor: '#fa8c16', sellColor: '#eb2f96', barWidth: 5, symbolSize: 22,
+      },
+      {
+        field: 'sub3',
+        kline_style: { color: 'rgba(82,196,26,0.4)', color0: 'rgba(160,217,17,0.4)', borderColor: '#52c41a', borderColor0: '#a0d911' },
+        volumeColor: '#52c41a', buyColor: '#389e0d', sellColor: '#a0d911', barWidth: 4, symbolSize: 20,
+      },
+    ];
 
-    const buyMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'BUY' && (!subSymbol || item.symbol !== subSymbol) && (!sub2Symbol || item.symbol !== sub2Symbol))
+    const tradeMarkers = (symbol, action, color, namePrefix) => (detailedResult.trades || [])
+      .filter(item => item.action === action && item.symbol === symbol)
       .map(item => ({
-        name: '买',
-        value: 'B',
+        name: `${namePrefix}${action === 'BUY' ? '买' : '卖'}`,
+        value: action === 'BUY' ? 'B' : 'S',
         xAxis: dates.indexOf(item.date),
         yAxis: item.price,
-        itemStyle: { color: '#cf1322' },
+        itemStyle: { color },
       }))
       .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis));
-    const sellMarkers = (detailedResult.trades || [])
-      .filter(item => item.action === 'SELL' && (!subSymbol || item.symbol !== subSymbol) && (!sub2Symbol || item.symbol !== sub2Symbol))
-      .map(item => ({
-        name: '卖',
-        value: 'S',
-        xAxis: dates.indexOf(item.date),
-        yAxis: item.price,
-        itemStyle: { color: '#1677ff' },
-      }))
-      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis));
-    const subBuyMarkers = subSymbol ? (detailedResult.trades || [])
-      .filter(item => item.action === 'BUY' && item.symbol === subSymbol)
-      .map(item => ({
-        name: '候补买',
-        value: 'B',
-        xAxis: dates.indexOf(item.date),
-        yAxis: item.price,
-        itemStyle: { color: '#722ed1' },
-      })) : [];
-    const subSellMarkers = subSymbol ? (detailedResult.trades || [])
-      .filter(item => item.action === 'SELL' && item.symbol === subSymbol)
-      .map(item => ({
-        name: '候补卖',
-        value: 'S',
-        xAxis: dates.indexOf(item.date),
-        yAxis: item.price,
-        itemStyle: { color: '#13c2c2' },
-      })) : [];
-    const sub2KlineData = sub2Symbol ? detailedResult.daily_data.map(item => (
-      item.sub2_open == null ? '-' : [item.sub2_open, item.sub2_close, item.sub2_low, item.sub2_high]
-    )) : [];
-    const sub2HasData = sub2KlineData.some(d => d != null);
-    const sub2VolumeData = sub2Symbol ? detailedResult.daily_data.map(item => ({
-      value: Number.isFinite(item.sub2_volume) ? item.sub2_volume : 0,
-      itemStyle: { color: '#eb2f96' },
-    })) : [];
-    const sub2BuyMarkers = sub2Symbol ? (detailedResult.trades || [])
-      .filter(item => item.action === 'BUY' && item.symbol === sub2Symbol)
-      .map(item => ({ name: '第二候补买', value: 'B', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#fa8c16' } }))
-      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis)) : [];
-    const sub2SellMarkers = sub2Symbol ? (detailedResult.trades || [])
-      .filter(item => item.action === 'SELL' && item.symbol === sub2Symbol)
-      .map(item => ({ name: '第二候补卖', value: 'S', xAxis: dates.indexOf(item.date), yAxis: item.price, itemStyle: { color: '#eb2f96' } }))
-      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis)) : [];
 
-    const legendData = [`${selectedSymbol} K线`, 'MA20', '成交量', '成交量MA20'];
-    if (subSymbol) {
-      legendData.push(`${subSymbol} K线`, `${subSymbol} 成交量`);
-    }
-    if (sub2Symbol && sub2HasData) {
-      legendData.push(`${sub2Symbol} K线`, `${sub2Symbol} 成交量`);
-    }
+    const candidates = candidateConfigs.map((config) => {
+      const symbol = detailedResult.daily_data.find(item => item[`${config.field}_symbol`])?.[`${config.field}_symbol`] || null;
+      if (!symbol) return null;
+      const kline = detailedResult.daily_data.map(item => (
+        item[`${config.field}_open`] == null
+          ? '-'
+          : [item[`${config.field}_open`], item[`${config.field}_close`], item[`${config.field}_low`], item[`${config.field}_high`]]
+      ));
+      if (!kline.some(item => item !== '-')) return null;
+      const name = symbolDisplayName(symbol);
+      return {
+        ...config,
+        symbol,
+        name,
+        kline,
+        volume: detailedResult.daily_data.map(item => ({
+          value: Number.isFinite(item[`${config.field}_volume`]) ? item[`${config.field}_volume`] : 0,
+          itemStyle: { color: config.volumeColor },
+        })),
+        markers: [
+          ...tradeMarkers(symbol, 'BUY', config.buyColor, name),
+          ...tradeMarkers(symbol, 'SELL', config.sellColor, name),
+        ],
+      };
+    }).filter(Boolean);
+
+    // 主标的的买卖点 = 不属于任何候补的成交（换仓时主标的也会出现买卖）
+    const candidateSymbols = new Set(candidates.map(item => item.symbol));
+    const mainName = symbolDisplayName(selectedSymbol);
+    const mainMarkers = ['BUY', 'SELL'].flatMap(action => (detailedResult.trades || [])
+      .filter(item => item.action === action && !candidateSymbols.has(item.symbol))
+      .map(item => ({
+        name: `${mainName}${action === 'BUY' ? '买' : '卖'}`,
+        value: action === 'BUY' ? 'B' : 'S',
+        xAxis: dates.indexOf(item.date),
+        yAxis: item.price,
+        itemStyle: { color: action === 'BUY' ? '#cf1322' : '#1677ff' },
+      }))
+      .filter(item => item.xAxis >= 0 && Number.isFinite(item.yAxis)));
+
+    const legendData = [`${mainName} K线`, 'MA20', '成交量', '成交量MA20'];
+    candidates.forEach((item) => {
+      legendData.push(`${item.name} K线`, `${item.name} 成交量`);
+    });
 
     const series = [
       {
-        name: `${selectedSymbol} K线`,
+        name: `${mainName} K线`,
         type: 'candlestick',
         data: klineData,
         itemStyle: {
@@ -944,52 +961,27 @@ const SoxlFearBacktest = () => {
           borderColor0: '#1677ff',
         },
         markPoint: {
-          data: [...buyMarkers, ...sellMarkers],
+          data: mainMarkers,
           symbolSize: 26,
           label: { color: '#fff', fontWeight: 'bold' },
         },
       },
     ];
-    if (subSymbol) {
+    candidates.forEach((item) => {
       series.push({
-        name: `${subSymbol} K线`,
+        name: `${item.name} K线`,
         type: 'candlestick',
-        data: subKlineData,
-        barWidth: 6,
-        itemStyle: {
-          color: 'rgba(19,194,194,0.55)',
-          color0: 'rgba(47,84,235,0.45)',
-          borderColor: '#13c2c2',
-          borderColor0: '#2f54eb',
-        },
+        data: item.kline,
+        barWidth: item.barWidth,
+        itemStyle: item.kline_style,
         markPoint: {
-          data: [...subBuyMarkers, ...subSellMarkers],
-          symbolSize: 24,
+          data: item.markers,
+          symbolSize: item.symbolSize,
           symbol: 'pin',
           label: { color: '#fff', fontWeight: 'bold' },
         },
       });
-    }
-    if (sub2Symbol && sub2HasData) {
-      series.push({
-        name: `${sub2Symbol} K线`,
-        type: 'candlestick',
-        data: sub2KlineData,
-        barWidth: 5,
-        itemStyle: {
-          color: 'rgba(235,47,150,0.4)',
-          color0: 'rgba(250,140,22,0.4)',
-          borderColor: '#eb2f96',
-          borderColor0: '#fa8c16',
-        },
-        markPoint: {
-          data: [...sub2BuyMarkers, ...sub2SellMarkers],
-          symbolSize: 22,
-          symbol: 'pin',
-          label: { color: '#fff', fontWeight: 'bold' },
-        },
-      });
-    }
+    });
     series.push(
       {
         name: 'MA20',
@@ -1016,26 +1008,17 @@ const SoxlFearBacktest = () => {
         lineStyle: { width: 2, color: '#52c41a' },
       },
     );
-    if (subSymbol) {
+    candidates.forEach((item, index) => {
       series.push({
-        name: `${subSymbol} 成交量`,
+        name: `${item.name} 成交量`,
         type: 'bar',
         xAxisIndex: 1,
-        yAxisIndex: 2,
-        data: subVolumeData,
-        barWidth: 5,
+        // 每个候补一条独立的成交量轴（主标的占 1），量纲差异大时不互相压扁
+        yAxisIndex: 2 + index,
+        data: item.volume,
+        barWidth: Math.max(3, 6 - index),
       });
-    }
-    if (sub2Symbol && sub2HasData) {
-      series.push({
-        name: `${sub2Symbol} 成交量`,
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 3,
-        data: sub2VolumeData,
-        barWidth: 4,
-      });
-    }
+    });
 
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
@@ -1052,8 +1035,7 @@ const SoxlFearBacktest = () => {
       yAxis: [
         { scale: true, splitArea: { show: true } },
         { scale: true, gridIndex: 1, splitNumber: 2 },
-        ...(subSymbol ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
-        ...(sub2Symbol && sub2HasData ? [{ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } }] : []),
+        ...candidates.map(() => ({ scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false } })),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
@@ -1061,7 +1043,7 @@ const SoxlFearBacktest = () => {
       ],
       series,
     };
-  }, [detailedResult, selectedSymbol]);
+  }, [detailedResult, selectedSymbol, symbolDisplayName]);
 
   const sentimentOption = useMemo(() => {
     if (!detailedResult?.daily_data?.length) {
