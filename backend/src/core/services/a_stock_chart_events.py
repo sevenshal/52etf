@@ -10,9 +10,11 @@
   `load_a_stock_financials` 为了取最新数字会保留公告日最晚的那条(更正稿)，拿它定位
   标记的话，一份被更正过的年报会被标在更正日而不是市场第一次看到它的那天。
   数值再从 `load_a_stock_financials` 取，和个股详情页的财务数据卡片一致。
+- 每篇研报的每个预测年度附带「较上次」与历次预测（见 `_attach_eps_revisions`）。
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,18 +38,119 @@ FINANCIAL_PERIODS_TO_LOAD = 28
 PRICE_FACTOR_LOOKBACK_DAYS = 30
 # 披露日按报告期末筛选，报告期末要比窗口起点更早才能覆盖窗口里的第一次披露
 DISCLOSURE_LOOKBACK_DAYS = 400
+# 找"上一篇"时往窗口前多取的天数：窗口里最早那几篇研报，它们的上一篇多半在窗口之外
+REVISION_LOOKBACK_DAYS = 730
+# 每个预测年度展开的历次预测最多带几篇（取最近的），控制接口体积
+REVISION_HISTORY_LIMIT = 12
+
+_AUTHOR_SEPARATORS = re.compile(r"[,，、;；/\s]+")
 
 
 def _rounded(value: Optional[float], digits: int = 2) -> Optional[float]:
     return round(value, digits) if value is not None else None
 
 
-def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
-    rows = _load_report_rows_by_symbol(db, [symbol], report_start=start, report_end=end).get(symbol, [])
+def _authors(author_name: str) -> frozenset:
+    """研报作者串（"刘俊,边文姣,邵梓洋"）拆成人名集合，用来判断两篇是否有共同分析师。"""
+    return frozenset(name for name in _AUTHOR_SEPARATORS.split(author_name or "") if name)
+
+
+def _change_pct(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous is None or previous == 0:
+        return None
+    return round((current - previous) / abs(previous) * 100.0, 2)
+
+
+def _disclosed_between(
+    disclosures: List[Tuple[date, date]],
+    after: date,
+    upto: date,
+) -> List[str]:
+    """(after, upto] 之间首次披露的定期报告，如 ["2025年报", "2026中报"]。"""
+    return [_period_label(period) for disclosed, period in disclosures if after < disclosed <= upto]
+
+
+def _attach_eps_revisions(entries, disclosures: List[Tuple[date, date]]) -> None:
+    """给每篇研报的每个预测年度补上「较上次」(`revision`)和历次预测(`history`)。
+
+    比对对象：同一机构、同一预测年度、给了 EPS 的更早研报。优先取与本篇**至少有一位相同
+    分析师**的最近一篇（团队常有增减人，按作者串完全相等会把真正的"同一批人上次的预测"
+    漏掉）；一篇都没有时退到同机构的最近一篇，并标 `match="org"`，让界面能区分"同一批人
+    改了预测"和"换了人给的新口径"。
+
+    先后顺序用 `_ForecastRow.recency`（研报日期 + 入库时间），和估值池"同机构取最新"同一个
+    排序，同一天的两篇也能分出先后。EPS 都已按写研报时的复权因子换算到前复权口径——比
+    原始 EPS 的话，一次 10 送 5 会凭空显示成下调三分之一。
+    """
+    chains: Dict[Tuple[str, int], List[Tuple[Any, Dict[str, Any], Dict[str, Any]]]] = defaultdict(list)
+    for entry in entries:
+        for fiscal_year, forecast in entry["_forecasts"].items():
+            forecast["revision"] = None
+            forecast["history"] = []
+            if forecast["eps"] is not None and entry["_recency"] is not None:
+                chains[(entry["org_name"], fiscal_year)].append((entry["_recency"], entry, forecast))
+
+    for chain in chains.values():
+        chain.sort(key=lambda item: item[0])
+        for index, (_, entry, forecast) in enumerate(chain):
+            earlier = chain[:index]
+            previous = next(
+                (item for item in reversed(earlier) if item[1]["_authors"] & entry["_authors"]),
+                None,
+            )
+            match = "analyst"
+            if previous is None and earlier:
+                previous, match = earlier[-1], "org"
+            if previous is not None:
+                previous_entry, previous_forecast = previous[1], previous[2]
+                forecast["revision"] = {
+                    "prev_date": previous_entry["report_date"].isoformat(),
+                    "prev_eps": previous_forecast["eps"],
+                    "prev_eps_raw": previous_forecast["eps_raw"],
+                    "prev_authors": previous_entry["author_name"],
+                    "change_pct": _change_pct(forecast["eps"], previous_forecast["eps"]),
+                    "match": match,
+                    "disclosed_between": _disclosed_between(
+                        disclosures, previous_entry["report_date"], entry["report_date"]
+                    ),
+                }
+
+            history = []
+            for position, (_, other_entry, other_forecast) in enumerate(chain[: index + 1]):
+                before = chain[position - 1] if position else None
+                history.append({
+                    "report_date": other_entry["report_date"].isoformat(),
+                    "author_name": other_entry["author_name"],
+                    "eps": other_forecast["eps"],
+                    "eps_raw": other_forecast["eps_raw"],
+                    "rating": other_entry["rating"],
+                    "target_low": other_entry["target_low"],
+                    "target_high": other_entry["target_high"],
+                    # 与当前这篇是否有共同分析师：界面上换了人的点画成空心灰点
+                    "shares_analyst": bool(other_entry["_authors"] & entry["_authors"]),
+                    "change_pct": _change_pct(other_forecast["eps"], before[2]["eps"]) if before else None,
+                    "disclosed_between": (
+                        _disclosed_between(disclosures, before[1]["report_date"], other_entry["report_date"])
+                        if before else []
+                    ),
+                })
+            forecast["history"] = history[-REVISION_HISTORY_LIMIT:]
+
+
+def _research_days(
+    db: Any,
+    symbol: str,
+    start: date,
+    end: date,
+    disclosures: Optional[List[Tuple[date, date]]] = None,
+) -> List[Dict[str, Any]]:
+    # 多往前取一段研报只用来找"上一篇"，输出仍只含 [start, end] 内的研报
+    lookback_start = start - timedelta(days=REVISION_LOOKBACK_DAYS)
+    rows = _load_report_rows_by_symbol(db, [symbol], report_start=lookback_start, report_end=end).get(symbol, [])
     if not rows:
         return []
     factors = load_a_stock_price_factors(
-        db, [symbol], start=start - timedelta(days=PRICE_FACTOR_LOOKBACK_DAYS), end=end
+        db, [symbol], start=lookback_start - timedelta(days=PRICE_FACTOR_LOOKBACK_DAYS), end=end
     ).get(symbol)
     latest_factor = factors.latest if factors else None
 
@@ -78,6 +181,8 @@ def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[st
                 "_bounds": None,
                 "_scale": _price_scale(source_factor, latest_factor),
                 "_forecasts": {},
+                "_recency": None,
+                "_authors": _authors(key[2]),
             }
         if not entry["rating"]:
             entry["rating"] = str(row.get("rating") or "").strip()
@@ -92,6 +197,8 @@ def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[st
         if entry is None:
             continue
         scale = _price_scale(record.price_factor, latest_factor)
+        if entry["_recency"] is None or record.recency > entry["_recency"]:
+            entry["_recency"] = record.recency
         entry["_forecasts"][record.fiscal_year] = {
             "fiscal_year": record.fiscal_year,
             "eps": _rounded(record.eps * scale, 3) if record.eps is not None else None,
@@ -100,12 +207,9 @@ def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[st
             "pe": record.pe,
         }
 
-    by_day: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
     for entry in reports.values():
         bounds = entry.pop("_bounds")
         scale = entry.pop("_scale")
-        forecasts = entry.pop("_forecasts")
-        report_date = entry.pop("report_date")
         entry.update({
             "target_low": _rounded(bounds[0] * scale) if bounds else None,
             "target_high": _rounded(bounds[1] * scale) if bounds else None,
@@ -113,8 +217,18 @@ def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[st
             "target_high_raw": bounds[1] if bounds else None,
             # ≠1 说明写研报之后发生过除权，目标价已换算到当前前复权口径
             "price_scale": _rounded(scale, 4),
-            "forecasts": [forecasts[year] for year in sorted(forecasts)],
         })
+    _attach_eps_revisions(reports.values(), disclosures or [])
+
+    by_day: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
+    for entry in reports.values():
+        if entry["report_date"] < start:
+            continue  # 回看区间里的研报只作为"上一篇"参与比对，不单独出现在图上
+        forecasts = entry.pop("_forecasts")
+        entry.pop("_recency")
+        entry.pop("_authors")
+        report_date = entry.pop("report_date")
+        entry["forecasts"] = [forecasts[year] for year in sorted(forecasts)]
         by_day[report_date].append(entry)
 
     return [
@@ -127,10 +241,13 @@ def _research_days(db: Any, symbol: str, start: date, end: date) -> List[Dict[st
     ]
 
 
-def _financial_reports(db: Any, symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
-    disclosures = load_a_stock_disclosure_dates(
-        db, [symbol], since=start - timedelta(days=DISCLOSURE_LOOKBACK_DAYS)
-    ).get(symbol, [])
+def _financial_reports(
+    db: Any,
+    symbol: str,
+    start: date,
+    end: date,
+    disclosures: List[Tuple[date, date]],
+) -> List[Dict[str, Any]]:
     in_window = [(disclosed, period) for disclosed, period in disclosures if start <= disclosed <= end]
     if not in_window:
         return []
@@ -175,8 +292,14 @@ def load_a_stock_chart_events(db: Any, symbol: str, *, start: date, end: date) -
     normalized = normalize_a_stock_symbol(symbol)
     if not normalized:
         return {"ts_code": "", "research_days": [], "financial_reports": []}
+    # 披露日只取一次：财报标记用窗口内那部分，研报修正用它标"两次预测之间披露了哪份财报"
+    disclosures = load_a_stock_disclosure_dates(
+        db,
+        [normalized],
+        since=start - timedelta(days=REVISION_LOOKBACK_DAYS + DISCLOSURE_LOOKBACK_DAYS),
+    ).get(normalized, [])
     return {
         "ts_code": normalized,
-        "research_days": _research_days(db, normalized, start, end),
-        "financial_reports": _financial_reports(db, normalized, start, end),
+        "research_days": _research_days(db, normalized, start, end, disclosures),
+        "financial_reports": _financial_reports(db, normalized, start, end, disclosures),
     }
