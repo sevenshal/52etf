@@ -5,7 +5,8 @@
 1. **板块层**：对配置里的每个板块算九转，找出"低 9 后首次高 2"的触发日，再用当天的自算
    贪恐分数过闸门（默认 ≤ 40）。布防窗口默认 0，也就是板块和个股必须同一天出信号。
 2. **个股层**：对处于布防状态的板块，取信号日之前最近一期权重快照里的成分股，算九转，
-   当天自己也出现"低 9 后首次高 2"的就是买入信号；同时对模拟盘持仓判定卖出
+   当天自己也出现"低 9 后首次高 2"、**并且放量**（log 成交量高于前 20 个交易日均值 1 个标准差）
+   的就是买入信号；同时对模拟盘持仓判定卖出
    （买入后出现过高 9，此后首次低 2 且回撤 > 2 个 ATR）。
 3. **模拟盘**：先把账户结算推进到当天（昨天的单按今天开盘撮合、收盘盯市），再按空仓位
    数量生成明天开盘执行的买卖单。
@@ -49,7 +50,7 @@ _SECTOR_COLUMNS = (
 _SIGNAL_COLUMNS = (
     "trade_date", "ts_code", "name", "role", "sector_code", "sector_name", "sector_fear_score",
     "sector_signal_date", "close", "atr", "high_count", "low_count", "low9_date", "high9_date",
-    "rising_drawdown_atr", "action", "rank", "note",
+    "rising_drawdown_atr", "volume_z", "action", "rank", "note",
 )
 
 
@@ -171,7 +172,7 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
         bars = stock_bars.get(symbol) or []
         if not bars:
             continue
-        rows = nine_turn_rows(bars)
+        rows = nine_turn_rows(bars, params)
         dates = data.bar_dates(bars)
         last = rows[-1]
         sector = candidates.get(symbol)
@@ -199,6 +200,7 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
             "low9_date": low9_date,
             "high9_date": None,
             "rising_drawdown_atr": last.get("risingDrawdownAtr"),
+            "volume_z": last.get("volumeZScore"),
             "action": ACTION_NONE,
             "rank": None,
             "note": None,
@@ -225,11 +227,22 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
                     "等高9后的低2" if state["high9_armed"] else f"还没出现高{params.high_count_min}"
                 )
         elif sector is not None:
-            fired = set(low_high_turn_indices(rows, params))
+            fired = set(low_high_turn_indices(rows, params, require_volume=True))
             if (len(rows) - 1) in fired:
                 record["action"] = ACTION_BUY
-                record["note"] = f"低{params.low_count_min}后首次高{params.buy_high_count}"
+                note = f"低{params.low_count_min}后首次高{params.buy_high_count}"
+                if params.volume_filter_enabled and record["volume_z"] is not None:
+                    note += f"，放量 z={record['volume_z']:.2f}"
+                record["note"] = note
                 buy_signals.append(record)
+            elif (len(rows) - 1) in set(low_high_turn_indices(rows, params)):
+                # 形态到了但量没放出来：记下来，页面上能看到"差在哪"
+                record["note"] = (
+                    f"低{params.low_count_min}后首次高{params.buy_high_count}，"
+                    f"但放量 z="
+                    f"{record['volume_z']:.2f} 未过 {params.volume_z_min:g}"
+                    if record["volume_z"] is not None else "形态到了但当天没有成交量数据"
+                )
         signal_rows.append(record)
 
     pick_order = str((config.get("portfolio") or {}).get("pick_order") or "fear_asc")

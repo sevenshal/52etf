@@ -30,6 +30,13 @@ def _dates(bars):
     return [bar["timestamp"].date() for bar in bars]
 
 
+def _volume_bars(closes, volumes):
+    bars = _bars(closes)
+    for bar, volume in zip(bars, volumes):
+        bar["volume"] = volume
+    return bars
+
+
 def _rows(count, close=20.0, **overrides):
     """直接造带九转字段的行，绕开 K 线，专门测规则本身。"""
     rows = []
@@ -84,6 +91,98 @@ def test_turn_signal_matches_the_chart_indicator_on_real_shaped_bars():
     first = fired[0]
     assert rows[first]["highCount"] == 2
     assert any(int(row["lowCount"] or 0) >= 9 for row in rows[:first])
+
+
+# --- 量能过滤 ---------------------------------------------------------------
+
+def _shaped_closes(lead_in=30):
+    """先走平一段（让放量窗口有足够历史），再连跌堆出低9以上，最后反弹堆出高1/2/3。"""
+    return [100.0] * lead_in + [100 - index for index in range(16)] + [86 + index for index in range(1, 6)]
+
+
+def _base_volumes(count):
+    """有正常起伏的成交量（标准差不为 0），否则 z 值算不出来。"""
+    return [1_000_000.0 * (1 + 0.05 * ((index % 5) - 2)) for index in range(count)]
+
+
+def test_stock_signal_requires_a_volume_spike_on_the_day():
+    closes = _shaped_closes()
+    volumes = _base_volumes(len(closes))
+    rows = signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS)
+    shape_only = signals.low_high_turn_indices(rows, PARAMS)
+    assert shape_only, "形态本身应该触发"
+    fired = shape_only[0]
+    # 成交量只是正常起伏 → z 值远不到 1 个标准差
+    assert rows[fired]["volumeZScore"] < PARAMS.volume_z_min
+    assert signals.low_high_turn_indices(rows, PARAMS, require_volume=True) == []
+
+    spiked = list(volumes)
+    spiked[fired] = 3_000_000.0
+    rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
+    assert rows[fired]["volumeZScore"] > PARAMS.volume_z_min
+    assert signals.low_high_turn_indices(rows, PARAMS, require_volume=True) == shape_only
+
+
+def test_volume_filter_uses_the_prior_window_not_including_today():
+    """窗口不含当日：当天那根放不放量，不会把自己算进均值里。"""
+    closes = _shaped_closes()
+    volumes = _base_volumes(len(closes))
+    fired = signals.low_high_turn_indices(
+        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS)[0]
+    spiked = list(volumes)
+    spiked[fired] = 3_000_000.0
+    rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
+    # 均值和标准差只由前 20 根决定，和当天这根无关
+    baseline = signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS)
+    assert rows[fired]["logVolumeMean"] == baseline[fired]["logVolumeMean"]
+    assert rows[fired]["logVolumeStdDev"] == baseline[fired]["logVolumeStdDev"]
+
+    # 前几根大幅放量、当天回到常态 → 相对最近的窗口反而是缩量
+    shrunk = list(volumes)
+    window = signals.SignalParams(volume_lookback_days=5)
+    for offset, index in enumerate(range(fired - 5, fired)):
+        shrunk[index] = 4_000_000.0 + offset * 100_000.0     # 有起伏，标准差不为 0
+    rows = signals.nine_turn_rows(_volume_bars(closes, shrunk), window)
+    assert rows[fired]["volumeZScore"] < 0
+    assert signals.low_high_turn_indices(rows, window, require_volume=True) == []
+
+
+def test_volume_filter_can_be_turned_off_and_threshold_is_configurable():
+    closes = _shaped_closes()
+    volumes = _base_volumes(len(closes))
+    fired = signals.low_high_turn_indices(
+        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS)
+    volumes[fired[0]] = 1_600_000.0            # 温和放量
+
+    off = signals.SignalParams(volume_filter_enabled=False)
+    assert signals.low_high_turn_indices(
+        signals.nine_turn_rows(_volume_bars(closes, volumes), off), off, require_volume=True) == fired
+
+    loose = signals.SignalParams(volume_z_min=0.5)
+    strict = signals.SignalParams(volume_z_min=8.0)
+    assert signals.low_high_turn_indices(
+        signals.nine_turn_rows(_volume_bars(closes, volumes), loose), loose, require_volume=True) == fired
+    assert signals.low_high_turn_indices(
+        signals.nine_turn_rows(_volume_bars(closes, volumes), strict), strict, require_volume=True) == []
+
+
+def test_volume_filter_does_not_block_when_the_window_is_incomplete():
+    """上市不满一个回看窗口就没有 z 值——没信息不算负面信号，不拦。"""
+    closes = _shaped_closes()
+    params = signals.SignalParams(volume_lookback_days=250)
+    rows = signals.nine_turn_rows(_volume_bars(closes, _base_volumes(len(closes))), params)
+    fired = signals.low_high_turn_indices(rows, PARAMS)
+    assert rows[fired[0]]["volumeZScore"] is None
+    assert signals.low_high_turn_indices(rows, params, require_volume=True) == fired
+
+
+def test_sector_triggers_ignore_volume():
+    """量能只管个股：板块层不看成交量，否则板块指数的量能会把择时也带偏。"""
+    closes = _shaped_closes()
+    rows = signals.nine_turn_rows(_volume_bars(closes, [1_000_000.0] * len(closes)), PARAMS)
+    dates = _dates(_bars(closes))
+    triggers = signals.sector_triggers(rows, dates, PARAMS, {day: 20.0 for day in dates})
+    assert triggers, "板块触发不应该被量能拦掉"
 
 
 # --- 卖出规则 ---------------------------------------------------------------
@@ -238,6 +337,9 @@ def test_default_signal_params_match_the_best_backtest_setting():
     assert params.arm_window_days == 0          # 板块与个股同日
     assert params.fear_threshold == 40.0
     assert params.fear_lookback_days == 5       # 闸门看最近 5 个交易日，不是只看当天
+    assert params.volume_filter_enabled is True
+    assert params.volume_z_min == 1.0           # 放量至少 1 个标准差
+    assert params.volume_lookback_days == 20    # 窗口不含当日，往前 20 个交易日
     assert params.low_count_min == 9 and params.buy_high_count == 2
     assert params.high_count_min == 9 and params.sell_low_count == 2
     assert params.sell_atr_multiple == 2.0
@@ -247,6 +349,7 @@ def test_config_normalization_clamps_and_drops_unknown_keys():
     saved = strategy_config.normalize_sector_nine_turn_config({
         "universe": {"index_codes": ["000688.SH", "不存在.XX"]},
         "signal": {"fear_threshold": 500, "fear_lookback_days": 999,
+                   "volume_z_min": 99, "volume_lookback_days": 1, "volume_filter_enabled": False,
                    "arm_window_days": -3, "sell_mode": "乱写"},
         "portfolio": {"max_positions": 0, "pick_order": "乱写"},
         "paper": {"initial_capital": 1, "enabled": False},
@@ -255,6 +358,9 @@ def test_config_normalization_clamps_and_drops_unknown_keys():
     assert saved["universe"]["index_codes"] == ["000688.SH"]
     assert saved["signal"]["fear_threshold"] == 100.0
     assert saved["signal"]["fear_lookback_days"] == 60.0
+    assert saved["signal"]["volume_z_min"] == 10.0
+    assert saved["signal"]["volume_lookback_days"] == 5.0
+    assert saved["signal"]["volume_filter_enabled"] is False
     assert saved["signal"]["arm_window_days"] == 0.0
     assert saved["signal"]["sell_mode"] == "low2_wait"
     assert saved["portfolio"]["max_positions"] == 1.0

@@ -818,6 +818,8 @@ class SectorNineTurnSignalSnapshot(AnalyticsBase):
     low9_date = Column(Date)
     high9_date = Column(Date)
     rising_drawdown_atr = Column(Double)
+    # 放量 z 值（K 线图同一口径）：个股信号那天必须放量
+    volume_z = Column(Double)
     action = Column(String(16))
     rank = Column(Integer)
     note = Column(Text)

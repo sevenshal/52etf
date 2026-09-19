@@ -10,7 +10,9 @@
   含当天），只要**其中任意一天**的自算贪恐分数 ≤ 闸门就算过——贪恐见底和九转翻红往往差几天，
   只看触发当天会漏掉刚反弹上来的那一批。
 - **个股买入**：板块触发后进入布防窗口（默认 0 个交易日，即板块与个股必须同日），
-  窗口内成分股自身也出现"低 N 后首次高 M"。
+  窗口内成分股自身也出现"低 N 后首次高 M"，**且当天要放量**——log 成交量比不含当日、
+  往前 20 个交易日的平均 log 成交量高出至少 1 个标准差（倍数和回看天数都可配）。
+  放量 z 值用的是 K 线图画放量标记的同一个函数 ``preprocess_klines_volume``。
 - **卖出**：买入后出现高 K（默认 ``highCount >= 9``），此后首次出现低 L（默认
   ``lowCount == 2``）且最近红点收盘到当日收盘的回撤 > N 个 ATR14。
 """
@@ -22,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from ..stock_system.indicators import append_nine_turn_atr
+from ..stock_system.indicators import append_nine_turn_atr, preprocess_klines_volume
 
 SELL_MODE_WAIT = "low2_wait"
 SELL_MODE_FIRST_ONLY = "low2_first_only"
@@ -42,6 +44,9 @@ class SignalParams:
     sell_mode: str = SELL_MODE_WAIT
     fear_threshold: float = 40.0
     fear_lookback_days: int = 5
+    volume_filter_enabled: bool = True
+    volume_z_min: float = 1.0
+    volume_lookback_days: int = 20
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "SignalParams":
@@ -56,12 +61,24 @@ class SignalParams:
             sell_mode=str(signal.get("sell_mode") or SELL_MODE_WAIT),
             fear_threshold=float(signal.get("fear_threshold", 40.0)),
             fear_lookback_days=int(signal.get("fear_lookback_days", 5)),
+            volume_filter_enabled=bool(signal.get("volume_filter_enabled", True)),
+            volume_z_min=float(signal.get("volume_z_min", 1.0)),
+            volume_lookback_days=int(signal.get("volume_lookback_days", 20)),
         )
 
 
-def nine_turn_rows(klines: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """逐根补九转计数 / ATR14 / 红点回撤（生产口径，与 K 线图一致）。"""
-    return append_nine_turn_atr(klines or [])
+def nine_turn_rows(klines: Sequence[Mapping[str, Any]],
+                   params: Optional[SignalParams] = None) -> List[Dict[str, Any]]:
+    """逐根补九转计数 / ATR14 / 红点回撤（生产口径，与 K 线图一致）。
+
+    给了 ``params`` 且开了量能过滤时，先跑一遍 ``preprocess_klines_volume`` 补放量 z 值——
+    和 K 线图上的放量标记同一个函数、同一个口径（log10 成交量，窗口不含当根）。
+    板块层不看量能，所以不传 ``params``。
+    """
+    rows = list(klines or [])
+    if params is not None and params.volume_filter_enabled:
+        rows = preprocess_klines_volume(rows, params.volume_z_min, params.volume_lookback_days)
+    return append_nine_turn_atr(rows)
 
 
 def _finite(value: Any) -> bool:
@@ -71,10 +88,28 @@ def _finite(value: Any) -> bool:
         return False
 
 
-def low_high_turn_indices(rows: Sequence[Mapping[str, Any]], params: SignalParams) -> List[int]:
+def volume_passed(row: Mapping[str, Any], params: SignalParams) -> bool:
+    """当天是不是放量：放量 z 值 > 阈值。关了过滤或真的没数据时不拦。"""
+    if not params.volume_filter_enabled:
+        return True
+    z_score = row.get("volumeZScore")
+    if _finite(z_score):
+        return float(z_score) > params.volume_z_min
+    # 窗口内成交量一点波动都没有（标准差 0）时 z 值算不出来，但"比均值大不大"仍然有意义
+    log_volume, log_mean = row.get("logVolume"), row.get("logVolumeMean")
+    if _finite(log_volume) and _finite(log_mean):
+        return float(log_volume) > float(log_mean)
+    # 上市不满一个回看窗口、或当天停牌没有成交量：没信息不算负面信号，不拦
+    return True
+
+
+def low_high_turn_indices(rows: Sequence[Mapping[str, Any]], params: SignalParams,
+                          *, require_volume: bool = False) -> List[int]:
     """"低 N 后首次高 M" 的行号列表；同一次低 N 只触发一次。
 
     板块触发和个股买入用的是同一个函数——两边的形态定义必须一模一样。
+    ``require_volume`` 只在个股层打开：高 M 那根还要放量才算信号。不放量时这一次低 N
+    照样算消费掉（"首次高 M" 是形态事件，量能只是放行条件），不会留着等下一根。
     """
     armed = False
     fired: List[int] = []
@@ -84,8 +119,9 @@ def low_high_turn_indices(rows: Sequence[Mapping[str, Any]], params: SignalParam
         if low_count >= params.low_count_min:
             armed = True
         if armed and high_count == params.buy_high_count:
-            fired.append(index)
             armed = False
+            if not require_volume or volume_passed(row, params):
+                fired.append(index)
     return fired
 
 

@@ -91,7 +91,7 @@ def _build_candidate_trades(stock_rows: Mapping[str, Dict[str, Any]],
         rows, dates = entry["rows"], entry["dates"]
         opens, closes = entry["opens"], entry["closes"]
         armed = armed_by_symbol.get(symbol) or {}
-        for position in low_high_turn_indices(rows, params):
+        for position in low_high_turn_indices(rows, params, require_volume=True):
             signal_day = dates[position]
             if not (start <= signal_day <= end) or position + 1 >= len(rows):
                 continue
@@ -319,7 +319,7 @@ def run_backtest(config: Mapping[str, Any], start: date, end: Optional[date] = N
             bars = bars_by_symbol.get(symbol) or []
             if len(bars) < 30:
                 continue
-            rows = nine_turn_rows(bars)
+            rows = nine_turn_rows(bars, params)
             dates = data.bar_dates(bars)
             stock_rows[symbol] = {
                 "rows": rows,

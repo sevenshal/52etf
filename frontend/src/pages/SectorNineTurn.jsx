@@ -159,6 +159,11 @@ const DailyTab = ({ refreshToken }) => {
         {row.low_count > 0 ? <Tag color="green">{`低${row.low_count}`}</Tag> : null}
       </Space>
     ) },
+    { title: '量能z', dataIndex: 'volume_z', width: 90, align: 'right',
+      render: value => (isNumber(value)
+        ? <span className={value > 1 ? 'stock-system__up' : ''}>{value.toFixed(2)}</span>
+        : '-'),
+      sorter: (a, b) => (a.volume_z ?? -999) - (b.volume_z ?? -999) },
     { title: '回撤(ATR)', dataIndex: 'rising_drawdown_atr', width: 110, align: 'right',
       render: value => (isNumber(value) ? value.toFixed(2) : '-') },
     { title: '说明', dataIndex: 'note', render: value => value || '-' },
@@ -561,6 +566,23 @@ const ConfigEditor = ({ state, draft, onChange }) => {
                        onChange={value => setSection('signal', 'fear_lookback_days', value)} />
         </div>
         <div className="stock-system__config-row">
+          <span className="stock-system__config-label">个股信号要放量</span>
+          <Checkbox checked={draft.signal.volume_filter_enabled}
+                    onChange={event => setSection('signal', 'volume_filter_enabled', event.target.checked)}>
+            开启
+          </Checkbox>
+        </div>
+        <div className="stock-system__config-row">
+          <span className="stock-system__config-label">放量阈值（标准差）</span>
+          <InputNumber min={-5} max={10} step={0.5} value={draft.signal.volume_z_min}
+                       onChange={value => setSection('signal', 'volume_z_min', value)} />
+        </div>
+        <div className="stock-system__config-row">
+          <span className="stock-system__config-label">放量回看（交易日，不含当日）</span>
+          <InputNumber min={5} max={250} value={draft.signal.volume_lookback_days}
+                       onChange={value => setSection('signal', 'volume_lookback_days', value)} />
+        </div>
+        <div className="stock-system__config-row">
           <span className="stock-system__config-label">低 N 起算</span>
           <InputNumber min={4} max={30} value={draft.signal.low_count_min}
                        onChange={value => setSection('signal', 'low_count_min', value)} />
@@ -755,7 +777,8 @@ const SectorNineTurn = () => {
           <Title level={4} style={{ margin: 0 }}>板块九转</Title>
           <Paragraph type="secondary" style={{ margin: '4px 0 0' }}>
             板块自身出现神奇九转低 9 后首次高 2、且最近 5 个交易日（含当天）自算贪恐分数触及过 ≤ 40 时进入布防；布防中的板块里，
-            成分股自己也出现低 9 后首次高 2 就买入（默认要求板块与个股同日）。持仓在出现高 9 后首次低 2
+            成分股自己也出现低 9 后首次高 2、且当天放量（log 成交量高于前 20 个交易日均值 1 个标准差）
+            就买入（默认要求板块与个股同日）。持仓在出现高 9 后首次低 2
             且回撤超过 2 个 ATR 时卖出。九转和 ATR 与个股详情页 K 线图同一套算法，每个交易日 19:20 自动计算。
           </Paragraph>
         </div>

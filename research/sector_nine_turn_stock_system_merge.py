@@ -47,7 +47,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "backend"))
 
-from src.core.services.stock_system.indicators import append_nine_turn_atr  # noqa: E402
+from src.core.services.stock_system.indicators import (  # noqa: E402
+    append_nine_turn_atr,
+    preprocess_klines_volume,
+)
 from src.robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS  # noqa: E402
 
 DEFAULT_ANALYTICS_DB = "/home/quantd/quant_prod/quant_robot/analytics.duckdb"
@@ -108,6 +111,8 @@ class Variant:
     # 个股入场
     low_count_min: int = 9
     buy_high_count: int = 2
+    volume_z_min: Optional[float] = None    # None = 不看量能；给了就要求放量 z 大于它
+    volume_lookback: int = 20
     # 基本面（选股系统第一层）
     fundamental: str = "none"           # none / gate / pool / rank300 / rank500 / rank600
     # 排序
@@ -134,12 +139,25 @@ def _bars_from_rows(rows: Sequence[Sequence[Any]]) -> List[Dict[str, Any]]:
     return [{
         "timestamp": datetime.combine(row[0], time(15)),
         "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]),
+        "volume": float(row[5]) if len(row) > 5 and row[5] is not None else None,
     } for row in rows]
 
 
-def _nine_turn_arrays(bars: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+VOLUME_LOOKBACKS = (20,)      # 缓存里预先算好这几种回看天数的放量 z 值
+
+
+def _nine_turn_arrays(bars: Sequence[Mapping[str, Any]], with_volume: bool = False) -> Dict[str, Any]:
     rows = append_nine_turn_atr(bars)
+    volume_z = {}
+    if with_volume:
+        for lookback in VOLUME_LOOKBACKS:
+            # 和生产同一个函数：log10 成交量，窗口不含当根
+            processed = preprocess_klines_volume(bars, 1.0, lookback)
+            volume_z[lookback] = np.array(
+                [row.get("volumeZScore") if row.get("volumeZScore") is not None else np.nan
+                 for row in processed], dtype=float)
     return {
+        "volume_z": volume_z,
         "dates": [bar["timestamp"].date() for bar in bars],
         "open": np.array([row["open"] for row in rows], dtype=float),
         "close": np.array([row["close"] for row in rows], dtype=float),
@@ -217,7 +235,7 @@ def build_cache(analytics_db: str, sqlite_db: str, start: date, end: date) -> Di
             chunk = candidates[offset:offset + 400]
             placeholders = ", ".join("?" for _ in chunk)
             rows = connection.execute(f"""
-                SELECT q.ts_code, q.trade_date, q.open, q.high, q.low, q.close, b.name
+                SELECT q.ts_code, q.trade_date, q.open, q.high, q.low, q.close, q.vol, b.name
                 FROM a_stock_market_daily_qfq q
                 LEFT JOIN a_stock_basic b USING (ts_code)
                 WHERE q.ts_code IN ({placeholders}) AND q.trade_date BETWEEN ? AND ?
@@ -226,11 +244,11 @@ def build_cache(analytics_db: str, sqlite_db: str, start: date, end: date) -> Di
             """, [*chunk, warmup, end]).fetchall()
             grouped: Dict[str, List[Any]] = {}
             for row in rows:
-                grouped.setdefault(str(row[0]).upper(), []).append(row[1:6])
-                names[str(row[0]).upper()] = str(row[6] or "")
+                grouped.setdefault(str(row[0]).upper(), []).append(row[1:7])
+                names[str(row[0]).upper()] = str(row[7] or "")
             for symbol, bars in grouped.items():
                 if len(bars) >= 40:
-                    stock_arrays[symbol] = _nine_turn_arrays(_bars_from_rows(bars))
+                    stock_arrays[symbol] = _nine_turn_arrays(_bars_from_rows(bars), with_volume=True)
             print(f"      {min(offset + 400, len(candidates))}/{len(candidates)}")
     finally:
         connection.close()
@@ -399,12 +417,18 @@ def armed_days(cache: Mapping[str, Any], variant: Variant) -> Dict[str, Dict[dat
 def stock_turn_indices(arrays: Mapping[str, Any], variant: Variant) -> List[int]:
     armed = False
     fired: List[int] = []
+    z_values = (arrays.get("volume_z") or {}).get(variant.volume_lookback)
     for index in range(len(arrays["dates"])):
         if arrays["low_count"][index] >= variant.low_count_min:
             armed = True
         if armed and arrays["high_count"][index] == variant.buy_high_count:
-            fired.append(index)
             armed = False
+            if variant.volume_z_min is not None and z_values is not None:
+                value = z_values[index]
+                # 缺 z 值（上市不满窗口/停牌）时不拦，与生产口径一致
+                if np.isfinite(value) and not value > variant.volume_z_min:
+                    continue
+            fired.append(index)
     return fired
 
 
@@ -698,6 +722,21 @@ def stage_four() -> List[Variant]:
     return variants
 
 
+def stage_five() -> List[Variant]:
+    """个股信号加"当天必须放量"的影响；两个贪恐回看口径各试一遍。"""
+    variants = []
+    for lookback, tag in ((1, "贪恐只看当天"), (5, "贪恐回看5天")):
+        for count in (5, 10):
+            base = replace(BASE, fear_lookback=lookback, max_positions=count)
+            variants.append(replace(base, key=f"f{lookback}_pos{count}_novol",
+                                    label=f"{tag} × {count} 仓 · 不看量能"))
+            for threshold in (0.0, 0.5, 1.0, 1.5, 2.0):
+                variants.append(replace(
+                    base, key=f"f{lookback}_pos{count}_vol{threshold}",
+                    label=f"{tag} × {count} 仓 · 放量 z>{threshold:g}", volume_z_min=threshold))
+    return variants
+
+
 def stage_three() -> List[Variant]:
     """个股买点本身的参数：低 N 起算、买在高几。集中度固定在第二轮胜出的 5 仓。"""
     base5 = replace(BASE, max_positions=5)
@@ -820,7 +859,7 @@ def main() -> None:
           f"基本面快照 {len(cache['pool']['dates'])} 期")
 
     variants = {"one": stage_one, "two": stage_two, "three": stage_three,
-                "four": stage_four}[args.stage]()
+                "four": stage_four, "five": stage_five}[args.stage]()
     rows, trades_by_variant, navs_by_variant = [], {}, {}
     for variant in variants:
         result = evaluate(cache, variant, args.trials)

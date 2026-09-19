@@ -60,6 +60,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "signal": {
         "fear_threshold": 40.0,
         "fear_lookback_days": 5.0,
+        "volume_z_min": 1.0,
+        "volume_lookback_days": 20.0,
         "low_count_min": 9.0,
         "buy_high_count": 2.0,
         "arm_window_days": 0.0,
@@ -67,6 +69,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sell_low_count": 2.0,
         "sell_atr_multiple": 2.0,
         "sell_mode": "low2_wait",
+        "volume_filter_enabled": True,
     },
     "portfolio": {
         "max_positions": 10.0,
@@ -84,6 +87,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 _SIGNAL_BOUNDS = {
     "fear_threshold": (0.0, 100.0, False),
     "fear_lookback_days": (1.0, 60.0, True),
+    "volume_z_min": (-5.0, 10.0, False),
+    "volume_lookback_days": (5.0, 250.0, True),
     "low_count_min": (4.0, 30.0, True),
     "buy_high_count": (1.0, 9.0, True),
     "arm_window_days": (0.0, 60.0, True),
@@ -168,6 +173,8 @@ def normalize_sector_nine_turn_config(raw: Optional[Mapping[str, Any]]) -> Dict[
     signal = _normalize_section(signal_raw, defaults["signal"], _SIGNAL_BOUNDS)
     sell_mode = str(signal_raw.get("sell_mode") or defaults["signal"]["sell_mode"])
     signal["sell_mode"] = sell_mode if sell_mode in SELL_MODES else defaults["signal"]["sell_mode"]
+    signal["volume_filter_enabled"] = _bool(
+        signal_raw.get("volume_filter_enabled"), defaults["signal"]["volume_filter_enabled"])
     result["signal"] = signal
 
     portfolio_raw = source.get("portfolio") if isinstance(source.get("portfolio"), Mapping) else {}
