@@ -23,6 +23,11 @@ export const adminRouteDescriptors = [
     props: { initialTab: 'fund-flow' },
   },
   {
+    path: '/market/earnings-gap',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
+    props: { initialTab: 'earnings-gap' },
+  },
+  {
     path: '/chan-analysis',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/ChanAnalysis')),
   },

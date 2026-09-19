@@ -964,6 +964,24 @@ def _run_hk_index_fear_greed_backfill(
     )
 
 
+def _run_a_stock_earnings_gap_scan():
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过净利润断层扫描: {today_shanghai} 不是A股交易日"
+
+    from ..core.services.earnings_gap import refresh_earnings_gap
+
+    payload = refresh_earnings_gap()
+    today_signals = sum(1 for item in payload["items"] if item["signal_date"] == payload["trade_date"])
+    message = (
+        f"净利润断层扫描完成: trade_date={payload['trade_date']} "
+        f"signals={len(payload['items'])} today_signals={today_signals}"
+    )
+    if payload.get("warnings"):
+        message += " warnings=" + "；".join(payload["warnings"])
+    return message
+
+
 def _run_a_stock_fear_greed_intraday(
     symbols: Optional[Any] = None,
     history_days: int = A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS,
@@ -1792,6 +1810,16 @@ class ScheduledTaskManager:
                         description="可选，逗号/空格分隔；为空时计算全部非创新100的A股指数。",
                     ),
                 ),
+            ),
+            "a_stock_earnings_gap_scan": TaskDefinition(
+                task_key="a_stock_earnings_gap_scan",
+                name="净利润断层信号",
+                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的财报和日K扫描全A最近一期财报：净利增速30%~3000%、公告后首个交易日(T+1)跳空高开≥2%、收阳未封板、成交额≥3000万、上市满120个交易日，按T+1收盘出买入信号，结果供「市场-净利润断层」页展示。",
+                default_time="18:25",
+                default_enabled=True,
+                sort_order=76,
+                runner=_run_a_stock_earnings_gap_scan,
+                default_cron_rule="25 18 * * mon-fri",
             ),
             "hk_stock_base_data_sync": TaskDefinition(
                 task_key="hk_stock_base_data_sync",

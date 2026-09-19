@@ -1112,6 +1112,38 @@ class TushareService(QuoteProvider):
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return frame.dropna(subset=["ts_code", "trade_date"])
 
+    def get_a_stock_stk_limit_frame(self, trade_date: date, limit: int = 6000) -> pd.DataFrame:
+        """获取某交易日A股全市场涨跌停价（stk_limit，盘前 8:40 即可取到当日数据）。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        frames = []
+        offset = 0
+        while True:
+            try:
+                frame = self.pro.stk_limit(
+                    trade_date=trade_value.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,pre_close,up_limit,down_limit",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare stk_limit fetch failed for %s offset=%s: %s", trade_value, offset, exc)
+                return pd.DataFrame()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ts_code"], keep="last")
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        for column in ("pre_close", "up_limit", "down_limit"):
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["ts_code", "up_limit"])
+
     def get_a_stock_daily_range_frame(self, start_date: date, end_date: date, limit: int = 6000) -> pd.DataFrame:
         """分页获取一段时间内A股全市场价格截面。"""
         start_value = self._to_date(start_date)

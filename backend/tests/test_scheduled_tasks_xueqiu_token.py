@@ -246,6 +246,7 @@ class XueqiuTokenMonitorTest(TestCase):
             },
             "xueqiu_holdings_refresh": set(),
             "eastmoney_holdings_refresh": set(),
+            "a_stock_earnings_gap_scan": set(),
         }
 
         self.assertEqual(set(manager.task_definitions), set(expected_keys))
