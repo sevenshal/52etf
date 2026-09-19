@@ -312,12 +312,12 @@ const SoxlFearBacktest = () => {
       sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
       sub2_buy_threshold_values: parseNumberList(values.sub2_buy_threshold_values),
       sub2_volume_ratio_threshold_values: parseNumberList(values.sub2_volume_ratio_threshold_values),
-      // 第三候补与卖出MA5确认不参与网格，按固定值参与轮动
+      // 第三候补（阈值参与组合搜索，与 sub/sub2 一致）；卖出MA5确认不参与网格
       sub3_symbol: values.sub3_symbol || undefined,
       sub3_fear_source: values.sub3_fear_source || 'a_stock_930851_csi',
       sub3_volume_signal_symbol: values.sub3_volume_signal_symbol || undefined,
-      sub3_buy_threshold: values.sub3_buy_threshold ?? 20,
-      sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
+      sub3_buy_threshold_values: parseNumberList(values.sub3_buy_threshold_values),
+      sub3_volume_ratio_threshold_values: parseNumberList(values.sub3_volume_ratio_threshold_values),
       sell_ma5_confirm: values.sell_ma5_confirm || 'off',
       // 估值点位闸门（参与组合搜索；none=关闭）
       valuation_window_values: values.valuation_window_values?.length ? values.valuation_window_values : [252],
@@ -572,7 +572,7 @@ const SoxlFearBacktest = () => {
       width: 200,
       ellipsis: true,
       render: (value, record) => (value
-        ? <Tag color="purple">{value} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}{record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}</Tag>
+        ? <Tag color="purple">{symbolDisplayName(value)} 恐慌≤{record.sub_buy_threshold}/量比≥{record.sub_volume_ratio_threshold}{record.swap_threshold != null ? `/换仓>${record.swap_threshold}` : ''}</Tag>
         : '-'),
     },
     {
@@ -581,8 +581,23 @@ const SoxlFearBacktest = () => {
       width: 230,
       ellipsis: true,
       render: (value, record) => (value
-        ? <Tag color="magenta">{value} 恐慌≤{record.sub2_buy_threshold}/量比≥{record.sub2_volume_ratio_threshold}{record.sub2_volume_signal_symbol ? `/量比源:${record.sub2_volume_signal_symbol}` : ''}</Tag>
+        ? <Tag color="magenta">{symbolDisplayName(value)} 恐慌≤{record.sub2_buy_threshold}/量比≥{record.sub2_volume_ratio_threshold}{record.sub2_volume_signal_symbol ? `/量比源:${symbolDisplayName(record.sub2_volume_signal_symbol)}` : ''}</Tag>
         : '-'),
+    },
+    {
+      title: '第三候补',
+      dataIndex: 'sub3_symbol',
+      width: 230,
+      ellipsis: true,
+      render: (value, record) => (value
+        ? <Tag color="green">{symbolDisplayName(value)} 恐慌≤{record.sub3_buy_threshold}/量比≥{record.sub3_volume_ratio_threshold}{record.sub3_volume_signal_symbol ? `/量比源:${symbolDisplayName(record.sub3_volume_signal_symbol)}` : ''}</Tag>
+        : '-'),
+    },
+    {
+      title: '卖出确认',
+      dataIndex: 'sell_ma5_confirm',
+      width: 150,
+      render: value => SELL_MA5_CONFIRM_LABELS[value || 'off'] || '关闭（贪婪即卖）',
     },
     {
       title: '估值闸门',
@@ -1197,8 +1212,8 @@ const SoxlFearBacktest = () => {
             sub3_symbol: undefined,
             sub3_fear_source: 'a_stock_930851_csi',
             sub3_volume_signal_symbol: undefined,
-            sub3_buy_threshold: 20,
-            sub3_volume_ratio_threshold: 1.3,
+            sub3_buy_threshold_values: '20',
+            sub3_volume_ratio_threshold_values: '1.3',
             sell_ma5_confirm: 'off',
             valuation_window_values: [252],
             valuation_buy_max_values: 'none',
@@ -1458,8 +1473,8 @@ const SoxlFearBacktest = () => {
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="第三候补 + 卖出跌破MA5确认（可选，均不参与网格搜索）"
-                description="第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐）。卖出跌破MA5确认：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。红利+半导体+纳指科技 2023-03-22 起：关闭 274.7%，全部都等 275.9%，仅候补等 315.7%（夏普 2.43，最大回撤 9.8% 不变）。"
+                message="第三候补 + 卖出跌破MA5确认（可选）"
+                description="第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。红利+半导体+纳指科技 2023-03-22 起：关闭 274.7%，全部都等 275.9%，仅候补等 315.7%（夏普 2.43，最大回撤 9.8% 不变）。"
               />
             </Col>
             <Col xs={24} md={4}>
@@ -1478,15 +1493,15 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub3_buy_threshold" label="第三候补恐慌阈值(<=)">
-                <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+              <Form.Item name="sub3_buy_threshold_values" label="第三候补恐慌阈值(<=)候选">
+                <Input placeholder="例如 20,25" />
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
-              <Form.Item name="sub3_volume_ratio_threshold" label="第三候补量比阈值(>=)"
+              <Form.Item name="sub3_volume_ratio_threshold_values" label="第三候补量比阈值(>=)候选"
                 tooltip={sub2RatioDisabled ? '已启用统一放量标准差(log-z)，第三候补放量统一用该标准差，此阈值被忽略' : '第三候补放量量比阈值'}
               >
-                <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={sub2RatioDisabled} />
+                <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>

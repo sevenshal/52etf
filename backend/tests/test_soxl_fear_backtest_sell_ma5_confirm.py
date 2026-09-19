@@ -4,6 +4,8 @@ MA5 口径与实盘一致：用「量比来源标的」的收盘价，跌破自�
 卖出信号一旦成立就一直挂着（即使贪恐回落），挂起期间不发起换仓。
 """
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 
@@ -145,3 +147,83 @@ def test_sub3_joins_rotation_and_can_be_bought():
     )
     buys = [item for item in result["trades"] if item["action"] == "BUY"]
     assert buys and buys[0]["symbol"] == "516510.SH"
+
+
+def test_sub3_thresholds_join_the_search_grid():
+    """第三候补阈值是候选列表，和 sub/sub2 一样参与组合搜索。"""
+    from itertools import product
+
+    from src.app.api.soxl_fear_backtest import (
+        SOXLFearSearchParams,
+        _count_search_params,
+        _evaluate_search_batch,
+    )
+
+    payload = SOXLFearSearchParams(
+        symbol="510880.SH",
+        sub_symbol="512480.SH",
+        sub3_symbol="516510.SH",
+        sub3_buy_threshold_values=[20.0, 25.0],
+        sub3_volume_ratio_threshold_values=[1.3, 1.6],
+    )
+    base = SOXLFearSearchParams(symbol="510880.SH", sub_symbol="512480.SH")
+    # 2 × 2 组第三候补阈值 → 组合数翻 4 倍
+    assert _count_search_params(payload) == _count_search_params(base) * 4
+
+    # 网格里的取值要如实落到回测参数上（防止元组顺序错位）
+    values = next(iter(product(
+        payload.buy_threshold_values, payload.greed_threshold_values,
+        payload.volume_ratio_threshold_values, payload.volume_ratio_consecutive_days_values,
+        payload.buy_position_pct_values, payload.cooldown_days_values,
+        payload.trailing_stop_pct_values, payload.sell_position_pct_values,
+        payload.sell_reduction_basis_values, payload.sell_price_above_avg_cost_values,
+        payload.max_take_profit_sells_per_cycle_values, payload.min_position_pct_after_take_profit_values,
+        payload.execute_next_open_values, payload.sub_buy_threshold_values,
+        payload.sub_volume_ratio_threshold_values, payload.swap_threshold_values,
+        payload.sub2_buy_threshold_values, payload.sub2_volume_ratio_threshold_values,
+        [25.0], [1.6],  # 第三候补恐慌阈值 / 量比阈值
+        payload.volume_z_threshold_values, payload.sell_shrink_z_values,
+        payload.buy_turn_signal_mode_values, payload.sell_turn_signal_mode_values,
+        payload.ma5_bottom_score_values, payload.ma5_top_score_values,
+        payload.ma5_lookback_days_values, payload.volume_bottom_score_values,
+        payload.volume_top_score_values, payload.volume_expand_std_values,
+        payload.volume_shrink_std_values, payload.turn_signal_cooldown_days_values,
+        payload.valuation_window_values, payload.valuation_buy_max_values,
+        payload.valuation_sell_min_values, payload.valuation_force_sell_greed_values,
+    )))
+    captured = {}
+
+    def _capture(base_df, sub_base_df, params, initial_capital, detailed=False, **kwargs):
+        captured["params"] = params
+        return {"total_return": 0.0, "annualized_return": 0.0, "sharpe_ratio": 0.0,
+                "max_drawdown": 0.0, "calmar_ratio": 0.0}
+
+    main, sub = _seesaw_frames()
+    with patch("src.app.api.soxl_fear_backtest._run_seesaw_backtest", _capture):
+        _evaluate_search_batch(
+            main, "a_stock_000015_sh", "上证红利 指数贪恐", 100000.0, "annualized_return", 0.0,
+            [(0, values)], 0.0, 0.0,
+            sub_base_df=sub, sub_symbol="512480.SH",
+            sub3_base_df=main, sub3_symbol="516510.SH",
+        )
+    assert captured["params"].sub3_buy_threshold == 25.0
+    assert captured["params"].sub3_volume_ratio_threshold == 1.6
+
+
+def test_seesaw_trailing_stop_tracks_greed_peak():
+    """移动止盈 > 0 的跷跷板回测：回撤到阈值才卖（曾因 greed_peak_price 漏写 nonlocal 直接抛错）。"""
+    # 第 2 天极恐买入；第 5 天起贪婪并冲高，之后回落超过 10%
+    fear = [50.0, 20.0, 50.0, 50.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+    close = [10.0, 10.0, 11.0, 12.0, 20.0, 20.0, 19.5, 17.0, 17.0, 17.0]
+    main = _frame(fear, close)
+    sub = _frame([50.0] * 10, [10.0] * 10, symbol="512480.SH", label="科创50 指数贪恐")
+    params = _params(
+        trailing_stop_pct=10.0,
+        sub_symbol="512480.SH", sub_buy_threshold=30, sub_volume_ratio_threshold=1.5,
+        swap_threshold=45,
+    )
+    result = _run_seesaw_backtest(main, sub, params, 100000.0, detailed=True)
+    sells = [item for item in result["trades"] if item["action"] == "SELL"]
+    # 峰值 20.0，跌到 17.0 回撤 15% >= 10% 触发
+    assert [item["date"] for item in sells] == ["2025-03-12"]
+    assert "移动止盈" in sells[0]["reason"]
