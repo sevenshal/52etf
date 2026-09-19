@@ -74,7 +74,8 @@ def _sector_state(code: str, bars: Sequence[Mapping[str, Any]], params: SignalPa
         if int(rows[index].get("lowCount") or 0) >= params.low_count_min:
             low9_date = dates[index]
             break
-    turn_indices = set(low_high_turn_indices(rows, params))
+    turn_indices = set(low_high_turn_indices(rows, params, high_min=params.sector_high_min,
+                                             high_max=params.sector_high_max))
     triggered_today = (len(rows) - 1) in turn_indices
     today_trigger = next((item for item in triggers if item["signal_date"] == as_of), None)
     return {
@@ -227,18 +228,21 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
                     "等高9后的低2" if state["high9_armed"] else f"还没出现高{params.high_count_min}"
                 )
         elif sector is not None:
-            fired = set(low_high_turn_indices(rows, params, require_volume=True))
+            fired = set(low_high_turn_indices(
+                rows, params, high_min=params.buy_high_min, high_max=params.buy_high_max,
+                require_volume=True))
             if (len(rows) - 1) in fired:
                 record["action"] = ACTION_BUY
-                note = f"低{params.low_count_min}后首次高{params.buy_high_count}"
+                note = f"低{params.low_count_min}后高{record['high_count']}"
                 if params.volume_filter_enabled and record["volume_z"] is not None:
                     note += f"，放量 z={record['volume_z']:.2f}"
                 record["note"] = note
                 buy_signals.append(record)
-            elif (len(rows) - 1) in set(low_high_turn_indices(rows, params)):
+            elif (len(rows) - 1) in set(low_high_turn_indices(
+                    rows, params, high_min=params.buy_high_min, high_max=params.buy_high_max)):
                 # 形态到了但量没放出来：记下来，页面上能看到"差在哪"
                 record["note"] = (
-                    f"低{params.low_count_min}后首次高{params.buy_high_count}，"
+                    f"低{params.low_count_min}后高{record['high_count']}，"
                     f"但放量 z="
                     f"{record['volume_z']:.2f} 未过 {params.volume_z_min:g}"
                     if record["volume_z"] is not None else "形态到了但当天没有成交量数据"

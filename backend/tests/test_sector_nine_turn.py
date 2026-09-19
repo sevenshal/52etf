@@ -8,6 +8,10 @@ import pytest
 from src.core.services.sector_nine_turn import backtest, config as strategy_config, daily, paper, signals
 
 PARAMS = signals.SignalParams.from_config(strategy_config.default_sector_nine_turn_config())
+# 板块层的高 N 区间（默认就是"高2"一个点）；只测形态的用例统一用它，免得被个股区间的默认值带偏
+SECTOR = {"high_min": PARAMS.sector_high_min, "high_max": PARAMS.sector_high_max}
+# 个股层的区间 + 量能
+BUY = {"high_min": PARAMS.buy_high_min, "high_max": PARAMS.buy_high_max, "require_volume": True}
 START = date(2026, 1, 5)
 
 
@@ -62,7 +66,7 @@ def test_turn_signal_fires_on_the_first_high_two_after_a_low_nine_and_only_once(
     rows[10]["highCount"] = 3
     # 同一次低 9 之后再出现的高 2 不再触发
     rows[15]["highCount"] = 2
-    assert signals.low_high_turn_indices(rows, PARAMS) == [9]
+    assert signals.low_high_turn_indices(rows, PARAMS, **SECTOR) == [9]
 
 
 def test_a_second_low_nine_arms_the_signal_again():
@@ -71,14 +75,14 @@ def test_a_second_low_nine_arms_the_signal_again():
     rows[5]["highCount"] = 2
     rows[10]["lowCount"] = 11          # ≥9 都算
     rows[14]["highCount"] = 2
-    assert signals.low_high_turn_indices(rows, PARAMS) == [5, 14]
+    assert signals.low_high_turn_indices(rows, PARAMS, **SECTOR) == [5, 14]
 
 
 def test_high_two_without_a_prior_low_nine_does_not_fire():
     rows = _rows(20)
     rows[6]["lowCount"] = 8            # 没到 9
     rows[9]["highCount"] = 2
-    assert signals.low_high_turn_indices(rows, PARAMS) == []
+    assert signals.low_high_turn_indices(rows, PARAMS, **SECTOR) == []
 
 
 def test_turn_signal_matches_the_chart_indicator_on_real_shaped_bars():
@@ -86,7 +90,7 @@ def test_turn_signal_matches_the_chart_indicator_on_real_shaped_bars():
     closes = [100 - index for index in range(16)]        # 连跌，堆出低 9 以上
     closes += [86 + index for index in range(1, 6)]      # 反弹，堆出高 1/2/3
     rows = signals.nine_turn_rows(_bars(closes))
-    fired = signals.low_high_turn_indices(rows, PARAMS)
+    fired = signals.low_high_turn_indices(rows, PARAMS, **SECTOR)
     assert fired, "应该出现低9后首次高2"
     first = fired[0]
     assert rows[first]["highCount"] == 2
@@ -95,9 +99,14 @@ def test_turn_signal_matches_the_chart_indicator_on_real_shaped_bars():
 
 # --- 量能过滤 ---------------------------------------------------------------
 
-def _shaped_closes(lead_in=30):
-    """先走平一段（让放量窗口有足够历史），再连跌堆出低9以上，最后反弹堆出高1/2/3。"""
-    return [100.0] * lead_in + [100 - index for index in range(16)] + [86 + index for index in range(1, 6)]
+def _shaped_closes(lead_in=30, rally=10):
+    """先走平一段（让放量窗口有足够历史），再连跌堆出低9以上，最后一路反弹把高 N 堆上去。"""
+    return [100.0] * lead_in + [100 - index for index in range(16)] + [86 + index for index in range(1, rally + 1)]
+
+
+def _bar_with_high_count(rows, target, after=0):
+    """找出 highCount 正好等于 target 的那一根（从 after 之后开始找）。"""
+    return next(index for index in range(after, len(rows)) if int(rows[index]["highCount"] or 0) == target)
 
 
 def _base_volumes(count):
@@ -106,21 +115,56 @@ def _base_volumes(count):
 
 
 def test_stock_signal_requires_a_volume_spike_on_the_day():
+    """区间收成一个点（只有高2一根候选），单独验量能这一条。"""
+    one_bar = {"high_min": 2, "high_max": 2, "require_volume": True}
     closes = _shaped_closes()
     volumes = _base_volumes(len(closes))
     rows = signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS)
-    shape_only = signals.low_high_turn_indices(rows, PARAMS)
-    assert shape_only, "形态本身应该触发"
-    fired = shape_only[0]
-    # 成交量只是正常起伏 → z 值远不到 1 个标准差
-    assert rows[fired]["volumeZScore"] < PARAMS.volume_z_min
-    assert signals.low_high_turn_indices(rows, PARAMS, require_volume=True) == []
+    fired = signals.low_high_turn_indices(rows, PARAMS, high_min=2, high_max=2)
+    assert fired, "形态本身应该触发"
+    bar = fired[0]
+    assert rows[bar]["volumeZScore"] < PARAMS.volume_z_min
+    assert signals.low_high_turn_indices(rows, PARAMS, **one_bar) == []
 
     spiked = list(volumes)
-    spiked[fired] = 3_000_000.0
+    spiked[bar] = 3_000_000.0
     rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
-    assert rows[fired]["volumeZScore"] > PARAMS.volume_z_min
-    assert signals.low_high_turn_indices(rows, PARAMS, require_volume=True) == shape_only
+    assert rows[bar]["volumeZScore"] > PARAMS.volume_z_min
+    assert signals.low_high_turn_indices(rows, PARAMS, **one_bar) == fired
+
+
+def test_high_range_waits_for_the_first_bar_that_actually_has_volume():
+    """区间的意义：高1没放量就等高2、高3……第一根放量的才是信号。"""
+    closes = _shaped_closes()
+    volumes = _base_volumes(len(closes))
+    rows = signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS)
+    high_one = signals.low_high_turn_indices(rows, PARAMS, high_min=1, high_max=1)[0]
+    high_three = _bar_with_high_count(rows, 3, after=high_one)
+
+    spiked = list(volumes)
+    spiked[high_three] = 3_000_000.0
+    rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
+    assert signals.low_high_turn_indices(
+        rows, PARAMS, high_min=1, high_max=4, require_volume=True) == [high_three]
+
+
+def test_high_range_gives_up_once_the_count_passes_the_upper_bound():
+    """区间内（高1~高4）都没放量，等到高5 才放量——这一次低9 已经作废，不补开。"""
+    closes = _shaped_closes()
+    volumes = _base_volumes(len(closes))
+    rows = signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS)
+    high_one = signals.low_high_turn_indices(rows, PARAMS, high_min=1, high_max=1)[0]
+    beyond = _bar_with_high_count(rows, 5, after=high_one)     # 高5，已经冲过上限
+    spiked = list(volumes)
+    # 区间内几根压成缩量，确保它们自己不会先触发
+    for index in range(high_one, beyond):
+        spiked[index] = 300_000.0
+    spiked[beyond] = 3_000_000.0
+    rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
+    assert all(rows[index]["volumeZScore"] < PARAMS.volume_z_min for index in range(high_one, beyond))
+    assert rows[beyond]["volumeZScore"] > PARAMS.volume_z_min
+    assert signals.low_high_turn_indices(
+        rows, PARAMS, high_min=1, high_max=4, require_volume=True) == []
 
 
 def test_volume_filter_uses_the_prior_window_not_including_today():
@@ -128,7 +172,8 @@ def test_volume_filter_uses_the_prior_window_not_including_today():
     closes = _shaped_closes()
     volumes = _base_volumes(len(closes))
     fired = signals.low_high_turn_indices(
-        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS)[0]
+        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS,
+        high_min=2, high_max=2)[0]
     spiked = list(volumes)
     spiked[fired] = 3_000_000.0
     rows = signals.nine_turn_rows(_volume_bars(closes, spiked), PARAMS)
@@ -144,26 +189,28 @@ def test_volume_filter_uses_the_prior_window_not_including_today():
         shrunk[index] = 4_000_000.0 + offset * 100_000.0     # 有起伏，标准差不为 0
     rows = signals.nine_turn_rows(_volume_bars(closes, shrunk), window)
     assert rows[fired]["volumeZScore"] < 0
-    assert signals.low_high_turn_indices(rows, window, require_volume=True) == []
+    assert signals.low_high_turn_indices(
+        rows, window, high_min=2, high_max=2, require_volume=True) == []
 
 
 def test_volume_filter_can_be_turned_off_and_threshold_is_configurable():
     closes = _shaped_closes()
     volumes = _base_volumes(len(closes))
+    one_bar = {"high_min": 2, "high_max": 2, "require_volume": True}
     fired = signals.low_high_turn_indices(
-        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS)
+        signals.nine_turn_rows(_volume_bars(closes, volumes), PARAMS), PARAMS, high_min=2, high_max=2)
     volumes[fired[0]] = 1_600_000.0            # 温和放量
 
     off = signals.SignalParams(volume_filter_enabled=False)
     assert signals.low_high_turn_indices(
-        signals.nine_turn_rows(_volume_bars(closes, volumes), off), off, require_volume=True) == fired
+        signals.nine_turn_rows(_volume_bars(closes, volumes), off), off, **one_bar) == fired
 
     loose = signals.SignalParams(volume_z_min=0.5)
     strict = signals.SignalParams(volume_z_min=8.0)
     assert signals.low_high_turn_indices(
-        signals.nine_turn_rows(_volume_bars(closes, volumes), loose), loose, require_volume=True) == fired
+        signals.nine_turn_rows(_volume_bars(closes, volumes), loose), loose, **one_bar) == fired
     assert signals.low_high_turn_indices(
-        signals.nine_turn_rows(_volume_bars(closes, volumes), strict), strict, require_volume=True) == []
+        signals.nine_turn_rows(_volume_bars(closes, volumes), strict), strict, **one_bar) == []
 
 
 def test_volume_filter_does_not_block_when_the_window_is_incomplete():
@@ -171,9 +218,10 @@ def test_volume_filter_does_not_block_when_the_window_is_incomplete():
     closes = _shaped_closes()
     params = signals.SignalParams(volume_lookback_days=250)
     rows = signals.nine_turn_rows(_volume_bars(closes, _base_volumes(len(closes))), params)
-    fired = signals.low_high_turn_indices(rows, PARAMS)
+    fired = signals.low_high_turn_indices(rows, PARAMS, high_min=2, high_max=2)
     assert rows[fired[0]]["volumeZScore"] is None
-    assert signals.low_high_turn_indices(rows, params, require_volume=True) == fired
+    assert signals.low_high_turn_indices(
+        rows, params, high_min=2, high_max=2, require_volume=True) == fired
 
 
 def test_sector_triggers_ignore_volume():
@@ -266,23 +314,25 @@ def test_fear_gate_looks_back_several_trading_days():
     bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
     dates = _dates(bars)
     rows = signals.nine_turn_rows(bars)
-    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS, **SECTOR)[0]
     trigger_day = dates[trigger_index]
 
-    # 触发当天 55（不过闸门），但 3 个交易日前是 28（过闸门）
+    inside = PARAMS.fear_lookback_days - 1          # 窗口含当天，最早能算数的那一天
+    outside = PARAMS.fear_lookback_days + 1
+    # 触发当天 55（不过闸门），但窗口内最早那天是 28（过闸门）
     scores = {day: 55.0 for day in dates}
-    scores[dates[trigger_index - 3]] = 28.0
+    scores[dates[trigger_index - inside]] = 28.0
     triggers = signals.sector_triggers(rows, dates, PARAMS, scores)
     today = next(item for item in triggers if item["signal_date"] == trigger_day)
     assert today["fear_score"] == 55.0            # 当天分数照实记录
     assert today["fear_min"] == 28.0              # 闸门看的是窗口最低分
-    assert today["fear_pass_date"] == dates[trigger_index - 3]
+    assert today["fear_pass_date"] == dates[trigger_index - inside]
     assert today["fear_passed"] is True
     assert signals.armed_windows(triggers, dates, PARAMS).get(trigger_day)
 
-    # 同样的 28 挪到窗口之外（5 个交易日前的更早一天）就不算数了
+    # 同样的 28 挪到窗口之外就不算数了
     stale = {day: 55.0 for day in dates}
-    stale[dates[trigger_index - 6]] = 28.0
+    stale[dates[trigger_index - outside]] = 28.0
     triggers = signals.sector_triggers(rows, dates, PARAMS, stale)
     today = next(item for item in triggers if item["signal_date"] == trigger_day)
     assert today["fear_passed"] is False
@@ -293,9 +343,9 @@ def test_fear_lookback_one_day_is_the_old_same_day_rule():
     bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
     dates = _dates(bars)
     rows = signals.nine_turn_rows(bars)
-    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS, **SECTOR)[0]
     scores = {day: 55.0 for day in dates}
-    scores[dates[trigger_index - 2]] = 28.0
+    scores[dates[trigger_index - 1]] = 28.0
     same_day = signals.SignalParams(fear_lookback_days=1)
     triggers = signals.sector_triggers(rows, dates, same_day, scores)
     assert all(not trigger["fear_passed"] for trigger in triggers)
@@ -306,7 +356,7 @@ def test_armed_window_ranks_by_the_most_fearful_day_in_the_lookback():
     bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
     dates = _dates(bars)
     rows = signals.nine_turn_rows(bars)
-    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS, **SECTOR)[0]
     scores = {day: 55.0 for day in dates}
     scores[dates[trigger_index - 1]] = 22.0
     triggers = signals.sector_triggers(rows, dates, PARAMS, scores)
@@ -332,17 +382,27 @@ def test_default_universe_drops_broad_indexes_but_keeps_star_and_dividend():
         assert dropped not in codes
 
 
-def test_default_signal_params_match_the_best_backtest_setting():
+def test_default_signal_params_match_the_parameter_search_result():
     params = signals.SignalParams.from_config(strategy_config.default_sector_nine_turn_config())
     assert params.arm_window_days == 0          # 板块与个股同日
     assert params.fear_threshold == 40.0
-    assert params.fear_lookback_days == 5       # 闸门看最近 5 个交易日，不是只看当天
+    assert params.fear_lookback_days == 3       # 闸门看最近 3 个交易日，不是只看当天
     assert params.volume_filter_enabled is True
     assert params.volume_z_min == 1.0           # 放量至少 1 个标准差
     assert params.volume_lookback_days == 20    # 窗口不含当日，往前 20 个交易日
-    assert params.low_count_min == 9 and params.buy_high_count == 2
+    assert params.low_count_min == 9
+    assert (params.buy_high_min, params.buy_high_max) == (2, 4)
+    assert (params.sector_high_min, params.sector_high_max) == (2, 2)
     assert params.high_count_min == 9 and params.sell_low_count == 2
     assert params.sell_atr_multiple == 2.0
+
+
+def test_signal_params_dataclass_defaults_match_the_config_defaults():
+    """直接 SignalParams() 构造的，必须和走配置那条路完全一样——否则两边会悄悄漂移。"""
+    from dataclasses import asdict
+
+    assert asdict(signals.SignalParams()) == asdict(
+        signals.SignalParams.from_config(strategy_config.default_sector_nine_turn_config()))
 
 
 def test_config_normalization_clamps_and_drops_unknown_keys():
@@ -482,6 +542,7 @@ def test_run_backtest_produces_trades_navs_and_ablations(fake_market, monkeypatc
     days = fake_market
     config = strategy_config.default_sector_nine_turn_config()
     config["universe"]["index_codes"] = ["931151.CSI"]
+    config["signal"]["buy_high_min"] = 2        # 和板块同一个点，专测流水线
     result = backtest.run_backtest(config, days[0], days[-1], random_trials=3)
 
     assert result["sector_triggers"] >= 1
@@ -509,6 +570,7 @@ def test_fear_gate_removes_all_trades_when_the_market_is_greedy(fake_market, mon
                         lambda codes, as_of: {code: {day: 90.0 for day in days} for code in codes})
     config = strategy_config.default_sector_nine_turn_config()
     config["universe"]["index_codes"] = ["931151.CSI"]
+    config["signal"]["buy_high_min"] = 2
     result = backtest.run_backtest(config, days[0], days[-1], random_trials=0)
 
     assert result["sector_triggers_fear_passed"] == 0
@@ -541,10 +603,8 @@ def fake_daily(monkeypatch):
     closes = _falling_then_rising()
     bars = _bars(closes)
     days = _dates(bars)
-    trigger_day = None
     rows = signals.nine_turn_rows(bars)
-    fired = signals.low_high_turn_indices(rows, PARAMS)
-    trigger_day = days[fired[0]]
+    trigger_day = days[signals.low_high_turn_indices(rows, PARAMS, **SECTOR)[0]]
 
     monkeypatch.setattr(daily.data, "latest_trade_date", lambda as_of=None, **kwargs: as_of or days[-1])
     monkeypatch.setattr(daily.data, "load_index_bars",
@@ -570,6 +630,7 @@ def test_run_trading_day_writes_snapshots_and_queues_a_buy_order(fake_daily):
     paper.reset_paper(1000000.0)
     config = strategy_config.default_sector_nine_turn_config()
     config["universe"]["index_codes"] = ["931151.CSI"]
+    config["signal"]["buy_high_min"] = 2
 
     result = daily.run_trading_day(as_of=trigger_day, config=config)
     assert result["status"] == "completed"
@@ -599,6 +660,7 @@ def test_run_trading_day_on_a_quiet_day_produces_no_orders(fake_daily):
     paper.reset_paper(1000000.0)
     config = strategy_config.default_sector_nine_turn_config()
     config["universe"]["index_codes"] = ["931151.CSI"]
+    config["signal"]["buy_high_min"] = 2
 
     quiet = days[5]                       # 还在连跌途中，没有高 2
     result = daily.run_trading_day(as_of=quiet, config=config)
@@ -632,6 +694,7 @@ def test_two_day_flow_order_on_the_signal_day_then_fills_next_open(fake_daily, m
     paper.reset_paper(1000000.0)
     config = strategy_config.default_sector_nine_turn_config()
     config["universe"]["index_codes"] = ["931151.CSI"]
+    config["signal"]["buy_high_min"] = 2
 
     first = daily.run_trading_day(as_of=trigger_day, config=config)
     assert first["summary"]["buy_orders"] == 1

@@ -588,9 +588,24 @@ const ConfigEditor = ({ state, draft, onChange }) => {
                        onChange={value => setSection('signal', 'low_count_min', value)} />
         </div>
         <div className="stock-system__config-row">
-          <span className="stock-system__config-label">买入高 M</span>
-          <InputNumber min={1} max={9} value={draft.signal.buy_high_count}
-                       onChange={value => setSection('signal', 'buy_high_count', value)} />
+          <span className="stock-system__config-label">个股买点·高 N 区间</span>
+          <Space>
+            <InputNumber min={1} max={9} value={draft.signal.buy_high_min} style={{ width: 70 }}
+                         onChange={value => setSection('signal', 'buy_high_min', value)} />
+            <span>~</span>
+            <InputNumber min={1} max={9} value={draft.signal.buy_high_max} style={{ width: 70 }}
+                         onChange={value => setSection('signal', 'buy_high_max', value)} />
+          </Space>
+        </div>
+        <div className="stock-system__config-row">
+          <span className="stock-system__config-label">板块触发·高 N 区间</span>
+          <Space>
+            <InputNumber min={1} max={9} value={draft.signal.sector_high_min} style={{ width: 70 }}
+                         onChange={value => setSection('signal', 'sector_high_min', value)} />
+            <span>~</span>
+            <InputNumber min={1} max={9} value={draft.signal.sector_high_max} style={{ width: 70 }}
+                         onChange={value => setSection('signal', 'sector_high_max', value)} />
+          </Space>
         </div>
         <div className="stock-system__config-row">
           <span className="stock-system__config-label">布防窗口（交易日，0=同日）</span>
@@ -776,9 +791,9 @@ const SectorNineTurn = () => {
         <div>
           <Title level={4} style={{ margin: 0 }}>板块九转</Title>
           <Paragraph type="secondary" style={{ margin: '4px 0 0' }}>
-            板块自身出现神奇九转低 9 后首次高 2、且最近 5 个交易日（含当天）自算贪恐分数触及过 ≤ 40 时进入布防；布防中的板块里，
-            成分股自己也出现低 9 后首次高 2、且当天放量（log 成交量高于前 20 个交易日均值 1 个标准差）
-            就买入（默认要求板块与个股同日）。持仓在出现高 9 后首次低 2
+            板块自身出现神奇九转低 9 后首次高 2、且最近 3 个交易日（含当天）自算贪恐分数触及过 ≤ 40 时进入布防；
+            布防中的板块里，成分股在低 9 之后、高 2~4 区间内第一根放量（log 成交量高于前 20 个交易日均值
+            1 个标准差）的 K 线买入（默认要求板块与个股同日）。持仓在出现高 9 后首次低 2
             且回撤超过 2 个 ATR 时卖出。九转和 ATR 与个股详情页 K 线图同一套算法，每个交易日 19:20 自动计算。
           </Paragraph>
         </div>

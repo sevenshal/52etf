@@ -110,7 +110,10 @@ class Variant:
     arm_window: int = 0
     # 个股入场
     low_count_min: int = 9
-    buy_high_count: int = 2
+    buy_high_min: int = 2                   # 个股买点允许的高 N 区间（含两端）
+    buy_high_max: int = 2
+    sector_high_min: int = 2                # 板块触发的高 N 区间
+    sector_high_max: int = 2
     volume_z_min: Optional[float] = None    # None = 不看量能；给了就要求放量 z 大于它
     volume_lookback: int = 20
     # 基本面（选股系统第一层）
@@ -267,19 +270,28 @@ def build_cache(analytics_db: str, sqlite_db: str, start: date, end: date) -> Di
 
 
 def _turn_signals(arrays: Mapping[str, Any], fear: Mapping[date, float],
-                  start: date, end: date, low_min: int = 9, high_count: int = 2) -> List[Dict[str, Any]]:
+                  start: date, end: date, low_min: int = 9,
+                  high_min: int = 2, high_max: int = 2) -> List[Dict[str, Any]]:
+    """低 N 后首个落在高 [min, max] 区间的那根；和生产 low_high_turn_indices 同一套语义。"""
     armed = False
     fired: List[Dict[str, Any]] = []
     dates = arrays["dates"]
+    low_counts, high_counts = arrays["low_count"], arrays["high_count"]
     for index in range(len(dates)):
-        if arrays["low_count"][index] >= low_min:
+        if low_counts[index] >= low_min:
             armed = True
-        if armed and arrays["high_count"][index] == high_count:
+            continue
+        if not armed:
+            continue
+        if high_counts[index] > high_max:
             armed = False
-            day = dates[index]
-            if start <= day <= end:
-                score = fear.get(day)
-                fired.append({"index": index, "signal_date": day, "fear_score": score})
+            continue
+        if high_counts[index] < high_min:
+            continue
+        armed = False
+        day = dates[index]
+        if start <= day <= end:
+            fired.append({"index": index, "signal_date": day, "fear_score": fear.get(day)})
     return fired
 
 
@@ -383,8 +395,13 @@ def armed_days(cache: Mapping[str, Any], variant: Variant) -> Dict[str, Dict[dat
     result: Dict[str, Dict[date, Dict[str, Any]]] = {}
     for code in _sector_universe(variant.sectors):
         arrays = cache["sector_arrays"].get(code)
-        items = cache["triggers"].get(code)
-        if not arrays or not items:
+        if not arrays:
+            continue
+        # 不用缓存里那份（它是按固定"高2"算的），按变体的板块区间现算
+        items = _turn_signals(arrays, cache["fear"].get(code) or {}, cache["start"], cache["end"],
+                             low_min=variant.low_count_min,
+                             high_min=variant.sector_high_min, high_max=variant.sector_high_max)
+        if not items:
             continue
         snapshots = cache["memberships"].get(code) or []
         dates = arrays["dates"]
@@ -415,20 +432,29 @@ def armed_days(cache: Mapping[str, Any], variant: Variant) -> Dict[str, Dict[dat
 
 
 def stock_turn_indices(arrays: Mapping[str, Any], variant: Variant) -> List[int]:
+    """和生产 low_high_turn_indices(require_volume=True) 同一套语义。"""
     armed = False
     fired: List[int] = []
     z_values = (arrays.get("volume_z") or {}).get(variant.volume_lookback)
+    low_counts, high_counts = arrays["low_count"], arrays["high_count"]
     for index in range(len(arrays["dates"])):
-        if arrays["low_count"][index] >= variant.low_count_min:
+        if low_counts[index] >= variant.low_count_min:
             armed = True
-        if armed and arrays["high_count"][index] == variant.buy_high_count:
+            continue
+        if not armed:
+            continue
+        if high_counts[index] > variant.buy_high_max:
             armed = False
-            if variant.volume_z_min is not None and z_values is not None:
-                value = z_values[index]
-                # 缺 z 值（上市不满窗口/停牌）时不拦，与生产口径一致
-                if np.isfinite(value) and not value > variant.volume_z_min:
-                    continue
-            fired.append(index)
+            continue
+        if high_counts[index] < variant.buy_high_min:
+            continue
+        if variant.volume_z_min is not None and z_values is not None:
+            value = z_values[index]
+            # 缺 z 值（上市不满窗口/停牌）时不拦，与生产口径一致
+            if np.isfinite(value) and not value > variant.volume_z_min:
+                continue
+        fired.append(index)
+        armed = False
     return fired
 
 
@@ -744,11 +770,12 @@ def stage_three() -> List[Variant]:
     for low in (7, 8, 10, 11, 12, 13):
         variants.append(replace(base5, key=f"low{low}", label=f"个股低{low}起算", low_count_min=low))
     for high in (1, 3, 4):
-        variants.append(replace(base5, key=f"high{high}", label=f"个股买在高{high}", buy_high_count=high))
+        variants.append(replace(base5, key=f"high{high}", label=f"个股买在高{high}",
+                                buy_high_min=high, buy_high_max=high))
     # 板块和个股用不同的低 N（板块要深、个股可浅一点）——需要两套参数，这里用近似：只调个股
     for low, high in ((7, 1), (8, 1), (10, 3), (12, 3)):
         variants.append(replace(base5, key=f"low{low}high{high}", label=f"个股低{low}+高{high}",
-                                low_count_min=low, buy_high_count=high))
+                                low_count_min=low, buy_high_min=high, buy_high_max=high))
     return variants
 
 

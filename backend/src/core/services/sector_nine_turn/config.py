@@ -59,11 +59,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "signal": {
         "fear_threshold": 40.0,
-        "fear_lookback_days": 5.0,
+        "fear_lookback_days": 3.0,
         "volume_z_min": 1.0,
         "volume_lookback_days": 20.0,
         "low_count_min": 9.0,
-        "buy_high_count": 2.0,
+        "buy_high_min": 2.0,
+        "buy_high_max": 4.0,
+        "sector_high_min": 2.0,
+        "sector_high_max": 2.0,
         "arm_window_days": 0.0,
         "high_count_min": 9.0,
         "sell_low_count": 2.0,
@@ -90,7 +93,10 @@ _SIGNAL_BOUNDS = {
     "volume_z_min": (-5.0, 10.0, False),
     "volume_lookback_days": (5.0, 250.0, True),
     "low_count_min": (4.0, 30.0, True),
-    "buy_high_count": (1.0, 9.0, True),
+    "buy_high_min": (1.0, 9.0, True),
+    "buy_high_max": (1.0, 9.0, True),
+    "sector_high_min": (1.0, 9.0, True),
+    "sector_high_max": (1.0, 9.0, True),
     "arm_window_days": (0.0, 60.0, True),
     "high_count_min": (4.0, 30.0, True),
     "sell_low_count": (1.0, 9.0, True),
@@ -173,6 +179,10 @@ def normalize_sector_nine_turn_config(raw: Optional[Mapping[str, Any]]) -> Dict[
     signal = _normalize_section(signal_raw, defaults["signal"], _SIGNAL_BOUNDS)
     sell_mode = str(signal_raw.get("sell_mode") or defaults["signal"]["sell_mode"])
     signal["sell_mode"] = sell_mode if sell_mode in SELL_MODES else defaults["signal"]["sell_mode"]
+    # 上下限写反了就换过来，避免存进去一个永远不可能触发的区间
+    for low_key, high_key in (("buy_high_min", "buy_high_max"), ("sector_high_min", "sector_high_max")):
+        if signal[low_key] > signal[high_key]:
+            signal[low_key], signal[high_key] = signal[high_key], signal[low_key]
     signal["volume_filter_enabled"] = _bool(
         signal_raw.get("volume_filter_enabled"), defaults["signal"]["volume_filter_enabled"])
     result["signal"] = signal

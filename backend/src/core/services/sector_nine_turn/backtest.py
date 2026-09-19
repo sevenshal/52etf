@@ -91,7 +91,9 @@ def _build_candidate_trades(stock_rows: Mapping[str, Dict[str, Any]],
         rows, dates = entry["rows"], entry["dates"]
         opens, closes = entry["opens"], entry["closes"]
         armed = armed_by_symbol.get(symbol) or {}
-        for position in low_high_turn_indices(rows, params, require_volume=True):
+        for position in low_high_turn_indices(
+                rows, params, high_min=params.buy_high_min, high_max=params.buy_high_max,
+                require_volume=True):
             signal_day = dates[position]
             if not (start <= signal_day <= end) or position + 1 >= len(rows):
                 continue

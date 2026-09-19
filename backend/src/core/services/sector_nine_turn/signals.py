@@ -6,11 +6,11 @@
 三条规则：
 
 - **板块触发**：板块自身出现低 N（默认 ``lowCount >= 9``）之后，**首次**出现高 M（默认
-  ``highCount == 2``）的那一天。同一次低 N 只消费一次。触发日回看最近若干个交易日（默认 5 个，
+  ``highCount`` 落在板块区间内，默认就是 2）的那一天。同一次低 N 只消费一次。触发日回看最近若干个交易日（默认 5 个，
   含当天），只要**其中任意一天**的自算贪恐分数 ≤ 闸门就算过——贪恐见底和九转翻红往往差几天，
   只看触发当天会漏掉刚反弹上来的那一批。
 - **个股买入**：板块触发后进入布防窗口（默认 0 个交易日，即板块与个股必须同日），
-  窗口内成分股自身也出现"低 N 后首次高 M"，**且当天要放量**——log 成交量比不含当日、
+  窗口内成分股自身也出现"低 N 后高 N 落进 [1, 4] 区间"，**且那一根要放量**——log 成交量比不含当日、
   往前 20 个交易日的平均 log 成交量高出至少 1 个标准差（倍数和回看天数都可配）。
   放量 z 值用的是 K 线图画放量标记的同一个函数 ``preprocess_klines_volume``。
 - **卖出**：买入后出现高 K（默认 ``highCount >= 9``），此后首次出现低 L（默认
@@ -33,17 +33,27 @@ SELL_MODE_GE = "low_ge2_wait"
 
 @dataclass(frozen=True)
 class SignalParams:
-    """从配置里取出的信号参数；回测和实盘都从同一份配置派生，避免两边漂移。"""
+    """从配置里取出的信号参数；回测和实盘都从同一份配置派生，避免两边漂移。
+
+    这里的字段默认值必须和 ``config.DEFAULT_CONFIG`` 保持一致（有测试盯着）：
+    直接 ``SignalParams()`` 构造出来的，要和走配置的那条路一模一样。
+    """
 
     low_count_min: int = 9
-    buy_high_count: int = 2
+    # 个股买点允许的高 N 范围（含两端）；范围内第一根**且放量**的那根才是信号，
+    # 所以范围给量能过滤留了重试机会：高1不放量就等高2、高3……冲过上限这次低N作废
+    buy_high_min: int = 2
+    buy_high_max: int = 4
+    # 板块触发用的高 N 范围（板块不看量能，所以这里通常是一个点）
+    sector_high_min: int = 2
+    sector_high_max: int = 2
     arm_window_days: int = 0
     high_count_min: int = 9
     sell_low_count: int = 2
     sell_atr_multiple: float = 2.0
     sell_mode: str = SELL_MODE_WAIT
     fear_threshold: float = 40.0
-    fear_lookback_days: int = 5
+    fear_lookback_days: int = 3
     volume_filter_enabled: bool = True
     volume_z_min: float = 1.0
     volume_lookback_days: int = 20
@@ -53,7 +63,10 @@ class SignalParams:
         signal = dict((config or {}).get("signal") or {})
         return cls(
             low_count_min=int(signal.get("low_count_min", 9)),
-            buy_high_count=int(signal.get("buy_high_count", 2)),
+            buy_high_min=int(signal.get("buy_high_min", 1)),
+            buy_high_max=int(signal.get("buy_high_max", 4)),
+            sector_high_min=int(signal.get("sector_high_min", 2)),
+            sector_high_max=int(signal.get("sector_high_max", 2)),
             arm_window_days=int(signal.get("arm_window_days", 0)),
             high_count_min=int(signal.get("high_count_min", 9)),
             sell_low_count=int(signal.get("sell_low_count", 2)),
@@ -104,13 +117,18 @@ def volume_passed(row: Mapping[str, Any], params: SignalParams) -> bool:
 
 
 def low_high_turn_indices(rows: Sequence[Mapping[str, Any]], params: SignalParams,
-                          *, require_volume: bool = False) -> List[int]:
-    """"低 N 后首次高 M" 的行号列表；同一次低 N 只触发一次。
+                          *, high_min: Optional[int] = None, high_max: Optional[int] = None,
+                          require_volume: bool = False) -> List[int]:
+    """"低 N 后首个落在高 [min, max] 区间、（可选）且放量的那根" 的行号；同一次低 N 只触发一次。
 
-    板块触发和个股买入用的是同一个函数——两边的形态定义必须一模一样。
-    ``require_volume`` 只在个股层打开：高 M 那根还要放量才算信号。不放量时这一次低 N
-    照样算消费掉（"首次高 M" 是形态事件，量能只是放行条件），不会留着等下一根。
+    板块触发和个股买入用的是同一个函数——两边的形态定义必须一模一样，只是区间和是否看量能
+    由调用方给：板块用 ``sector_high_*`` 且不看量能，个股用 ``buy_high_*`` 且要求放量。
+
+    区间的意义在于给量能过滤留重试机会：高1那根没放量就等高2、高3……一旦高 N 冲过上限，
+    这一次低 N 就作废，等下一次低 N。中途涨势断了（高 N 归零）不算作废，还可以等下一波。
     """
+    low = params.buy_high_min if high_min is None else high_min
+    high = params.buy_high_max if high_max is None else high_max
     armed = False
     fired: List[int] = []
     for index, row in enumerate(rows):
@@ -118,14 +136,22 @@ def low_high_turn_indices(rows: Sequence[Mapping[str, Any]], params: SignalParam
         high_count = int(row.get("highCount") or 0)
         if low_count >= params.low_count_min:
             armed = True
-        if armed and high_count == params.buy_high_count:
-            armed = False
-            if not require_volume or volume_passed(row, params):
-                fired.append(index)
+            continue
+        if not armed:
+            continue
+        if high_count > high:
+            armed = False               # 已经冲过区间上限，这次低 N 作废
+            continue
+        if high_count < low:
+            continue                    # 还没到区间（含涨势断掉的 0），继续等
+        if require_volume and not volume_passed(row, params):
+            continue                    # 形态到了但没放量，等区间内的下一根
+        fired.append(index)
+        armed = False
     return fired
 
 
-def low9_armed_state(rows: Sequence[Mapping[str, Any]], params: SignalParams) -> List[Dict[str, Any]]:
+def low9_armed_state(rows: Sequence[Mapping[str, Any]], params: SignalParams) -> List[Dict[str, Any]]:  # noqa: D401
     """逐根给出"低 N 是否已出现、出现在哪一天、当天是否触发"，页面用来解释板块状态。"""
     armed = False
     armed_index: Optional[int] = None
@@ -136,7 +162,7 @@ def low9_armed_state(rows: Sequence[Mapping[str, Any]], params: SignalParams) ->
         if low_count >= params.low_count_min:
             armed = True
             armed_index = index
-        triggered = armed and high_count == params.buy_high_count
+        triggered = armed and params.sector_high_min <= high_count <= params.sector_high_max
         state.append({"armed": armed, "armed_index": armed_index, "triggered": triggered})
         if triggered:
             armed = False
@@ -184,7 +210,8 @@ def sector_triggers(rows: Sequence[Mapping[str, Any]], dates: Sequence[date],
     """板块触发日列表，附带当天贪恐分数和是否过闸门。"""
     triggers: List[Dict[str, Any]] = []
     lookback = max(1, params.fear_lookback_days)
-    for index in low_high_turn_indices(rows, params):
+    for index in low_high_turn_indices(rows, params, high_min=params.sector_high_min,
+                                       high_max=params.sector_high_max):
         day = dates[index]
         score = None
         if fear_scores is not None:
