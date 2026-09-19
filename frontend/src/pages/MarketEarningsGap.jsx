@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Card, Input, InputNumber, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { FilterFilled, ReloadOutlined } from '@ant-design/icons';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
 
@@ -17,6 +17,53 @@ const fmtSignedPct = value => (isBlank(value) ? '-' : `${value > 0 ? '+' : ''}${
 const renderSignedPct = value => <span className={signedClass(value)}>{fmtSignedPct(value)}</span>;
 const numberSorter = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
 const stringSorter = key => (a, b) => String(a[key] || '').localeCompare(String(b[key] || ''));
+const fmtNumber = (value, digits = 2) => (isBlank(value) ? '-' : Number(value).toFixed(digits));
+
+// 数值区间过滤：filteredValue 存 [min, max]，任一端可空；设了过滤后空值不再显示
+const RangeFilterDropdown = ({ selectedKeys, setSelectedKeys, confirm, clearFilters }) => {
+  const [min, max] = selectedKeys[0] || [null, null];
+  const update = (index, value) => {
+    const next = [min, max];
+    next[index] = value ?? null;
+    setSelectedKeys(next.every(isBlank) ? [] : [next]);
+  };
+  return (
+    <div className="earnings-gap-range-filter" onKeyDown={event => event.stopPropagation()}>
+      <Space size={4}>
+        <InputNumber size="small" placeholder="最小" value={min} onChange={value => update(0, value)} />
+        <span>~</span>
+        <InputNumber size="small" placeholder="最大" value={max} onChange={value => update(1, value)} />
+      </Space>
+      <Space className="earnings-gap-range-actions">
+        <Button size="small" onClick={() => { clearFilters?.(); confirm(); }}>重置</Button>
+        <Button size="small" type="primary" onClick={() => confirm()}>确定</Button>
+      </Space>
+    </div>
+  );
+};
+
+const rangeFilter = key => ({
+  filterDropdown: props => <RangeFilterDropdown {...props} />,
+  filterIcon: filtered => <FilterFilled style={{ color: filtered ? '#1677ff' : undefined }} />,
+  onFilter: (range, record) => {
+    const [min, max] = range || [];
+    const value = record[key];
+    if (isBlank(value)) return false;
+    return (isBlank(min) || value >= min) && (isBlank(max) || value <= max);
+  },
+});
+
+const valuationColumn = (title, key, extra = {}) => ({
+  title,
+  dataIndex: key,
+  key,
+  width: 84,
+  align: 'right',
+  sorter: numberSorter(key),
+  render: value => fmtNumber(value),
+  ...rangeFilter(key),
+  ...extra,
+});
 
 const MarketEarningsGap = () => {
   const [data, setData] = useState(null);
@@ -143,6 +190,24 @@ const MarketEarningsGap = () => {
         </Space>
       ),
     },
+    valuationColumn(<Tooltip title="市盈率 TTM；亏损时为空">PE</Tooltip>, 'pe_ttm'),
+    valuationColumn(<Tooltip title="市净率">PB</Tooltip>, 'pb'),
+    valuationColumn(<Tooltip title="市销率 TTM">PS</Tooltip>, 'ps_ttm'),
+    valuationColumn(
+      <Tooltip title="扣非 ROE(TTM, %) ÷ PB，即扣非盈利收益率(%)，越大越便宜">ROE/PB</Tooltip>,
+      'roe_pb',
+      {
+        width: 96,
+        render: (value, record) => (
+          <Space direction="vertical" size={0} align="end">
+            <span>{fmtNumber(value)}</span>
+            {!isBlank(record.roe_dedt_ttm) && (
+              <Text type="secondary" className="earnings-gap-sub">ROE {fmtNumber(record.roe_dedt_ttm)}%</Text>
+            )}
+          </Space>
+        ),
+      },
+    ),
   ], [data?.trade_date]);
 
   const criteria = data?.criteria;
@@ -188,7 +253,7 @@ const MarketEarningsGap = () => {
           loading={loading}
           columns={columns}
           dataSource={items}
-          scroll={{ x: 1020 }}
+          scroll={{ x: 1400 }}
           pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
         />
       </Card>
@@ -198,7 +263,8 @@ const MarketEarningsGap = () => {
           归母净利润同比 {criteria.min_profit_yoy}%～{criteria.max_profit_yoy}%（上限剔除基数效应）；
           财报公告后首个交易日 T+1 跳空高开 ≥ {criteria.min_gap_pct}%、收盘 &gt; 开盘、收盘未封涨停、
           成交额 ≥ {(criteria.min_amount_yuan / 1e4).toFixed(0)} 万，T+1 收盘出买入信号（每个交易日 A股基础数据同步完成后计算）。
-          至今涨跌幅以 T+1 收盘价为基准、前复权计算。
+          至今涨跌幅以 T+1 收盘价为基准、前复权计算。估值取最新交易日：PE/PS 为 TTM，
+          ROE 为扣非 ROE(TTM)=最新一期扣非净利滚动 TTM ÷ 归母净资产。
         </Text>
       )}
     </div>
