@@ -10,6 +10,8 @@
 - T+1 同时满足：上市满 120 个交易日、成交额 ≥ 3000 万、开盘价较前收高开 ≥ 2%、
   收盘 > 开盘（收阳）、收盘未封涨停（以 tushare stk_limit 的涨停价为准）。
 - 信号按 T+1 收盘价买入；至今涨跌幅按前复权口径算到分析库最新一天的收盘价。
+- 估值列取分析库最新一天：PE(TTM)、PB、PS(TTM) 来自 tushare daily_basic；扣非 ROE(TTM) =
+  最新一期扣非净利润滚动 TTM ÷ 该期末归母净资产；ROE/PB = 扣非 ROE(%) ÷ PB。
 
 数据全部来自 DuckDB 分析库（财报、日K、复权因子、交易日），由每晚 A股基础数据同步写入；
 信号任务排在同步之后跑（默认 18:25，定时任务串行排队，同步没跑完会等它）。
@@ -42,6 +44,8 @@ MIN_LISTED_TRADE_DAYS = 120
 # 只在这段时间内找"最近一期财报"，更早的说明公司已长期未披露，不再参与
 REPORT_LOOKBACK_DAYS = 420
 CALENDAR_LOOKBACK_DAYS = 3 * 366
+# 扣非 ROE(TTM) 需要本期、上年年报、上年同期三期数据
+ROE_LOOKBACK_DAYS = 2 * 366
 
 CRITERIA = {
     "min_profit_yoy": MIN_PROFIT_YOY,
@@ -102,6 +106,36 @@ def fallback_up_limit(ts_code: str, pre_close: float) -> float:
     else:
         ratio = 0.10
     return round(pre_close * (1 + ratio) + 1e-9, 2)
+
+
+def ttm_from_cumulative(values: Dict[date, float], latest: date) -> Optional[float]:
+    """报告期累计值滚成 TTM：年报直接用；否则 本期累计 + 上年年报 − 上年同期累计。缺任一期返回 None。"""
+    current = values.get(latest)
+    if current is None:
+        return None
+    if latest.month == 12:
+        return current
+    last_annual = values.get(date(latest.year - 1, 12, 31))
+    try:
+        last_same = values.get(latest.replace(year=latest.year - 1))
+    except ValueError:
+        last_same = None
+    if last_annual is None or last_same is None:
+        return None
+    return current + last_annual - last_same
+
+
+def dedt_roe_ttm(profit_dedt: Dict[date, float], parent_equity: Dict[date, float]) -> Optional[float]:
+    """扣非 ROE(TTM, %) = 最新一期滚动 TTM 扣非净利 ÷ 该期末归母净资产；净资产 ≤ 0 时不算。"""
+    periods = sorted(end for end in profit_dedt if end in parent_equity)
+    if not periods:
+        return None
+    latest = periods[-1]
+    ttm = ttm_from_cumulative(profit_dedt, latest)
+    equity = parent_equity.get(latest)
+    if ttm is None or equity is None or equity <= 0:
+        return None
+    return ttm / equity * 100
 
 
 def evaluate_t1_bar(bar: Dict[str, Any], up_limit: Optional[float]) -> Dict[str, Any]:
@@ -246,7 +280,7 @@ def _latest_db_prices(connection, codes: Sequence[str]) -> Dict[str, Dict[str, A
             WHERE ts_code IN ({placeholders})
             GROUP BY ts_code
         )
-        SELECT m.ts_code, m.trade_date, m.close, f.adj_factor
+        SELECT m.ts_code, m.trade_date, m.close, m.pe_ttm, m.pb, m.ps_ttm, f.adj_factor
         FROM a_stock_market_daily m
         JOIN latest l ON l.ts_code = m.ts_code AND l.trade_date = m.trade_date
         LEFT JOIN a_stock_adj_factor f ON f.ts_code = m.ts_code AND f.trade_date = m.trade_date
@@ -258,9 +292,53 @@ def _latest_db_prices(connection, codes: Sequence[str]) -> Dict[str, Dict[str, A
             "trade_date": _to_date(row.trade_date),
             "close": safe_float(row.close),
             "adj_factor": safe_float(row.adj_factor),
+            "pe_ttm": safe_float(row.pe_ttm),
+            "pb": safe_float(row.pb),
+            "ps_ttm": safe_float(row.ps_ttm),
         }
         for row in frame.itertuples(index=False)
     }
+
+
+def _dedt_roe_by_code(connection, codes: Sequence[str], since: date) -> Dict[str, Optional[float]]:
+    """扣非 ROE(TTM)。同一报告期有更正/重述时取最新公告的数据；净资产取合并报表(report_type=1)。"""
+    if not codes:
+        return {}
+    placeholders = ",".join("?" for _ in codes)
+    profit = connection.execute(
+        f"""
+        SELECT ts_code, end_date, profit_dedt
+        FROM (
+            SELECT ts_code, end_date, profit_dedt,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn
+            FROM a_stock_fina_indicator
+            WHERE ts_code IN ({placeholders}) AND end_date >= ? AND profit_dedt IS NOT NULL
+        )
+        WHERE rn = 1
+        """,
+        [*codes, since],
+    ).fetchdf()
+    equity = connection.execute(
+        f"""
+        SELECT ts_code, end_date, total_hldr_eqy_exc_min_int
+        FROM (
+            SELECT ts_code, end_date, total_hldr_eqy_exc_min_int,
+                   ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn
+            FROM a_stock_balancesheet
+            WHERE ts_code IN ({placeholders}) AND end_date >= ? AND report_type = '1'
+              AND total_hldr_eqy_exc_min_int IS NOT NULL
+        )
+        WHERE rn = 1
+        """,
+        [*codes, since],
+    ).fetchdf()
+    profit_map: Dict[str, Dict[date, float]] = {}
+    for row in profit.itertuples(index=False):
+        profit_map.setdefault(row.ts_code, {})[_to_date(row.end_date)] = float(row.profit_dedt)
+    equity_map: Dict[str, Dict[date, float]] = {}
+    for row in equity.itertuples(index=False):
+        equity_map.setdefault(row.ts_code, {})[_to_date(row.end_date)] = float(row.total_hldr_eqy_exc_min_int)
+    return {code: dedt_roe_ttm(profit_map.get(code, {}), equity_map.get(code, {})) for code in codes}
 
 
 def _adj_factors(connection, pairs: Sequence[Tuple[str, date]]) -> Dict[Tuple[str, date], float]:
@@ -361,6 +439,7 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
     codes = sorted({row.ts_code for row, _, _, _ in signals})
     latest_db = _latest_db_prices(connection, codes)
     adj = _adj_factors(connection, [(row.ts_code, row.t1_date) for row, _, _, _ in signals])
+    roe = _dedt_roe_by_code(connection, codes, calendar[-1] - timedelta(days=ROE_LOOKBACK_DAYS))
 
     items = []
     for row, bar, result, up_limit in signals:
@@ -376,6 +455,8 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
         since_pct = None
         if latest_date is not None and latest_close and adj_last and adj_t1:
             since_pct = (latest_close * adj_last / (t1_close * adj_t1) - 1) * 100
+        pb = latest.get("pb")
+        roe_ttm = roe.get(code)
         holding_days = None
         if latest_date is not None:
             holding_days = max(0, bisect.bisect_right(calendar, latest_date) - bisect.bisect_right(calendar, t1))
@@ -398,6 +479,11 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
             "latest_date": latest_date.isoformat() if latest_date else None,
             "since_pct": _round(since_pct),
             "holding_days": holding_days,
+            "pe_ttm": _round(latest.get("pe_ttm")),
+            "pb": _round(pb),
+            "ps_ttm": _round(latest.get("ps_ttm")),
+            "roe_dedt_ttm": _round(roe_ttm),
+            "roe_pb": _round(roe_ttm / pb) if roe_ttm is not None and pb and pb > 0 else None,
         })
     items.sort(key=lambda item: (item["signal_date"], item["netprofit_yoy"] or 0), reverse=True)
     return items

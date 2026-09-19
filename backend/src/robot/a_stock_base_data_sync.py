@@ -1041,6 +1041,11 @@ class AStockBaseDataSyncService:
             "pb",
             "dv_ratio",
             "dv_ttm",
+            "turnover_rate_f",
+            "ps",
+            "ps_ttm",
+            "free_share",
+            "limit_status",
             "created_at",
             "updated_at",
         ]
@@ -1071,6 +1076,11 @@ class AStockBaseDataSyncService:
         normalized["pb"] = _numeric_series(frame, "pb", 6)
         normalized["dv_ratio"] = _numeric_series(frame, "dv_ratio", 6)
         normalized["dv_ttm"] = _numeric_series(frame, "dv_ttm", 6)
+        normalized["turnover_rate_f"] = _numeric_series(frame, "turnover_rate_f", 6)
+        normalized["ps"] = _numeric_series(frame, "ps", 6)
+        normalized["ps_ttm"] = _numeric_series(frame, "ps_ttm", 6)
+        normalized["free_share"] = _numeric_series(frame, "free_share", 4)
+        normalized["limit_status"] = _numeric_series(frame, "limit_status", 0).astype("Int64")
         normalized["created_at"] = now
         normalized["updated_at"] = now
         normalized = normalized.dropna(subset=["trade_date", "ts_code"])
@@ -1112,6 +1122,11 @@ class AStockBaseDataSyncService:
             "pb",
             "dv_ratio",
             "dv_ttm",
+            "turnover_rate_f",
+            "ps",
+            "ps_ttm",
+            "free_share",
+            "limit_status",
             "created_at",
             "updated_at",
         ]

@@ -1761,8 +1761,8 @@ class ScheduledTaskManager:
                 task_key="a_stock_daily_basic_backfill",
                 name="A股估值列历史回填",
                 description=(
-                    "逐个交易日拉 tushare daily_basic，回填 a_stock_market_daily 的 pe/pe_ttm/pb/股息率/量比"
-                    "（这几列是后加的，历史一直为空）。默认只补整天 pb 为空的交易日，可中断后重跑续上。一次性任务，默认不定时执行。"
+                    "逐个交易日拉 tushare daily_basic，回填 a_stock_market_daily 的 pe/pe_ttm/pb/ps/ps_ttm/股息率/量比/自由流通换手率/自由流通股本/收盘涨跌停状态"
+                    "（这几列是后加的，历史一直为空）。默认只补整天 ps_ttm 为空的交易日，可中断后重跑续上。一次性任务，默认不定时执行。"
                 ),
                 default_time="03:30",
                 default_enabled=False,

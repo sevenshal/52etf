@@ -34,6 +34,14 @@ from .tushare_account import get_tushare_token_for_runtime
 # （IO 沪深300、MO 中证1000、HO 上证50），后者的 opt_code 形状与 ETF 期权一致。
 OPTION_SUPPORTED_EXCHANGES = frozenset({"SSE", "SZSE", "CFFEX"})
 
+# daily_basic 输出参数全集。close 与 daily 接口的收盘价相同（a_stock_market_daily.close 已存），不重复取；
+# limit_status（收盘涨跌停状态）默认不显示，必须显式点名。
+A_STOCK_DAILY_BASIC_FIELDS = (
+    "ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,"
+    "dv_ratio,dv_ttm,total_share,float_share,free_share,total_mv,circ_mv,limit_status"
+)
+# 账号无权取 limit_status 时退回不带它的字段集，不能让整个估值截面同步失败
+A_STOCK_DAILY_BASIC_FALLBACK_FIELDS = A_STOCK_DAILY_BASIC_FIELDS.replace(",limit_status", "")
 TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_INCOME_MAX_REQUESTS_PER_MINUTE", "450")),
@@ -1176,21 +1184,27 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"])
 
+    def _query_daily_basic(self, describe: str, **params) -> Optional[pd.DataFrame]:
+        """按全字段请求 daily_basic；失败时退回不带 limit_status 再试一次，仍失败返回 None。"""
+        for fields in (A_STOCK_DAILY_BASIC_FIELDS, A_STOCK_DAILY_BASIC_FALLBACK_FIELDS):
+            try:
+                return self.pro.daily_basic(fields=fields, **params)
+            except Exception as exc:
+                self.logger.warning(
+                    "Tushare daily_basic fetch failed for %s (%s fields): %s",
+                    describe,
+                    "full" if fields == A_STOCK_DAILY_BASIC_FIELDS else "fallback",
+                    exc,
+                )
+        return None
+
     def get_a_stock_daily_basic_frame(self, trade_date: date) -> pd.DataFrame:
         """获取某交易日A股全市场估值/股本截面。"""
         trade_value = self._to_date(trade_date)
         if not trade_value:
             return pd.DataFrame()
-        try:
-            frame = self.pro.daily_basic(
-                trade_date=trade_value.strftime("%Y%m%d"),
-                fields=(
-                    "ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate,"
-                    "volume_ratio,pe,pe_ttm,pb,dv_ratio,dv_ttm"
-                ),
-            )
-        except Exception as exc:
-            self.logger.warning("Tushare daily_basic fetch failed for %s: %s", trade_value, exc)
+        frame = self._query_daily_basic(str(trade_value), trade_date=trade_value.strftime("%Y%m%d"))
+        if frame is None:
             return pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return pd.DataFrame()
@@ -1207,19 +1221,14 @@ class TushareService(QuoteProvider):
         frames = []
         offset = 0
         while True:
-            try:
-                frame = self.pro.daily_basic(
-                    start_date=start_value.strftime("%Y%m%d"),
-                    end_date=end_value.strftime("%Y%m%d"),
-                    fields=(
-                        "ts_code,trade_date,total_mv,circ_mv,float_share,total_share,turnover_rate,"
-                        "volume_ratio,pe,pe_ttm,pb,dv_ratio,dv_ttm"
-                    ),
-                    limit=limit,
-                    offset=offset,
-                )
-            except Exception as exc:
-                self.logger.warning("Tushare daily_basic range fetch failed for %s~%s offset=%s: %s", start_value, end_value, offset, exc)
+            frame = self._query_daily_basic(
+                f"{start_value}~{end_value} offset={offset}",
+                start_date=start_value.strftime("%Y%m%d"),
+                end_date=end_value.strftime("%Y%m%d"),
+                limit=limit,
+                offset=offset,
+            )
+            if frame is None:
                 break
             if not isinstance(frame, pd.DataFrame) or frame.empty:
                 break

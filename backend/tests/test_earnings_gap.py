@@ -53,6 +53,16 @@ def test_evaluate_t1_bar():
     assert not eg.evaluate_t1_bar({**base, "amount_yuan": 2e7}, 11.0)["passed"]
 
 
+def test_ttm_from_cumulative_and_roe():
+    values = {date(2026, 3, 31): 30.0, date(2025, 12, 31): 100.0, date(2025, 3, 31): 20.0}
+    assert eg.ttm_from_cumulative(values, date(2026, 3, 31)) == 110.0
+    assert eg.ttm_from_cumulative(values, date(2025, 12, 31)) == 100.0
+    # 缺上年同期
+    assert eg.ttm_from_cumulative({date(2026, 3, 31): 30.0, date(2025, 12, 31): 100.0}, date(2026, 3, 31)) is None
+    assert eg.dedt_roe_ttm(values, {date(2026, 3, 31): 1100.0}) == 10.0
+    assert eg.dedt_roe_ttm(values, {date(2026, 3, 31): -5.0}) is None
+
+
 def test_fallback_up_limit():
     assert eg.fallback_up_limit("600000.SH", 10.0) == 11.0
     assert eg.fallback_up_limit("300750.SZ", 10.0) == 12.0
@@ -68,15 +78,20 @@ class FakeTushare:
         return pd.DataFrame([{"ts_code": code, "up_limit": value} for code, value in rows.items()])
 
 
-def _build_db(bars, reports, basic, adj=None, calendar=()):
+def _build_db(bars, reports, basic, adj=None, calendar=(), equity=None):
     connection = duckdb.connect(":memory:")
     connection.execute(
         "CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, open DOUBLE, high DOUBLE,"
-        " close DOUBLE, pre_close DOUBLE, amount DOUBLE)"
+        " close DOUBLE, pre_close DOUBLE, amount DOUBLE, pe_ttm DOUBLE, pb DOUBLE, ps_ttm DOUBLE)"
+    )
+    connection.execute(
+        "CREATE TABLE a_stock_balancesheet (ts_code VARCHAR, end_date DATE, ann_date DATE, report_type VARCHAR,"
+        " total_hldr_eqy_exc_min_int DOUBLE)"
     )
     connection.execute("CREATE TABLE a_stock_adj_factor (ts_code VARCHAR, trade_date DATE, adj_factor DOUBLE)")
     connection.execute(
-        "CREATE TABLE a_stock_fina_indicator (ts_code VARCHAR, end_date DATE, ann_date DATE, netprofit_yoy DOUBLE)"
+        "CREATE TABLE a_stock_fina_indicator (ts_code VARCHAR, end_date DATE, ann_date DATE, netprofit_yoy DOUBLE,"
+        " profit_dedt DOUBLE)"
     )
     connection.execute(
         "CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR, industry VARCHAR, list_date DATE, list_status VARCHAR)"
@@ -84,14 +99,20 @@ def _build_db(bars, reports, basic, adj=None, calendar=()):
     # 交易日历取自分析库日K，用一只不在股票列表里的占位股票铺满已同步的交易日
     for trade_date in calendar:
         connection.execute(
-            "INSERT INTO a_stock_market_daily VALUES ('999999.SZ', ?, 1, 1, 1, 1, 1)", [trade_date]
+            "INSERT INTO a_stock_market_daily (ts_code, trade_date, open, high, close, pre_close, amount)"
+            " VALUES ('999999.SZ', ?, 1, 1, 1, 1, 1)",
+            [trade_date],
         )
     for row in bars:
-        connection.execute("INSERT INTO a_stock_market_daily VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+        row = tuple(row) + (None,) * (10 - len(row))
+        connection.execute("INSERT INTO a_stock_market_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
     for row in adj or []:
         connection.execute("INSERT INTO a_stock_adj_factor VALUES (?, ?, ?)", row)
     for row in reports:
-        connection.execute("INSERT INTO a_stock_fina_indicator VALUES (?, ?, ?, ?)", row)
+        row = tuple(row) + (None,) * (5 - len(row))
+        connection.execute("INSERT INTO a_stock_fina_indicator VALUES (?, ?, ?, ?, ?)", row)
+    for row in equity or []:
+        connection.execute("INSERT INTO a_stock_balancesheet VALUES (?, ?, ?, '1', ?)", row)
     for row in basic:
         connection.execute("INSERT INTO a_stock_basic VALUES (?, ?, ?, ?, 'L')", row)
     return connection
@@ -116,7 +137,7 @@ def test_compute_earnings_gap_end_to_end():
         ("000004.SZ", "次新", "电子", date(2026, 6, 1)),
         ("000005.SZ", "增速过高", "电子", old),
     ]
-    reports = [(code, date(2026, 6, 30), date(2026, 8, 21), yoy) for code, yoy in (
+    reports = [(code, date(2026, 6, 30), date(2026, 8, 21), yoy, 60.0) for code, yoy in (
         ("000001.SZ", 80.0),
         ("000002.SZ", 20.0),
         ("000003.SZ", 80.0),
@@ -125,13 +146,17 @@ def test_compute_earnings_gap_end_to_end():
     )]
     # 旧一期财报不影响"最近财报"
     reports.append(("000001.SZ", date(2026, 3, 31), date(2026, 4, 20), 1.0))
+    # 扣非 TTM = 60(26H1) + 100(25年报) − 40(25H1) = 120；归母净资产 1000 → ROE 12%
+    reports.append(("000001.SZ", date(2025, 12, 31), date(2026, 3, 20), 10.0, 100.0))
+    reports.append(("000001.SZ", date(2025, 6, 30), date(2025, 8, 20), 10.0, 40.0))
+    equity = [("000001.SZ", date(2026, 6, 30), date(2026, 8, 21), 1000.0)]
     bars = []
     for code in ("000001.SZ", "000002.SZ", "000004.SZ", "000005.SZ"):
         bars.append((code, t1, 10.3, 10.8, 10.6, 10.0, 80000.0))
     bars.append(("000003.SZ", t1, 10.3, 11.0, 11.0, 10.0, 80000.0))
-    bars.append(("000001.SZ", last, 12.0, 12.2, 12.0, 11.9, 90000.0))
+    bars.append(("000001.SZ", last, 12.0, 12.2, 12.0, 11.9, 90000.0, 25.5, 2.0, 3.1))
     adj = [("000001.SZ", t1, 1.0), ("000001.SZ", last, 1.1)]
-    connection = _build_db(bars, reports, basic, adj, calendar)
+    connection = _build_db(bars, reports, basic, adj, calendar, equity)
     service = FakeTushare(limits={t1: {"000001.SZ": 11.0, "000003.SZ": 11.0}})
 
     payload = eg.compute_earnings_gap(now=datetime(2026, 9, 19, 10, 0), service=service, connection=connection)
@@ -146,6 +171,9 @@ def test_compute_earnings_gap_end_to_end():
     # 前复权：12.0 * 1.1 / (10.6 * 1.0) - 1
     assert item["since_pct"] == pytest.approx((12.0 * 1.1 / 10.6 - 1) * 100, abs=0.01)
     assert item["latest_date"] == "2026-09-18"
+    assert (item["pe_ttm"], item["pb"], item["ps_ttm"]) == (25.5, 2.0, 3.1)
+    assert item["roe_dedt_ttm"] == 12.0
+    assert item["roe_pb"] == 6.0
     assert payload["stats"]["growth_passed"] == 3
     assert payload["trade_date"] == "2026-09-18"
     assert payload["warnings"] == []

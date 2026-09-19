@@ -79,6 +79,20 @@
   width: 220px;
 }
 
+.earnings-gap-range-filter {
+  padding: 8px;
+}
+
+.earnings-gap-range-filter .ant-input-number {
+  width: 88px;
+}
+
+.earnings-gap-range-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
 .earnings-gap .earnings-gap-sub {
   font-size: 12px;
 }
