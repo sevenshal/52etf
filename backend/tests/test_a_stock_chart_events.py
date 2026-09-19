@@ -1,6 +1,6 @@
 """K 线事件标记：研报按"篇"计数、目标价与 K 线同为前复权口径、财报用首次披露日。"""
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -21,12 +21,13 @@ class _Result:
         return self._rows
 
 
-def _report(report_date, org, title, quarter, *, eps=None, np=None, low=None, high=None, rating="买入"):
+def _report(report_date, org, title, quarter, *, eps=None, np=None, low=None, high=None, rating="买入",
+            author="分析师", created=None):
     return {
         "ts_code": SYMBOL, "report_name": "中芯国际", "report_date": report_date,
-        "report_title": title, "org_name": org, "author_name": "分析师", "quarter": quarter,
+        "report_title": title, "org_name": org, "author_name": author, "quarter": quarter,
         "eps": eps, "pe": None, "np": np, "rating": rating,
-        "max_price": high, "min_price": low, "create_time": None,
+        "max_price": high, "min_price": low, "create_time": created,
     }
 
 
@@ -57,18 +58,20 @@ DISCLOSURES = [
 
 
 class FakeDb:
-    def __init__(self):
+    def __init__(self, reports=None, factors=None):
         self.report_params = None
+        self.reports = REPORTS if reports is None else reports
+        self.factors = FACTORS if factors is None else factors
 
     def execute(self, statement, params=None):
         sql = str(statement)
         if "a_stock_adj_factor" in sql:
-            return _Result(FACTORS)
+            return _Result(self.factors)
         if "a_stock_income" in sql:
             return _Result(DISCLOSURES)
         if "a_stock_report_rc" in sql:
             self.report_params = params
-            return _Result(REPORTS)
+            return _Result(self.reports)
         raise AssertionError(f"unexpected query: {sql[:80]}")
 
 
@@ -170,7 +173,8 @@ def test_report_query_is_scoped_to_the_symbol_and_window():
 
     assert result["ts_code"] == SYMBOL
     assert db.report_params["symbol_0"] == SYMBOL
-    assert db.report_params["report_start"] == START
+    # 往窗口前多取一段研报，只用来给窗口里最早的研报找"上一篇"
+    assert db.report_params["report_start"] == START - timedelta(days=events.REVISION_LOOKBACK_DAYS)
     assert db.report_params["report_end"] == END
 
 
@@ -178,3 +182,118 @@ def test_blank_symbol_returns_empty():
     assert events.load_a_stock_chart_events(FakeDb(), "", start=START, end=END) == {
         "ts_code": "", "research_days": [], "financial_reports": [],
     }
+
+
+# --------------------------------------------------------------------------
+# 盈利预测修正：同机构同预测年度，优先同分析师，否则退到同机构上一篇
+# --------------------------------------------------------------------------
+# 2026-06-01 10 送 5：复权因子 1.0 → 1.5
+REVISION_FACTORS = [
+    {"ts_code": SYMBOL, "trade_date": date(2025, 1, 2), "adj_factor": 1.0},
+    {"ts_code": SYMBOL, "trade_date": date(2026, 6, 1), "adj_factor": 1.5},
+]
+HT = "华泰证券"
+REVISION_REPORTS = [
+    # 窗口(2026-01-01 起)之前的一篇：只作为"上一篇"参与比对。原始 EPS 1.5 → 前复权 1.0
+    _report(date(2025, 11, 10), HT, "三季报点评", "2026Q4", eps=1.5, author="刘俊,边文姣"),
+    # 与上一篇共同分析师 刘俊：1.35 → 0.9，较上次 -10%
+    _report(date(2026, 3, 10), HT, "年报点评", "2026Q4", eps=1.35, author="刘俊,邵梓洋"),
+    # 整个团队换了人：退到同机构上一篇(年报点评 0.9)比较，1.5 → 1.0，+11.11%
+    _report(date(2026, 5, 20), HT, "深度报告", "2026Q4", eps=1.5, author="王新人"),
+    # 送转之后写的，原始 EPS 1.05 就是前复权口径。和它有共同分析师(边文姣)的是更早的三季报点评，
+    # 比 1.0 是 +5%；如果拿原始 EPS 比(1.5 → 1.05)会凭空显示成 -30%
+    _report(date(2026, 8, 21), HT, "中报点评", "2026Q4", eps=1.05, author="边文姣,赵某"),
+    # 同一天两篇：按入库时间分先后
+    _report(date(2026, 9, 1), HT, "调研纪要上午", "2026Q4", eps=1.10, author="刘俊", created="2026-09-01 09:00:00"),
+    _report(date(2026, 9, 1), HT, "调研纪要下午", "2026Q4", eps=1.12, author="刘俊", created="2026-09-01 15:00:00"),
+    # 另一家机构只有一篇
+    _report(date(2026, 4, 1), "招商证券", "首次覆盖", "2026Q4", eps=2.0, author="李某"),
+]
+
+
+def _revisions():
+    db = FakeDb(reports=REVISION_REPORTS, factors=REVISION_FACTORS)
+    return events.load_a_stock_chart_events(db, SYMBOL, start=START, end=END)
+
+
+def _forecast(result, title, year=2026):
+    for day in result["research_days"]:
+        for report in day["reports"]:
+            if report["report_title"] == title:
+                return next(item for item in report["forecasts"] if item["fiscal_year"] == year)
+    raise AssertionError(f"report not found: {title}")
+
+
+def test_lookback_reports_are_only_used_as_the_previous_one():
+    result = _revisions()
+    assert "2025-11-10" not in [day["date"] for day in result["research_days"]]
+    revision = _forecast(result, "年报点评")["revision"]
+    assert revision["prev_date"] == "2025-11-10"
+
+
+def test_a_shared_analyst_counts_as_the_same_analysts():
+    revision = _forecast(_revisions(), "年报点评")["revision"]
+
+    assert revision["match"] == "analyst"
+    assert revision["prev_eps"] == pytest.approx(1.0)
+    assert revision["prev_eps_raw"] == pytest.approx(1.5)
+    assert revision["change_pct"] == pytest.approx(-10.0)
+
+
+def test_a_new_team_falls_back_to_the_previous_report_of_the_same_broker():
+    revision = _forecast(_revisions(), "深度报告")["revision"]
+
+    assert revision["match"] == "org"
+    assert revision["prev_date"] == "2026-03-10"
+    assert revision["change_pct"] == pytest.approx(11.11)
+
+
+def test_an_older_same_analyst_report_wins_over_newer_ones_from_other_teams():
+    revision = _forecast(_revisions(), "中报点评")["revision"]
+
+    assert revision["match"] == "analyst"
+    assert revision["prev_date"] == "2025-11-10"  # 跳过更近但换了人的深度报告、年报点评
+    assert revision["prev_authors"] == "刘俊,边文姣"
+
+
+def test_revisions_compare_forward_adjusted_eps_across_a_bonus_issue():
+    """10 送 5 前后：比前复权 EPS 是 +5%，比原始 EPS 会凭空显示成 -30%。"""
+    forecast = _forecast(_revisions(), "中报点评")
+
+    assert forecast["eps_raw"] == pytest.approx(1.05)
+    assert forecast["revision"]["prev_eps_raw"] == pytest.approx(1.5)
+    assert forecast["revision"]["change_pct"] == pytest.approx(5.0)
+
+
+def test_disclosures_between_the_two_forecasts_are_listed():
+    assert _forecast(_revisions(), "中报点评")["revision"]["disclosed_between"] == ["2025年报", "2026中报"]
+    assert _forecast(_revisions(), "年报点评")["revision"]["disclosed_between"] == []
+
+
+def test_same_day_reports_are_ordered_by_entry_time():
+    result = _revisions()
+    afternoon = _forecast(result, "调研纪要下午")["revision"]
+    morning = _forecast(result, "调研纪要上午")["revision"]
+
+    assert afternoon["prev_date"] == "2026-09-01"
+    assert afternoon["prev_eps"] == pytest.approx(1.10)
+    assert afternoon["change_pct"] == pytest.approx(1.82)
+    # 上午那篇往前找：中报点评、深度报告都没有 刘俊，年报点评有
+    assert morning["prev_date"] == "2026-03-10"
+    assert morning["change_pct"] == pytest.approx(22.22)
+
+
+def test_history_lists_the_brokers_forecasts_and_marks_shared_analysts():
+    history = _forecast(_revisions(), "中报点评")["history"]
+
+    assert [row["report_date"] for row in history] == ["2025-11-10", "2026-03-10", "2026-05-20", "2026-08-21"]
+    assert [row["shares_analyst"] for row in history] == [True, False, False, True]
+    assert [row["change_pct"] for row in history] == [None, pytest.approx(-10.0), pytest.approx(11.11), pytest.approx(5.0)]
+    assert history[-1]["disclosed_between"] == ["2026中报"]
+
+
+def test_a_broker_with_a_single_report_has_no_revision():
+    forecast = _forecast(_revisions(), "首次覆盖")
+
+    assert forecast["revision"] is None
+    assert len(forecast["history"]) == 1

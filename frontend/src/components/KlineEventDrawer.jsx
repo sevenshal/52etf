@@ -1,6 +1,13 @@
 import React from 'react';
 import { Descriptions, Drawer, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import ReactECharts from 'echarts-for-react';
 import { formatChineseAmount } from '../utils/format';
+import {
+  REVISION_DOWN_COLOR,
+  REVISION_UP_COLOR,
+  describeRevision,
+  revisionTooltip,
+} from '../utils/epsRevision';
 
 const { Text, Paragraph } = Typography;
 
@@ -49,9 +56,96 @@ const TargetPrice = ({ report }) => {
   );
 };
 
+const eps3 = value => (toNumber(value) === null ? '--' : Number(value).toFixed(3));
+
+// 展开后：这家机构对这一年的历次预测。和当前这篇有共同分析师的行正常显示，换了人的行置灰
+const historyColumns = [
+  { title: '日期', dataIndex: 'report_date', key: 'report_date', width: 92 },
+  {
+    title: '分析师',
+    dataIndex: 'author_name',
+    key: 'author_name',
+    ellipsis: true,
+    render: (value, row) => (
+      <Tooltip title={row.shares_analyst ? '与当前这篇有共同分析师' : '分析师不同（同机构）'}>
+        <Text type={row.shares_analyst ? undefined : 'secondary'}>{value || '--'}</Text>
+      </Tooltip>
+    ),
+  },
+  { title: 'EPS', dataIndex: 'eps', key: 'eps', align: 'right', width: 64, render: eps3 },
+  {
+    title: '较前一篇',
+    dataIndex: 'change_pct',
+    key: 'change_pct',
+    align: 'right',
+    width: 84,
+    render: (value, row) => {
+      const number = toNumber(value);
+      if (number === null) return <Text type="secondary">--</Text>;
+      const color = number > 0 ? REVISION_UP_COLOR : number < 0 ? REVISION_DOWN_COLOR : undefined;
+      const text = `${number > 0 ? '+' : ''}${number.toFixed(2)}%`;
+      return row.disclosed_between?.length
+        ? <Tooltip title={`期间披露 ${row.disclosed_between.join('、')}`}><span style={{ color }}>{text} ⓘ</span></Tooltip>
+        : <span style={{ color }}>{text}</span>;
+    },
+  },
+  { title: '评级', dataIndex: 'rating', key: 'rating', width: 64, render: value => value || '--' },
+];
+
+const historyChartOption = history => ({
+  animation: false,
+  grid: { left: 40, right: 12, top: 10, bottom: 22 },
+  xAxis: { type: 'category', data: history.map(row => row.report_date), axisLabel: { fontSize: 10 } },
+  yAxis: { type: 'value', scale: true, axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { color: '#f0f0f0' } } },
+  tooltip: { trigger: 'axis', valueFormatter: value => eps3(value) },
+  series: [{
+    type: 'line',
+    name: 'EPS',
+    data: history.map(row => ({
+      value: row.eps,
+      // 换了分析师的点画成空心灰点，一眼分清是"同一批人在调"还是"换人后的新口径"
+      itemStyle: row.shares_analyst ? { color: '#1677ff' } : { color: '#fff', borderColor: '#bfbfbf' },
+    })),
+    symbolSize: 7,
+    lineStyle: { color: '#1677ff', width: 1.5 },
+  }],
+});
+
+const EpsHistory = ({ history }) => (
+  <div style={{ padding: '4px 0' }}>
+    {history.length >= 3 && (
+      <ReactECharts option={historyChartOption(history)} style={{ height: 110 }} notMerge />
+    )}
+    <Table
+      size="small"
+      rowKey={row => `${row.report_date}-${row.author_name}-${row.eps}`}
+      columns={historyColumns}
+      dataSource={[...history].reverse()}
+      pagination={false}
+    />
+  </div>
+);
+
 const forecastColumns = [
   { title: '预测年度', dataIndex: 'fiscal_year', key: 'fiscal_year', width: 80 },
-  { title: 'EPS', dataIndex: 'eps', key: 'eps', align: 'right', render: value => (toNumber(value) === null ? '--' : Number(value).toFixed(3)) },
+  { title: 'EPS', dataIndex: 'eps', key: 'eps', align: 'right', render: eps3 },
+  {
+    title: '较上次',
+    dataIndex: 'revision',
+    key: 'revision',
+    align: 'right',
+    render: revision => {
+      const { text, color } = describeRevision(revision);
+      return (
+        <Tooltip title={revisionTooltip(revision)}>
+          <span style={{ color, whiteSpace: 'nowrap' }}>
+            {text}
+            {revision?.match === 'org' && <Text type="secondary" style={{ fontSize: 11 }}> 换人</Text>}
+          </span>
+        </Tooltip>
+      );
+    },
+  },
   // 研报预测净利润单位是万元
   { title: '净利润', dataIndex: 'np', key: 'np', align: 'right', render: value => (toNumber(value) === null ? '--' : formatChineseAmount(value * 1e4)) },
   { title: 'PE', dataIndex: 'pe', key: 'pe', align: 'right', render: value => (toNumber(value) === null ? '--' : Number(value).toFixed(1)) },
@@ -82,6 +176,11 @@ const ResearchList = ({ items }) => (
             columns={forecastColumns}
             dataSource={report.forecasts}
             pagination={false}
+            expandable={{
+              // 展开看这家机构对这一年的历次 EPS 预测
+              expandedRowRender: record => <EpsHistory history={record.history || []} />,
+              rowExpandable: record => (record.history?.length || 0) > 1,
+            }}
           />
         )}
       </div>
@@ -135,7 +234,7 @@ const KlineEventDrawer = ({ event, onClose }) => {
       ? `${event.tradeDate} 研报（${event.items.length} 篇）`
       : `${event.tradeDate} 财报披露`;
   return (
-    <Drawer open={!!event} onClose={onClose} title={title} width={440} destroyOnClose>
+    <Drawer open={!!event} onClose={onClose} title={title} width={520} destroyOnClose>
       {!event || !event.items.length ? <Empty /> : isResearch
         ? <ResearchList items={event.items} />
         : event.items.map(report => <FinancialSummary key={report.end_date} report={report} />)}
