@@ -125,13 +125,21 @@ const DailyTab = ({ refreshToken }) => {
         {row.high_count === 0 && row.low_count === 0 ? <Text type="secondary">-</Text> : null}
       </Space>
     ) },
-    { title: '贪恐', dataIndex: 'fear_score', width: 90, align: 'right',
-      render: value => (isNumber(value) ? value.toFixed(1) : '-'),
+    { title: '贪恐', dataIndex: 'fear_score', width: 120, align: 'right',
+      render: (value, row) => {
+        const today = isNumber(value) ? value.toFixed(1) : '-';
+        if (!isNumber(row.fear_min) || row.fear_min === value) return today;
+        return (
+          <Tooltip title={`最近几个交易日最低 ${row.fear_min.toFixed(1)}${row.fear_pass_date ? `（${row.fear_pass_date} 触及闸门）` : ''}`}>
+            <span>{today} <Text type="secondary">/ {row.fear_min.toFixed(1)}</Text></span>
+          </Tooltip>
+        );
+      },
       sorter: (a, b) => (a.fear_score ?? 999) - (b.fear_score ?? 999) },
     { title: '低9', dataIndex: 'low9_date', width: 110, render: value => value || '-' },
     { title: '状态', width: 150, render: (_, row) => {
       if (row.armed) return <Tag color="red">{`布防中（${row.armed_since}）`}</Tag>;
-      if (row.turn_signal) return <Tag color="orange">今日触发·贪恐未过</Tag>;
+      if (row.turn_signal) return <Tag color="orange">今日触发·贪恐未过闸门</Tag>;
       if (row.low9_armed) return <Tag color="blue">已低9，等高2</Tag>;
       return <Text type="secondary">-</Text>;
     } },
@@ -548,6 +556,11 @@ const ConfigEditor = ({ state, draft, onChange }) => {
                        onChange={value => setSection('signal', 'fear_threshold', value)} />
         </div>
         <div className="stock-system__config-row">
+          <span className="stock-system__config-label">贪恐回看（交易日，含当天）</span>
+          <InputNumber min={1} max={60} value={draft.signal.fear_lookback_days}
+                       onChange={value => setSection('signal', 'fear_lookback_days', value)} />
+        </div>
+        <div className="stock-system__config-row">
           <span className="stock-system__config-label">低 N 起算</span>
           <InputNumber min={4} max={30} value={draft.signal.low_count_min}
                        onChange={value => setSection('signal', 'low_count_min', value)} />
@@ -741,7 +754,7 @@ const SectorNineTurn = () => {
         <div>
           <Title level={4} style={{ margin: 0 }}>板块九转</Title>
           <Paragraph type="secondary" style={{ margin: '4px 0 0' }}>
-            板块自身出现神奇九转低 9 后首次高 2、且当天自算贪恐分数 ≤ 40 时进入布防；布防中的板块里，
+            板块自身出现神奇九转低 9 后首次高 2、且最近 5 个交易日（含当天）自算贪恐分数触及过 ≤ 40 时进入布防；布防中的板块里，
             成分股自己也出现低 9 后首次高 2 就买入（默认要求板块与个股同日）。持仓在出现高 9 后首次低 2
             且回撤超过 2 个 ATR 时卖出。九转和 ATR 与个股详情页 K 线图同一套算法，每个交易日 19:20 自动计算。
           </Paragraph>

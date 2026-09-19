@@ -6,7 +6,9 @@
 三条规则：
 
 - **板块触发**：板块自身出现低 N（默认 ``lowCount >= 9``）之后，**首次**出现高 M（默认
-  ``highCount == 2``）的那一天。同一次低 N 只消费一次。
+  ``highCount == 2``）的那一天。同一次低 N 只消费一次。触发日回看最近若干个交易日（默认 5 个，
+  含当天），只要**其中任意一天**的自算贪恐分数 ≤ 闸门就算过——贪恐见底和九转翻红往往差几天，
+  只看触发当天会漏掉刚反弹上来的那一批。
 - **个股买入**：板块触发后进入布防窗口（默认 0 个交易日，即板块与个股必须同日），
   窗口内成分股自身也出现"低 N 后首次高 M"。
 - **卖出**：买入后出现高 K（默认 ``highCount >= 9``），此后首次出现低 L（默认
@@ -39,6 +41,7 @@ class SignalParams:
     sell_atr_multiple: float = 2.0
     sell_mode: str = SELL_MODE_WAIT
     fear_threshold: float = 40.0
+    fear_lookback_days: int = 5
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "SignalParams":
@@ -52,6 +55,7 @@ class SignalParams:
             sell_atr_multiple=float(signal.get("sell_atr_multiple", 2.0)),
             sell_mode=str(signal.get("sell_mode") or SELL_MODE_WAIT),
             fear_threshold=float(signal.get("fear_threshold", 40.0)),
+            fear_lookback_days=int(signal.get("fear_lookback_days", 5)),
         )
 
 
@@ -143,17 +147,30 @@ def sector_triggers(rows: Sequence[Mapping[str, Any]], dates: Sequence[date],
                     fear_scores: Optional[Mapping[date, float]] = None) -> List[Dict[str, Any]]:
     """板块触发日列表，附带当天贪恐分数和是否过闸门。"""
     triggers: List[Dict[str, Any]] = []
+    lookback = max(1, params.fear_lookback_days)
     for index in low_high_turn_indices(rows, params):
         day = dates[index]
         score = None
         if fear_scores is not None:
             raw = fear_scores.get(day)
             score = float(raw) if _finite(raw) else None
+        # 回看窗口按板块自己的交易日历取，含触发日当天
+        window: List[tuple] = []
+        if fear_scores is not None:
+            for position in range(max(0, index - lookback + 1), index + 1):
+                raw = fear_scores.get(dates[position])
+                if _finite(raw):
+                    window.append((float(raw), dates[position]))
+        passed = [item for item in window if item[0] <= params.fear_threshold]
+        best = min(window) if window else None
         triggers.append({
             "index": index,
             "signal_date": day,
             "fear_score": score,
-            "fear_passed": score is not None and score <= params.fear_threshold,
+            "fear_min": best[0] if best else None,
+            # 窗口内最早一次触及闸门的那天，页面上用来解释"为什么现在算过"
+            "fear_pass_date": min(item[1] for item in passed) if passed else None,
+            "fear_passed": bool(passed),
         })
     return triggers
 
@@ -176,6 +193,9 @@ def armed_windows(triggers: Sequence[Mapping[str, Any]], dates: Sequence[date],
             # 后触发的板块信号覆盖先触发的，贪恐分数跟着最近一次
             windows[dates[position]] = {
                 "signal_date": trigger["signal_date"],
-                "fear_score": trigger.get("fear_score"),
+                # 排序用的分数取窗口内最恐慌的那天，触发当天可能已经反弹上去了
+                "fear_score": trigger.get("fear_min", trigger.get("fear_score")),
+                "fear_score_today": trigger.get("fear_score"),
+                "fear_pass_date": trigger.get("fear_pass_date"),
             }
     return windows

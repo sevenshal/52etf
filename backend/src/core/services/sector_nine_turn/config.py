@@ -59,6 +59,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "signal": {
         "fear_threshold": 40.0,
+        "fear_lookback_days": 5.0,
         "low_count_min": 9.0,
         "buy_high_count": 2.0,
         "arm_window_days": 0.0,
@@ -82,6 +83,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 # key -> (下限, 上限, 是否整数)
 _SIGNAL_BOUNDS = {
     "fear_threshold": (0.0, 100.0, False),
+    "fear_lookback_days": (1.0, 60.0, True),
     "low_count_min": (4.0, 30.0, True),
     "buy_high_count": (1.0, 9.0, True),
     "arm_window_days": (0.0, 60.0, True),

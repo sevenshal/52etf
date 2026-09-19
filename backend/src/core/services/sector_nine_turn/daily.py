@@ -43,7 +43,8 @@ ACTION_NONE = "none"
 
 _SECTOR_COLUMNS = (
     "trade_date", "index_code", "index_name", "category", "close", "high_count", "low_count",
-    "fear_score", "low9_armed", "low9_date", "turn_signal", "armed", "armed_since", "fear_passed", "note",
+    "fear_score", "fear_min", "fear_pass_date", "low9_armed", "low9_date", "turn_signal",
+    "armed", "armed_since", "fear_passed", "note",
 )
 _SIGNAL_COLUMNS = (
     "trade_date", "ts_code", "name", "role", "sector_code", "sector_name", "sector_fear_score",
@@ -84,6 +85,9 @@ def _sector_state(code: str, bars: Sequence[Mapping[str, Any]], params: SignalPa
         "high_count": int(last.get("highCount") or 0),
         "low_count": int(last.get("lowCount") or 0),
         "fear_score": fear_series.get(as_of),
+        # 闸门看的是最近 N 个交易日的最低分，不是当天这一个数
+        "fear_min": (today_trigger or {}).get("fear_min"),
+        "fear_pass_date": (today_trigger or {}).get("fear_pass_date"),
         "low9_armed": low9_date is not None and not triggered_today,
         "low9_date": low9_date,
         "turn_signal": triggered_today,
@@ -146,11 +150,12 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
     for sector in armed_sectors:
         members = data.members_as_of(memberships.get(sector["index_code"]) or [], sector["armed_since"])
         for symbol in members:
-            # 一只股票可能同时属于多个板块，保留贪恐分数最低（最恐慌）的那个
+            # 一只股票可能同时属于多个板块，保留贪恐最低（最恐慌）的那个；
+            # 比的是回看窗口内的最低分，和闸门判定用同一个口径
             current = candidates.get(symbol)
-            score = sector.get("fear_score")
-            if current is None or (score is not None and (current.get("fear_score") is None
-                                                          or score < current["fear_score"])):
+            score = sector.get("fear_min") if sector.get("fear_min") is not None else sector.get("fear_score")
+            current_score = (current or {}).get("fear_min") or (current or {}).get("fear_score")
+            if current is None or (score is not None and (current_score is None or score < current_score)):
                 candidates[symbol] = sector
 
     book = paper.load_book()
@@ -183,7 +188,9 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
             "role": ROLE_HOLDING if position else ROLE_CANDIDATE,
             "sector_code": (sector or {}).get("index_code") or (position or {}).get("sector_code"),
             "sector_name": (sector or {}).get("index_name") or (position or {}).get("sector_name"),
-            "sector_fear_score": (sector or {}).get("fear_score"),
+            "sector_fear_score": ((sector or {}).get("fear_min")
+                                  if (sector or {}).get("fear_min") is not None
+                                  else (sector or {}).get("fear_score")),
             "sector_signal_date": (sector or {}).get("armed_since"),
             "close": last.get("close"),
             "atr": last.get("atr14"),
@@ -244,7 +251,7 @@ def run_trading_day(as_of: Optional[date] = None, *, config: Optional[Mapping[st
             text_columns=("index_code", "index_name", "category", "note"),
             bool_columns=("low9_armed", "turn_signal", "armed", "fear_passed"),
             int_columns=("high_count", "low_count"),
-            raw_columns=("trade_date", "low9_date", "armed_since"),
+            raw_columns=("trade_date", "low9_date", "armed_since", "fear_pass_date"),
         )),
         ("sector_nine_turn_signal_snapshot", snapshot_frame(
             signal_rows, _SIGNAL_COLUMNS,

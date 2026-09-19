@@ -103,6 +103,7 @@ class Variant:
     # 板块层
     sectors: str = "default54"          # default54 / all64 / industry / none
     fear_threshold: float = 40.0
+    fear_lookback: int = 5              # 闸门回看几个交易日（含触发当天）；1 = 旧的"只看当天"
     arm_window: int = 0
     # 个股入场
     low_count_min: int = 9
@@ -369,8 +370,14 @@ def armed_days(cache: Mapping[str, Any], variant: Variant) -> Dict[str, Dict[dat
             continue
         snapshots = cache["memberships"].get(code) or []
         dates = arrays["dates"]
+        series = cache["fear"].get(code) or {}
+        lookback = max(1, variant.fear_lookback)
         for item in items:
-            score = item["fear_score"]
+            # 闸门看最近 N 个交易日（含触发当天）的最低分；排序也用这个最低分
+            window = [series[dates[position]]
+                      for position in range(max(0, item["index"] - lookback + 1), item["index"] + 1)
+                      if dates[position] in series]
+            score = min(window) if window else None
             if score is None or score > variant.fear_threshold:
                 continue
             members = _members_as_of(snapshots, item["signal_date"])
@@ -679,6 +686,18 @@ def stage_two() -> List[Variant]:
     return variants
 
 
+def stage_four() -> List[Variant]:
+    """贪恐闸门从"只看触发当天"改成"最近 N 个交易日触及过"的影响。"""
+    variants = []
+    for count in (5, 10):
+        base = replace(BASE, max_positions=count)
+        for lookback in (1, 2, 3, 5, 8, 10, 15):
+            variants.append(replace(
+                base, key=f"look{lookback}_pos{count}",
+                label=f"贪恐回看 {lookback} 个交易日 × {count} 仓", fear_lookback=lookback))
+    return variants
+
+
 def stage_three() -> List[Variant]:
     """个股买点本身的参数：低 N 起算、买在高几。集中度固定在第二轮胜出的 5 仓。"""
     base5 = replace(BASE, max_positions=5)
@@ -800,7 +819,8 @@ def main() -> None:
     print(f"[info] 交易日 {len(cache['calendar'])}，候选股票 {len(cache['stock_arrays'])}，"
           f"基本面快照 {len(cache['pool']['dates'])} 期")
 
-    variants = {"one": stage_one, "two": stage_two, "three": stage_three}[args.stage]()
+    variants = {"one": stage_one, "two": stage_two, "three": stage_three,
+                "four": stage_four}[args.stage]()
     rows, trades_by_variant, navs_by_variant = [], {}, {}
     for variant in variants:
         result = evaluate(cache, variant, args.trials)

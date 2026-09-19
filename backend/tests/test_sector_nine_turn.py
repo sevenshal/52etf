@@ -162,6 +162,61 @@ def test_fear_gate_blocks_the_window():
     assert signals.armed_windows(triggers, dates, PARAMS, require_fear=False)
 
 
+def test_fear_gate_looks_back_several_trading_days():
+    """贪恐见底和九转翻红常差几天：触发当天已经反弹上去，只要窗口内触及过就算过闸门。"""
+    bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
+    dates = _dates(bars)
+    rows = signals.nine_turn_rows(bars)
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    trigger_day = dates[trigger_index]
+
+    # 触发当天 55（不过闸门），但 3 个交易日前是 28（过闸门）
+    scores = {day: 55.0 for day in dates}
+    scores[dates[trigger_index - 3]] = 28.0
+    triggers = signals.sector_triggers(rows, dates, PARAMS, scores)
+    today = next(item for item in triggers if item["signal_date"] == trigger_day)
+    assert today["fear_score"] == 55.0            # 当天分数照实记录
+    assert today["fear_min"] == 28.0              # 闸门看的是窗口最低分
+    assert today["fear_pass_date"] == dates[trigger_index - 3]
+    assert today["fear_passed"] is True
+    assert signals.armed_windows(triggers, dates, PARAMS).get(trigger_day)
+
+    # 同样的 28 挪到窗口之外（5 个交易日前的更早一天）就不算数了
+    stale = {day: 55.0 for day in dates}
+    stale[dates[trigger_index - 6]] = 28.0
+    triggers = signals.sector_triggers(rows, dates, PARAMS, stale)
+    today = next(item for item in triggers if item["signal_date"] == trigger_day)
+    assert today["fear_passed"] is False
+    assert today["fear_pass_date"] is None
+
+
+def test_fear_lookback_one_day_is_the_old_same_day_rule():
+    bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
+    dates = _dates(bars)
+    rows = signals.nine_turn_rows(bars)
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    scores = {day: 55.0 for day in dates}
+    scores[dates[trigger_index - 2]] = 28.0
+    same_day = signals.SignalParams(fear_lookback_days=1)
+    triggers = signals.sector_triggers(rows, dates, same_day, scores)
+    assert all(not trigger["fear_passed"] for trigger in triggers)
+
+
+def test_armed_window_ranks_by_the_most_fearful_day_in_the_lookback():
+    """布防信息里带的分数是窗口内最低分——排序和闸门判定必须同一个口径。"""
+    bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
+    dates = _dates(bars)
+    rows = signals.nine_turn_rows(bars)
+    trigger_index = signals.low_high_turn_indices(rows, PARAMS)[0]
+    scores = {day: 55.0 for day in dates}
+    scores[dates[trigger_index - 1]] = 22.0
+    triggers = signals.sector_triggers(rows, dates, PARAMS, scores)
+    window = signals.armed_windows(triggers, dates, PARAMS)[dates[trigger_index]]
+    assert window["fear_score"] == 22.0
+    assert window["fear_score_today"] == 55.0
+    assert window["fear_pass_date"] == dates[trigger_index - 1]
+
+
 def test_missing_fear_score_does_not_pass_the_gate():
     bars = _bars([100 - index for index in range(16)] + [86 + index for index in range(1, 6)])
     rows, dates, triggers = _triggers(bars, {})
@@ -182,6 +237,7 @@ def test_default_signal_params_match_the_best_backtest_setting():
     params = signals.SignalParams.from_config(strategy_config.default_sector_nine_turn_config())
     assert params.arm_window_days == 0          # 板块与个股同日
     assert params.fear_threshold == 40.0
+    assert params.fear_lookback_days == 5       # 闸门看最近 5 个交易日，不是只看当天
     assert params.low_count_min == 9 and params.buy_high_count == 2
     assert params.high_count_min == 9 and params.sell_low_count == 2
     assert params.sell_atr_multiple == 2.0
@@ -190,13 +246,15 @@ def test_default_signal_params_match_the_best_backtest_setting():
 def test_config_normalization_clamps_and_drops_unknown_keys():
     saved = strategy_config.normalize_sector_nine_turn_config({
         "universe": {"index_codes": ["000688.SH", "不存在.XX"]},
-        "signal": {"fear_threshold": 500, "arm_window_days": -3, "sell_mode": "乱写"},
+        "signal": {"fear_threshold": 500, "fear_lookback_days": 999,
+                   "arm_window_days": -3, "sell_mode": "乱写"},
         "portfolio": {"max_positions": 0, "pick_order": "乱写"},
         "paper": {"initial_capital": 1, "enabled": False},
         "垃圾": 1,
     })
     assert saved["universe"]["index_codes"] == ["000688.SH"]
     assert saved["signal"]["fear_threshold"] == 100.0
+    assert saved["signal"]["fear_lookback_days"] == 60.0
     assert saved["signal"]["arm_window_days"] == 0.0
     assert saved["signal"]["sell_mode"] == "low2_wait"
     assert saved["portfolio"]["max_positions"] == 1.0

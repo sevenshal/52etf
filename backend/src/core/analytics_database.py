@@ -784,6 +784,9 @@ class SectorNineTurnSectorSnapshot(AnalyticsBase):
     high_count = Column(Integer)
     low_count = Column(Integer)
     fear_score = Column(Double)
+    # 闸门看的是最近 N 个交易日的最低分和它出现的日期，不是触发当天这一个数
+    fear_min = Column(Double)
+    fear_pass_date = Column(Date)
     # 低 9 已经出现、还在等第一个高 2
     low9_armed = Column(Boolean)
     low9_date = Column(Date)

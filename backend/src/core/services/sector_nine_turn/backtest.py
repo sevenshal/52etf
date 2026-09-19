@@ -5,7 +5,7 @@
 
 消融方案：
 
-- ``strategy``：完整规则（板块九转 + 贪恐闸门 + 个股九转）；
+- ``strategy``：完整规则（板块九转 + 贪恐闸门 + 个股九转）；闸门按"最近 N 个交易日内触及过"判定；
 - ``no_fear``：去掉贪恐闸门，其余不变；
 - ``stock_only``：完全不看板块，候选池里每只股票自己出"低9→首次高2"就买。
 
@@ -276,6 +276,7 @@ def run_backtest(config: Mapping[str, Any], start: date, end: Optional[date] = N
                 trigger_rows.append({
                     "index_code": code, "index_name": meta.get("name") or code,
                     "signal_date": trigger["signal_date"], "fear_score": trigger["fear_score"],
+                    "fear_min": trigger.get("fear_min"), "fear_pass_date": trigger.get("fear_pass_date"),
                     "fear_passed": trigger["fear_passed"],
                 })
         for target, require_fear in ((sector_windows, True), (sector_windows_nofear, False)):
