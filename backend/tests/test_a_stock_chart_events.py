@@ -297,3 +297,61 @@ def test_a_broker_with_a_single_report_has_no_revision():
 
     assert forecast["revision"] is None
     assert len(forecast["history"]) == 1
+
+
+# --------------------------------------------------------------------------
+# 卖方一致预期估值弹窗：盈利预测指引的「较上次」与研报侧栏同一个数
+# --------------------------------------------------------------------------
+def _revision_db():
+    return FakeDb(reports=REVISION_REPORTS, factors=REVISION_FACTORS)
+
+
+def _consensus_detail():
+    return {
+        "as_of": "2026-09-10",
+        "organizations": [
+            {"org_name": HT, "report_date": date(2026, 8, 21), "author_name": "边文姣,赵某",
+             "report_title": "中报点评", "forecasts": [{"quarter": "2026Q4", "fiscal_year": 2026, "eps": 1.05}]},
+            {"org_name": "招商证券", "report_date": date(2026, 4, 1), "author_name": "李某",
+             "report_title": "首次覆盖", "forecasts": [{"quarter": "2026Q4", "fiscal_year": 2026, "eps": 2.0}]},
+        ],
+    }
+
+
+def test_eps_revisions_are_indexed_by_report_key():
+    revisions = events.load_a_stock_eps_revisions(_revision_db(), SYMBOL, start=START, end=END)
+    revision = revisions[("2026-08-21", HT, "边文姣,赵某", "中报点评")][2026]
+
+    assert revision["match"] == "analyst"
+    assert revision["change_pct"] == pytest.approx(5.0)
+
+
+def test_consensus_guidance_gets_exactly_the_side_panel_revision():
+    detail = events.attach_consensus_eps_revisions(_revision_db(), SYMBOL, _consensus_detail())
+    guidance = detail["organizations"][0]["forecasts"][0]["revision"]
+    side_panel = _forecast(_revisions(), "中报点评")["revision"]
+
+    assert guidance == side_panel  # 同一篇研报，弹窗和侧栏逐字段相同
+    assert guidance["change_pct"] == pytest.approx(5.0)
+
+
+def test_a_broker_without_an_earlier_forecast_gets_none():
+    detail = events.attach_consensus_eps_revisions(_revision_db(), SYMBOL, _consensus_detail())
+    assert detail["organizations"][1]["forecasts"][0]["revision"] is None
+
+
+def test_string_report_dates_and_unknown_reports_are_handled():
+    detail = _consensus_detail()
+    detail["organizations"][0]["report_date"] = "2026-08-21"
+    detail["organizations"][1]["report_title"] = "库里没有这篇"
+    events.attach_consensus_eps_revisions(_revision_db(), SYMBOL, detail)
+
+    assert detail["organizations"][0]["forecasts"][0]["revision"]["change_pct"] == pytest.approx(5.0)
+    assert detail["organizations"][1]["forecasts"][0]["revision"] is None
+
+
+def test_detail_without_organizations_is_returned_unchanged():
+    detail = {"status": "unavailable", "reason": "no_target_price_in_pool"}
+    assert events.attach_consensus_eps_revisions(_revision_db(), SYMBOL, detail) == {
+        "status": "unavailable", "reason": "no_target_price_in_pool",
+    }
