@@ -6,7 +6,8 @@ import tempfile
 import duckdb
 
 
-def test_existing_a_stock_market_table_gets_valuation_columns_and_view_is_rebuilt():
+def test_existing_a_stock_market_table_gets_daily_basic_columns_and_view_is_rebuilt():
+    """生产库当前的 a_stock_market_daily 已有 pe/pb 等估值列，但还没有 ps/ps_ttm 等 daily_basic 列。"""
     fd, path = tempfile.mkstemp(suffix=".duckdb")
     os.close(fd)
     os.unlink(path)
@@ -32,6 +33,12 @@ def test_existing_a_stock_market_table_gets_valuation_columns_and_view_is_rebuil
                 turnover_rate FLOAT,
                 created_at TIMESTAMP,
                 updated_at TIMESTAMP,
+                volume_ratio FLOAT,
+                pe FLOAT,
+                pe_ttm FLOAT,
+                pb FLOAT,
+                dv_ratio FLOAT,
+                dv_ttm FLOAT,
                 PRIMARY KEY (trade_date, ts_code)
             )
         """)
@@ -48,16 +55,16 @@ def test_existing_a_stock_market_table_gets_valuation_columns_and_view_is_rebuil
 
         connection = duckdb.connect(path, read_only=True)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(a_stock_market_daily)").fetchall()}
-        views = {
+        view_columns = {
             row[0]
             for row in connection.execute(
-                "SELECT table_name FROM information_schema.views WHERE table_name = 'a_stock_market_daily_qfq'"
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'a_stock_market_daily_qfq'"
             ).fetchall()
         }
         connection.close()
 
-        assert {"volume_ratio", "pe", "pe_ttm", "pb", "dv_ratio", "dv_ttm"} <= columns
-        assert "a_stock_market_daily_qfq" in views
+        assert {"turnover_rate_f", "ps", "ps_ttm", "free_share", "limit_status"} <= columns
+        assert {"pe_ttm", "pb", "ps_ttm", "limit_status"} <= view_columns
     finally:
         if os.path.exists(path):
             os.unlink(path)

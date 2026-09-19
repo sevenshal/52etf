@@ -1,10 +1,11 @@
-"""回填 a_stock_market_daily 的估值列（pe / pe_ttm / pb / 股息率 / 量比）。
+"""回填 a_stock_market_daily 的 daily_basic 列（pe / pe_ttm / pb / ps / ps_ttm / 股息率 / 量比 /
+自由流通换手率 / 自由流通股本 / 收盘涨跌停状态）。
 
-这几列是后加的，日线同步只写新的一天、从未回填：生产库里 pe_ttm/pb 最早只到
-2026-08-25，价值投资的估值分位、选股系统的盈利收益率因子在历史快照上全是空的。
+这些列是分批后加的，日线同步只写新的一天、从未回填：生产库里 pe_ttm/pb 最早只到
+2026-08-25，ps/ps_ttm 等更晚，价值投资的估值分位、选股系统的盈利收益率因子在历史快照上全是空的。
 
 按交易日逐天拉 tushare daily_basic，只 UPDATE 这几列，不动行情和市值等其它列；
-默认只补"整天 pb 都为空"的交易日，可以中断后重跑续上。
+默认只补"整天 ps_ttm 都为空"的交易日（最后加上的一列，它有值说明整组都补过），可以中断后重跑续上。
 """
 
 from __future__ import annotations
@@ -21,7 +22,11 @@ from ..core.services.tushare import TushareService
 
 logger = logging.getLogger(__name__)
 
-VALUATION_COLUMNS = ("pe", "pe_ttm", "pb", "dv_ratio", "dv_ttm", "volume_ratio")
+VALUATION_COLUMNS = (
+    "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm", "volume_ratio", "turnover_rate_f", "free_share",
+    "limit_status",
+)
+INTEGER_COLUMNS = {"limit_status"}
 DEFAULT_BACKFILL_START = date(2019, 1, 1)
 DEFAULT_BATCH_DAYS = 20
 
@@ -29,7 +34,7 @@ DEFAULT_BATCH_DAYS = 20
 def _trade_dates_to_fill(start_date: date, end_date: date, only_missing: bool) -> List[date]:
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
-        having = " HAVING COUNT(pb) = 0" if only_missing else ""
+        having = " HAVING COUNT(ps_ttm) = 0" if only_missing else ""
         rows = connection.execute(
             f"""
             SELECT trade_date
@@ -47,9 +52,10 @@ def _trade_dates_to_fill(start_date: date, end_date: date, only_missing: bool) -
 
 def _write_batch(frame: pd.DataFrame) -> int:
     """只更新估值列；缺失值写成 NULL（不能写 NaN：DuckDB 里 NaN 比任何数都大）。"""
-    batch = frame.loc[:, ["ts_code", "trade_date", *VALUATION_COLUMNS]].copy()
+    batch = frame.reindex(columns=["ts_code", "trade_date", *VALUATION_COLUMNS]).copy()
     for column in VALUATION_COLUMNS:
-        batch[column] = pd.to_numeric(batch[column], errors="coerce").astype("Float64")
+        values = pd.to_numeric(batch[column], errors="coerce")
+        batch[column] = values.round().astype("Int64") if column in INTEGER_COLUMNS else values.astype("Float64")
     assignments = ", ".join(f"{column} = f.{column}" for column in VALUATION_COLUMNS)
     connection = connect_duckdb_for_write(ANALYTICS_DB_PATH)
     try:

@@ -271,6 +271,12 @@ class AStockMarketDaily(AnalyticsBase):
     pb = Column(Float)
     dv_ratio = Column(Float)
     dv_ttm = Column(Float)
+    turnover_rate_f = Column(Float)
+    ps = Column(Float)
+    ps_ttm = Column(Float)
+    free_share = Column(Float)
+    # 收盘涨跌停状态：0平盘 1上涨 2涨停 3一字涨停 4下跌 5跌停 6一字跌停
+    limit_status = Column(Integer)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -832,12 +838,11 @@ def ensure_analytics_table_columns():
     """为存量 DuckDB 表补充新增字段（幂等，沿用主库 ensure_table_columns 模式）。"""
     table_columns = {
         "a_stock_market_daily": {
-            "volume_ratio": "FLOAT",
-            "pe": "FLOAT",
-            "pe_ttm": "FLOAT",
-            "pb": "FLOAT",
-            "dv_ratio": "FLOAT",
-            "dv_ttm": "FLOAT",
+            "turnover_rate_f": "FLOAT",
+            "ps": "FLOAT",
+            "ps_ttm": "FLOAT",
+            "free_share": "FLOAT",
+            "limit_status": "INTEGER",
         },
         # 4 张财务报表按 tushare 官方字段全集建表，存量库里缺的列在这里统一补齐，
         # 列清单与建表/同步共用同一份定义(见 tushare_statement_fields)。
@@ -997,6 +1002,11 @@ def ensure_analytics_schema():
             m.pb,
             m.dv_ratio,
             m.dv_ttm,
+            m.turnover_rate_f,
+            m.ps,
+            m.ps_ttm,
+            m.free_share,
+            m.limit_status,
             f.adj_factor,
             a.anchor_adj_factor,
             'qfq' AS adjust_type,
