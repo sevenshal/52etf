@@ -1,7 +1,9 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 
+from ...core.services.earnings_gap import EarningsGapDataError, get_earnings_gap
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
 from .account import valid_admin_account
 
@@ -20,4 +22,16 @@ def get_intraday_volume(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except MarketVolumeDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/earnings-gap")
+async def get_earnings_gap_signals(
+    refresh: bool = Query(False),
+    account_id: str = Depends(valid_admin_account),
+):
+    """净利润断层信号：默认读最近一次计算的快照，refresh=true 时立即重算。"""
+    try:
+        return await run_in_threadpool(get_earnings_gap, refresh)
+    except (EarningsGapDataError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))

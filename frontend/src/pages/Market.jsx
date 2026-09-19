@@ -5,6 +5,7 @@ import ReactECharts from 'echarts-for-react';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import AStockFundFlow from './AStockFundFlow';
+import MarketEarningsGap from './MarketEarningsGap';
 import './Market.css';
 
 const { Text } = Typography;
@@ -12,6 +13,7 @@ const { Text } = Typography;
 const MARKET_TAB_ITEMS = [
   { key: 'volume', label: '量能对比', path: '/market' },
   { key: 'fund-flow', label: '资金流向', path: '/market/fund-flow' },
+  { key: 'earnings-gap', label: '净利润断层', path: '/market/earnings-gap' },
 ];
 
 const AUTO_REFRESH_MS = 60 * 1000;
@@ -297,6 +299,7 @@ const Market = ({ initialTab = 'volume' }) => {
       </div>
       {activeTab === 'volume' && <MarketVolumeCompare />}
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
+      {activeTab === 'earnings-gap' && <MarketEarningsGap />}
     </div>
   );
 };
