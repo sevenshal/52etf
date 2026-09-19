@@ -478,6 +478,19 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         autoRunBacktest: true,
         presetValues: {
           symbol: values.symbol || 'SOXL.US',
+          // 回测页默认是 A股 三标的那套（红利+半导体+纳指、上证红利贪恐、估值闸门）。
+          // 美股实盘配置跳过去时必须整套清掉，否则会拿 A股 的候补和贪恐来源回测 SOXL。
+          a_stock_pair: undefined,
+          fear_source_values: ['cnn'],
+          volume_signal_symbol: undefined,
+          sub_symbol: undefined,
+          sub2_symbol: undefined,
+          sub3_symbol: undefined,
+          swap_threshold_values: '',
+          valuation_buy_max_values: 'none',
+          valuation_sell_min_values: 'none',
+          valuation_force_sell_greed_values: 'none',
+          date_range: [dayjs('2021-01-01'), dayjs()],
           initial_capital: 100000,
           top_n: 1,
           objective: 'annualized_return',

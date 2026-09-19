@@ -522,12 +522,12 @@ class SOXLFearSearchParams(BaseModel):
     sub2_volume_signal_symbol: Optional[str] = None
     sub2_buy_threshold_values: List[float] = Field(default_factory=lambda: [20.0])
     sub2_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
-    # 第三候补（不参与网格，按固定阈值参与轮动）
+    # 第三候补（sub3_symbol 固定，阈值与 sub/sub2 一样参与组合搜索）
     sub3_symbol: Optional[str] = None
     sub3_fear_source: str = "cnn"
     sub3_volume_signal_symbol: Optional[str] = None
-    sub3_buy_threshold: float = 20.0
-    sub3_volume_ratio_threshold: float = 1.3
+    sub3_buy_threshold_values: List[float] = Field(default_factory=lambda: [20.0])
+    sub3_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
     # 卖出跌破 MA5 确认（不参与网格）
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
     # 估值点位闸门候选（参与组合搜索；None=关闭）
@@ -552,6 +552,27 @@ class SOXLFearSearchParams(BaseModel):
             if item is not None and (item < 0 or item > 100):
                 raise ValueError("估值闸门阈值必须在 0 到 100 之间或为空")
         return normalized
+
+    @validator("sub3_buy_threshold_values", "sub3_volume_ratio_threshold_values")
+    def validate_sub3_threshold_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized:
+            raise ValueError("第三候补阈值候选至少一个值")
+        return normalized
+
+    @validator("sub3_volume_ratio_threshold_values")
+    def validate_sub3_vr_values(cls, value):
+        for item in value:
+            if item <= 0 or item > 20:
+                raise ValueError("第三候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("sub3_buy_threshold_values")
+    def validate_sub3_buy_values(cls, value):
+        for item in value:
+            if item < 0 or item > 100:
+                raise ValueError("第三候补恐慌阈值必须在 0 到 100 之间")
+        return value
 
     @validator("sub3_symbol", "sub3_volume_signal_symbol")
     def validate_search_sub3_symbol(cls, value):
@@ -2527,7 +2548,9 @@ def _run_seesaw_backtest(
 
         def _sell_held():
             """持有标的贪恐卖出（trailing 支持；trailing=0 贪即卖时 sell_shrink_z>0 需当日缩量确认）。"""
+            # greed_peak_price 在移动止盈分支里要读写外层状态，漏了 nonlocal 会 UnboundLocalError
             nonlocal action, reason, trade_signal_fear, trade_signal_vr, trade_signal_label
+            nonlocal greed_peak_price
             held_sig = sig[position_symbol]
             held_fear = float(held_sig["fear"])
             held_vr = float(held_sig["vr"])
@@ -2779,6 +2802,8 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.swap_threshold_values,
         payload.sub2_buy_threshold_values,
         payload.sub2_volume_ratio_threshold_values,
+        payload.sub3_buy_threshold_values,
+        payload.sub3_volume_ratio_threshold_values,
         payload.volume_z_threshold_values,
         payload.sell_shrink_z_values,
         payload.buy_turn_signal_mode_values,
@@ -2858,6 +2883,8 @@ def _evaluate_search_candidates(
                 payload.swap_threshold_values,
                 payload.sub2_buy_threshold_values,
                 payload.sub2_volume_ratio_threshold_values,
+                payload.sub3_buy_threshold_values,
+                payload.sub3_volume_ratio_threshold_values,
                 payload.volume_z_threshold_values,
                 payload.sell_shrink_z_values,
                 payload.buy_turn_signal_mode_values,
@@ -2939,8 +2966,6 @@ def _evaluate_search_candidates(
                         sub3_symbol=payload.sub3_symbol,
                         sub3_fear_source=payload.sub3_fear_source,
                         sub3_volume_signal_symbol=payload.sub3_volume_signal_symbol,
-                        sub3_buy_threshold=payload.sub3_buy_threshold,
-                        sub3_volume_ratio_threshold=payload.sub3_volume_ratio_threshold,
                         sell_ma5_confirm=payload.sell_ma5_confirm,
                     )
                     consume_batch_result(batch_result)
@@ -2984,8 +3009,6 @@ def _evaluate_search_candidates(
                 payload.sub3_symbol,
                 payload.sub3_fear_source,
                 payload.sub3_volume_signal_symbol,
-                payload.sub3_buy_threshold,
-                payload.sub3_volume_ratio_threshold,
                 payload.sell_ma5_confirm,
             )
             futures_map[future] = {
@@ -3048,8 +3071,6 @@ def _evaluate_search_batch(
     sub3_symbol: Optional[str] = None,
     sub3_fear_source: Optional[str] = None,
     sub3_volume_signal_symbol: Optional[str] = None,
-    sub3_buy_threshold: float = 20.0,
-    sub3_volume_ratio_threshold: float = 1.3,
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF,
 ) -> Dict:
     results = []
@@ -3077,6 +3098,8 @@ def _evaluate_search_batch(
                 swap_threshold,
                 sub2_buy_threshold,
                 sub2_volume_ratio_threshold,
+                sub3_buy_threshold,
+                sub3_volume_ratio_threshold,
                 volume_z_threshold,
                 sell_shrink_z,
                 buy_turn_signal_mode,
@@ -3125,8 +3148,8 @@ def _evaluate_search_batch(
                 sub3_symbol=sub3_symbol,
                 sub3_fear_source=sub3_fear_source or "cnn",
                 sub3_volume_signal_symbol=sub3_volume_signal_symbol,
-                sub3_buy_threshold=float(sub3_buy_threshold),
-                sub3_volume_ratio_threshold=float(sub3_volume_ratio_threshold),
+                sub3_buy_threshold=float(sub3_buy_threshold if sub3_buy_threshold is not None else 20.0),
+                sub3_volume_ratio_threshold=float(sub3_volume_ratio_threshold if sub3_volume_ratio_threshold is not None else 1.3),
                 sell_ma5_confirm=str(sell_ma5_confirm or SELL_MA5_CONFIRM_OFF),
                 volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
                 sell_shrink_z=float(sell_shrink_z),
