@@ -32,6 +32,8 @@ from .soxl_fear_backtest import (
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
     FEAR_SOURCE_OPTIONS,
+    SELL_MA5_CONFIRM_MODES,
+    SELL_MA5_CONFIRM_OFF,
     VALUATION_POSITION_WINDOWS,
 )
 
@@ -59,6 +61,14 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub2_volume_signal_symbol: Optional[str] = None
     sub2_buy_threshold: float = 20.0
     sub2_volume_ratio_threshold: float = 1.3
+    # 第三候补（四标的轮动，可选）：默认配云计算
+    sub3_symbol: Optional[str] = None
+    sub3_fear_source: str = "a_stock_930851_csi"
+    sub3_volume_signal_symbol: Optional[str] = None
+    sub3_buy_threshold: float = 20.0
+    sub3_volume_ratio_threshold: float = 1.3
+    # 卖出跌破MA5确认：off=贪婪即卖（默认，保持原行为）；all=都等；non_main=只有候补等
+    sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
     swap_threshold: Optional[float] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
@@ -214,6 +224,58 @@ class AStockFearStrategyConfigPayload(BaseModel):
             raise ValueError("第二候补量比阈值必须大于 0 且不超过 20")
         return value
 
+    @validator("sub3_symbol")
+    def validate_sub3_symbol(cls, value):
+        if not value:
+            return None
+        value = (value or "").strip().upper()
+        if value not in A_STOCK_SYMBOLS:
+            raise ValueError("第三候补标的必须是可交易 A 股 ETF")
+        return value
+
+    @validator("sub3_fear_source", pre=True, always=True)
+    def normalize_sub3_fear_source_none(cls, value):
+        # 存量配置（后加列）可能为 NULL → 补默认值
+        return value or "a_stock_930851_csi"
+
+    @validator("sub3_fear_source")
+    def validate_sub3_fear_source(cls, value):
+        value = (value or "").strip().lower()
+        if value not in A_STOCK_FEAR_SOURCE_KEYS and value not in {"qqq_clone", "cnn", "soxx_clone", "spy_clone", "dia_clone"}:
+            raise ValueError("第三候补恐贪来源必须是 a_stock_* 或美股自算贪恐（qqq_clone 等）")
+        return value
+
+    @validator("sub3_volume_signal_symbol")
+    def validate_sub3_volume_signal_symbol(cls, value):
+        if not value:
+            return None
+        if not cls._is_valid_volume_source_symbol(value):
+            raise ValueError("第三候补量比来源标的必须是可交易 A 股 ETF 或美股标的")
+        return value
+
+    @validator("sub3_buy_threshold")
+    def validate_sub3_buy_threshold(cls, value):
+        if value < 0 or value > 100:
+            raise ValueError("第三候补恐慌阈值必须在 0 到 100 之间")
+        return value
+
+    @validator("sub3_volume_ratio_threshold")
+    def validate_sub3_volume_ratio_threshold(cls, value):
+        if value <= 0 or value > 20:
+            raise ValueError("第三候补量比阈值必须大于 0 且不超过 20")
+        return value
+
+    @validator("sell_ma5_confirm", pre=True, always=True)
+    def normalize_sell_ma5_confirm(cls, value):
+        # 存量配置（后加列）可能为 NULL → 保持原行为
+        return value or SELL_MA5_CONFIRM_OFF
+
+    @validator("sell_ma5_confirm")
+    def validate_sell_ma5_confirm(cls, value):
+        if value not in SELL_MA5_CONFIRM_MODES:
+            raise ValueError("卖出MA5确认仅支持 off、all、non_main")
+        return value
+
     @validator("swap_threshold")
     def validate_swap_threshold(cls, value):
         if value is None:
@@ -323,6 +385,8 @@ class AStockFearStrategyStatePayload(BaseModel):
     cooldown_remaining_days: int = 0
     greed_peak_price: Optional[float] = None
     take_profit_cycle_sell_count: int = 0
+    # 卖出信号已成立、等待跌破 MA5 确认的信号日；None = 没有挂起的卖出信号
+    pending_sell_signal_date: Optional[date] = None
 
     @validator("cooldown_remaining_days")
     def validate_cooldown_remaining_days(cls, value):
@@ -369,6 +433,12 @@ CONFIG_FIELDS = [
     "sub2_volume_signal_symbol",
     "sub2_buy_threshold",
     "sub2_volume_ratio_threshold",
+    "sub3_symbol",
+    "sub3_fear_source",
+    "sub3_volume_signal_symbol",
+    "sub3_buy_threshold",
+    "sub3_volume_ratio_threshold",
+    "sell_ma5_confirm",
     "swap_threshold",
     "external_trading_account_id",
     "live_sub_account_id",
@@ -606,6 +676,7 @@ def _state_response(
         cooldown_remaining_days=int(getattr(state, "cooldown_remaining_days", 0) or 0),
         greed_peak_price=getattr(state, "greed_peak_price", None),
         take_profit_cycle_sell_count=int(getattr(state, "take_profit_cycle_sell_count", 0) or 0),
+        pending_sell_signal_date=getattr(state, "pending_sell_signal_date", None),
         updated_at=getattr(state, "updated_at", None),
         has_state=bool(state),
     )
@@ -854,6 +925,7 @@ def update_a_stock_fear_strategy_state_by_config(
     state.cooldown_remaining_days = int(payload.cooldown_remaining_days or 0)
     state.greed_peak_price = payload.greed_peak_price
     state.take_profit_cycle_sell_count = int(payload.take_profit_cycle_sell_count or 0)
+    state.pending_sell_signal_date = payload.pending_sell_signal_date
     state.updated_at = datetime.now()
     db.commit()
     db.refresh(state)

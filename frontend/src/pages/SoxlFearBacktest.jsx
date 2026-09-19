@@ -63,6 +63,16 @@ const parseOptionalThresholdList = (value) => {
 };
 
 const formatPercent = (value, digits = 2) => `${Number(value || 0).toFixed(digits)}%`;
+
+// 卖出跌破MA5确认：贪恐到达卖出阈值后不立刻卖，等量比来源收盘跌破 5 日均线再卖
+const SELL_MA5_CONFIRM_OPTIONS = [
+  { value: 'off', label: '关闭（贪婪即卖）' },
+  { value: 'non_main', label: '仅候补等跌破MA5' },
+  { value: 'all', label: '所有标的都等跌破MA5' },
+];
+const SELL_MA5_CONFIRM_LABELS = SELL_MA5_CONFIRM_OPTIONS.reduce(
+  (acc, item) => ({ ...acc, [item.value]: item.label }), {},
+);
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
 );
@@ -290,6 +300,13 @@ const SoxlFearBacktest = () => {
       sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
       sub2_buy_threshold_values: parseNumberList(values.sub2_buy_threshold_values),
       sub2_volume_ratio_threshold_values: parseNumberList(values.sub2_volume_ratio_threshold_values),
+      // 第三候补与卖出MA5确认不参与网格，按固定值参与轮动
+      sub3_symbol: values.sub3_symbol || undefined,
+      sub3_fear_source: values.sub3_fear_source || 'a_stock_930851_csi',
+      sub3_volume_signal_symbol: values.sub3_volume_signal_symbol || undefined,
+      sub3_buy_threshold: values.sub3_buy_threshold ?? 20,
+      sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
+      sell_ma5_confirm: values.sell_ma5_confirm || 'off',
       // 估值点位闸门（参与组合搜索；none=关闭）
       valuation_window_values: values.valuation_window_values?.length ? values.valuation_window_values : [252],
       valuation_buy_max_values: parseOptionalThresholdList(values.valuation_buy_max_values),
@@ -337,6 +354,12 @@ const SoxlFearBacktest = () => {
     sub2_volume_signal_symbol: record.sub2_volume_signal_symbol ?? undefined,
     sub2_buy_threshold: record.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: record.sub2_volume_ratio_threshold ?? 1.3,
+    sub3_symbol: record.sub3_symbol ?? undefined,
+    sub3_fear_source: record.sub3_fear_source ?? 'a_stock_930851_csi',
+    sub3_volume_signal_symbol: record.sub3_volume_signal_symbol ?? undefined,
+    sub3_buy_threshold: record.sub3_buy_threshold ?? 20,
+    sub3_volume_ratio_threshold: record.sub3_volume_ratio_threshold ?? 1.3,
+    sell_ma5_confirm: record.sell_ma5_confirm ?? 'off',
     valuation_window: record.valuation_window ?? 252,
     valuation_buy_max: record.valuation_buy_max ?? null,
     valuation_sell_min: record.valuation_sell_min ?? null,
@@ -1189,6 +1212,12 @@ const SoxlFearBacktest = () => {
             sub2_volume_signal_symbol: 'QQQ.US',
             sub2_buy_threshold_values: '20',
             sub2_volume_ratio_threshold_values: '1.3',
+            sub3_symbol: undefined,
+            sub3_fear_source: 'a_stock_930851_csi',
+            sub3_volume_signal_symbol: undefined,
+            sub3_buy_threshold: 20,
+            sub3_volume_ratio_threshold: 1.3,
+            sell_ma5_confirm: 'off',
             valuation_window_values: [252],
             valuation_buy_max_values: 'none',
             valuation_sell_min_values: '80',
@@ -1447,6 +1476,47 @@ const SoxlFearBacktest = () => {
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
+                message="第三候补 + 卖出跌破MA5确认（可选，均不参与网格搜索）"
+                description="第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐）。卖出跌破MA5确认：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。红利+半导体+纳指科技 2023-03-22 起：关闭 274.7%，全部都等 275.9%，仅候补等 315.7%（夏普 2.43，最大回撤 9.8% 不变）。"
+              />
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_symbol" label="第三候补标的">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="留空=不启用" options={symbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_fear_source" label="第三候补恐贪来源">
+                <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_volume_signal_symbol" label="第三候补量比来源">
+                <Select allowClear showSearch optionFilterProp="label" placeholder="默认自身" options={volumeSignalSymbolOptions} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_buy_threshold" label="第三候补恐慌阈值(<=)">
+                <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_volume_ratio_threshold" label="第三候补量比阈值(>=)"
+                tooltip={sub2RatioDisabled ? '已启用统一放量标准差(log-z)，第三候补放量统一用该标准差，此阈值被忽略' : '第三候补放量量比阈值'}
+              >
+                <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={sub2RatioDisabled} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="sell_ma5_confirm" label="卖出跌破MA5确认">
+                <Select options={SELL_MA5_CONFIRM_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={24}>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
                 message="估值点位闸门（可选）"
                 description="估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖（贪婪但还不贵就继续拿）；贪恐达到兜底阈值时不看估值直接卖。A股指数用成分一致预期估值，美股指数（QQQ/SPY/SOXX/DIA 自算贪恐来源）用美股ETF估值分析（EVC 成分公允价值 ÷ 持仓净值）；没有对应指数估值的来源（如 CNN）、估值样本不足 120 天的早期日期不设闸。none=关闭。"
               />
@@ -1601,6 +1671,18 @@ const SoxlFearBacktest = () => {
                   <Descriptions.Item label="换仓阈值">{detailedResult.params.swap_threshold ?? '关闭（主辅跷跷板）'}</Descriptions.Item>
                 </>
               )}
+              {detailedResult.params?.sub3_symbol && (
+                <>
+                  <Descriptions.Item label="第三候补">{detailedResult.params.sub3_symbol}</Descriptions.Item>
+                  <Descriptions.Item label="第三候补恐贪来源">{getFearSourceLabel(detailedResult.params.sub3_fear_source)}</Descriptions.Item>
+                  <Descriptions.Item label="第三候补量比来源">{detailedResult.params.sub3_volume_signal_symbol || '自身'}</Descriptions.Item>
+                  <Descriptions.Item label="第三候补恐慌阈值">{detailedResult.params.sub3_buy_threshold}</Descriptions.Item>
+                  <Descriptions.Item label="第三候补量比阈值">{detailedResult.params.sub3_volume_ratio_threshold}</Descriptions.Item>
+                </>
+              )}
+              <Descriptions.Item label="卖出跌破MA5确认">
+                {SELL_MA5_CONFIRM_LABELS[detailedResult.params?.sell_ma5_confirm || 'off'] || '关闭（贪婪即卖）'}
+              </Descriptions.Item>
               {detailedResult.params?.sub2_symbol && (
                 <>
                   <Descriptions.Item label="第二候补">{detailedResult.params.sub2_symbol}</Descriptions.Item>
