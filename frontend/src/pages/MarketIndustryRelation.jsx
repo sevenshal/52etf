@@ -41,75 +41,150 @@ const TrendSegments = ({ history }) => {
   );
 };
 
-/** 三张行业表共用的紧凑列；名称列点击下钻 */
-const buildIndustryColumns = level => [
-  {
-    title: '#',
-    dataIndex: 'rank',
-    width: 48,
-    render: (value, record) => <Text type="secondary">{value ?? record.rank_str}</Text>,
-  },
-  {
-    title: LEVEL_TITLE[level],
-    dataIndex: 'name',
-    width: 108,
-    ellipsis: true,
-    render: (value, record) => (
-      <Tooltip title={`${record.count} 只成分 · 成交额 ${record.amount_yi} 亿${record.parent ? ` · 属于 ${record.parent}` : ''}`}>
-        <span>{value}</span>
-      </Tooltip>
-    ),
-  },
-  {
-    title: '涨幅',
-    dataIndex: 'pct',
-    width: 72,
+/** 行业表列。完整模式给全字段，精简模式只留最常看的几列；
+ *  名次与名称固定在左侧，其余横向滚动，这样列多也不会挤掉关键信息。 */
+const buildIndustryColumns = (level, compact) => {
+  const num = (title, key, { width = 46, color = '', tip = '' } = {}) => ({
+    title: tip ? <Tooltip title={tip}>{title}</Tooltip> : title,
+    dataIndex: key,
+    width,
     align: 'right',
-    sorter: (a, b) => a.pct - b.pct,
-    render: value => <Text className={pctClass(value)}>{fmtPct(value)}</Text>,
-  },
-  {
-    title: '强/活/观',
-    key: 'labels',
-    width: 84,
+    sorter: (a, b) => (a[key] || 0) - (b[key] || 0),
+    render: value => (value ? <Text className={color}>{value}</Text> : <Text type="secondary">0</Text>),
+  });
+
+  const head = [
+    {
+      title: '#',
+      dataIndex: 'rank',
+      width: 44,
+      fixed: 'left',
+      render: (value, record) => <Text type="secondary">{value ?? record.rank_str}</Text>,
+    },
+    {
+      title: LEVEL_TITLE[level],
+      dataIndex: 'name',
+      width: compact ? 104 : 96,
+      fixed: 'left',
+      ellipsis: true,
+      render: (value, record) => (
+        <Tooltip title={`${record.count} 只成分 · 成交额 ${record.amount_yi} 亿${record.parent ? ` · 属于 ${record.parent}` : ''}`}>
+          <span>{value}</span>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '涨幅',
+      dataIndex: 'pct',
+      width: 68,
+      align: 'right',
+      sorter: (a, b) => a.pct - b.pct,
+      render: value => <Text className={pctClass(value)}>{fmtPct(value)}</Text>,
+    },
+  ];
+
+  const tail = [
+    {
+      title: <Tooltip title="情绪分 = 涨停×10 + 首板×6 + 二板×9 + 多板×12 − 跌停×10 + 上涨占比×30 + 涨幅×2">情绪</Tooltip>,
+      dataIndex: 'sentiment',
+      width: 56,
+      align: 'right',
+      sorter: (a, b) => a.sentiment - b.sentiment,
+      render: value => <Text>{value}</Text>,
+    },
+    {
+      title: <Tooltip title="综合分 = 涨幅分×45% + 量能分×25% + 情绪分×30%，按它排名">综合</Tooltip>,
+      dataIndex: 'composite',
+      width: 60,
+      align: 'right',
+      defaultSortOrder: 'descend',
+      sorter: (a, b) => a.composite - b.composite,
+      render: value => <Text strong>{value}</Text>,
+    },
+  ];
+
+  if (compact) {
+    return [
+      ...head,
+      {
+        title: <Tooltip title="强势 / 活跃 / 观望 家数">强/活/观</Tooltip>,
+        key: 'labels',
+        width: 82,
+        align: 'right',
+        sorter: (a, b) => (a.st * 2 + a.by) - (b.st * 2 + b.by),
+        render: (_, record) => (
+          <span className="industry-labels">
+            <Text className="is-up" strong>{record.st}</Text>
+            <Text type="secondary">/</Text>
+            <Text className="is-up">{record.by}</Text>
+            <Text type="secondary">/</Text>
+            <Text className="is-down">{record.gw}</Text>
+          </span>
+        ),
+      },
+      {
+        title: '涨停',
+        dataIndex: 'lu',
+        width: 62,
+        align: 'right',
+        sorter: (a, b) => a.lu - b.lu,
+        render: (value, record) => (
+          <Tooltip title={`首板 ${record.fb} · 二板 ${record.eb} · 多板 ${record.lb3} · 跌停 ${record.ld}`}>
+            <Text className="is-up">{value}</Text>
+          </Tooltip>
+        ),
+      },
+      ...tail,
+    ];
+  }
+
+  // 涨跌、涨跌停、连板三组各并成一列：红绿分色即可区分，省下 4 列宽度
+  const pair = (title, upKey, downKey, { width = 72, tip = '' } = {}) => ({
+    title: tip ? <Tooltip title={tip}>{title}</Tooltip> : title,
+    key: `${upKey}_${downKey}`,
+    width,
     align: 'right',
-    sorter: (a, b) => (a.st * 2 + a.by) - (b.st * 2 + b.by),
+    sorter: (a, b) => (a[upKey] || 0) - (b[upKey] || 0),
     render: (_, record) => (
-      <span className="industry-labels">
-        <Text className="is-up" strong>{record.st}</Text>
+      <span className="industry-pair">
+        <Text className="is-up">{record[upKey] || 0}</Text>
         <Text type="secondary">/</Text>
-        <Text className="is-up">{record.by}</Text>
-        <Text type="secondary">/</Text>
-        <Text className="is-down">{record.gw}</Text>
+        <Text className="is-down">{record[downKey] || 0}</Text>
       </span>
     ),
-  },
-  {
-    title: '涨停',
-    dataIndex: 'lu',
-    width: 74,
-    align: 'right',
-    sorter: (a, b) => a.lu - b.lu,
-    render: (value, record) => (
-      <Tooltip title={`首板 ${record.fb} · 二板 ${record.eb} · 多板 ${record.lb3} · 跌停 ${record.ld}`}>
-        <span><Text className="is-up">{value}</Text>{record.lb3 ? <Text type="secondary">+{record.lb3}</Text> : null}</span>
-      </Tooltip>
-    ),
-  },
-  {
-    title: '综合',
-    dataIndex: 'composite',
-    width: 68,
-    align: 'right',
-    defaultSortOrder: 'descend',
-    sorter: (a, b) => a.composite - b.composite,
-    render: (value, record) => (
-      <Tooltip title={`情绪分 ${record.sentiment} · 涨跌 ${record.up}/${record.down}`}>
-        <Text strong>{value}</Text>
-      </Tooltip>
-    ),
-  },
-];
+  });
+
+  return [
+    ...head,
+    { title: '成交额', dataIndex: 'amount_yi', width: 72, align: 'right', sorter: (a, b) => a.amount_yi - b.amount_yi },
+    num('成分', 'count', { width: 50 }),
+    num('强势', 'st', { color: 'is-up', tip: '强势家数' }),
+    num('活跃', 'by', { color: 'is-up' }),
+    num('观望', 'gw', { color: 'is-down' }),
+    num('规避', 'av', { color: 'is-down' }),
+    pair('涨/跌', 'up', 'down', { width: 78, tip: '上涨家数 / 下跌家数' }),
+    pair('涨停/跌停', 'lu', 'ld', { width: 82, tip: '涨停家数 / 跌停家数' }),
+    {
+      title: <Tooltip title="多板（三板及以上） / 二板 / 首板">多/二/首</Tooltip>,
+      key: 'boards',
+      width: 80,
+      align: 'right',
+      // 按连板梯队排序：多板权重最高，其次二板、首板
+      sorter: (a, b) => ((a.lb3 || 0) * 100 + (a.eb || 0) * 10 + (a.fb || 0))
+        - ((b.lb3 || 0) * 100 + (b.eb || 0) * 10 + (b.fb || 0)),
+      render: (_, record) => (
+        <span className="industry-pair">
+          <Text className="is-up" strong={Boolean(record.lb3)}>{record.lb3 || 0}</Text>
+          <Text type="secondary">/</Text>
+          <Text className="is-up">{record.eb || 0}</Text>
+          <Text type="secondary">/</Text>
+          <Text className="is-up">{record.fb || 0}</Text>
+        </span>
+      ),
+    },
+    ...tail,
+  ];
+};
 
 const MarketIndustryRelation = () => {
   const [data, setData] = useState(null);
@@ -119,6 +194,7 @@ const MarketIndustryRelation = () => {
   const [focus, setFocus] = useState('');
   const [selected, setSelected] = useState({ l1: null, l2: null, l3: null });
   const [history, setHistory] = useState(null);
+  const [columnMode, setColumnMode] = useState('full');   // full=完整列 / compact=精简列
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -189,6 +265,18 @@ const MarketIndustryRelation = () => {
       return next ? { l1: parentL1 || prev.l1, l2: parentL2 || prev.l2, l3: next } : { ...prev, l3: null };
     });
   };
+
+  const compact = columnMode === 'compact';
+  const industryColumns = useMemo(
+    () => ({
+      l1: buildIndustryColumns('l1', compact),
+      l2: buildIndustryColumns('l2', compact),
+      l3: buildIndustryColumns('l3', compact),
+    }),
+    [compact],
+  );
+  // 完整模式列多，给一个横向滚动宽度；精简模式正好铺满
+  const industryScrollX = compact ? undefined : 860;
 
   const rowProps = level => record => ({
     onClick: () => pick(level, record.name),
@@ -312,6 +400,15 @@ const MarketIndustryRelation = () => {
           />
         </Space>
         <Space wrap size={[8, 6]}>
+          <Text type="secondary">列</Text>
+          <Segmented
+            size="small"
+            value={columnMode}
+            onChange={setColumnMode}
+            options={[{ label: '完整', value: 'full' }, { label: '精简', value: 'compact' }]}
+          />
+        </Space>
+        <Space wrap size={[8, 6]}>
           <Text type="secondary">焦点</Text>
           <Segmented
             size="small"
@@ -340,30 +437,30 @@ const MarketIndustryRelation = () => {
       <Spin spinning={loading && !data}>
         {data?.picked ? (
           <Row gutter={[12, 12]} className="market-industry__body">
-            <Col xs={24} xl={9}>
+            <Col xs={24} xl={10}>
               <Space direction="vertical" size={12} className="market-industry__stack">
                 <Card size="small" title={`一级行业（${data.l1.length}）`} extra={<Text type="secondary">点击下钻</Text>}>
                   <Table
-                    size="small" rowKey="name" columns={buildIndustryColumns('l1')} dataSource={data.l1}
-                    pagination={false} scroll={{ y: 300 }} onRow={rowProps('l1')}
+                    size="small" rowKey="name" columns={industryColumns.l1} dataSource={data.l1}
+                    pagination={false} scroll={{ x: industryScrollX, y: 300 }} onRow={rowProps('l1')}
                   />
                 </Card>
                 <Card size="small" title={`二级行业（${l2Rows.length}）`} extra={<Text type="secondary">{selected.l1 || '全部'}</Text>}>
                   <Table
-                    size="small" rowKey="name" columns={buildIndustryColumns('l2')} dataSource={l2Rows}
-                    pagination={false} scroll={{ y: 240 }} onRow={rowProps('l2')}
+                    size="small" rowKey="name" columns={industryColumns.l2} dataSource={l2Rows}
+                    pagination={false} scroll={{ x: industryScrollX, y: 240 }} onRow={rowProps('l2')}
                   />
                 </Card>
                 <Card size="small" title={`细分行业（${l3Rows.length}）`} extra={<Text type="secondary">{selected.l2 || selected.l1 || '全部'}</Text>}>
                   <Table
-                    size="small" rowKey="name" columns={buildIndustryColumns('l3')} dataSource={l3Rows}
-                    pagination={false} scroll={{ y: 240 }} onRow={rowProps('l3')}
+                    size="small" rowKey="name" columns={industryColumns.l3} dataSource={l3Rows}
+                    pagination={false} scroll={{ x: industryScrollX, y: 240 }} onRow={rowProps('l3')}
                   />
                 </Card>
               </Space>
             </Col>
 
-            <Col xs={24} xl={15}>
+            <Col xs={24} xl={14}>
               <Card
                 size="small"
                 className="market-industry__structure"
