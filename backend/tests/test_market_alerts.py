@@ -100,7 +100,7 @@ def test_evaluate_snapshot_uses_same_time_baseline_and_speed():
         "open": 10.1, "vol": 2_000_000, "amount": 1.2e8,
     }])
     structures = {"000001.SZ": _structure(td_up_prev=2)}
-    baseline = {("000001.SZ", "10:00"): 800_000.0}     # 量比 2.5
+    baseline = {"000001.SZ": 800_000.0}               # 量比 2.5
 
     rows = evaluate_snapshot(quotes, structures, baseline, "10:00", previous_pct={"000001.SZ": 3.0})
 
@@ -111,8 +111,8 @@ def test_evaluate_snapshot_uses_same_time_baseline_and_speed():
     assert row["speed5"] == 2.0                        # 当前 +5% 减 5 轮前 +3%
     assert row["td_up"] == 3
 
-    # 同一只股票在没有基准的时刻不打多头标签
-    assert evaluate_snapshot(quotes, structures, baseline, "10:01") == []
+    # 没有基准（停牌/新股）时不打多头标签
+    assert evaluate_snapshot(quotes, structures, {}, "10:01") == []
 
 
 def test_summarize_hits_groups_by_label_and_time():
@@ -130,3 +130,30 @@ def test_summarize_hits_groups_by_label_and_time():
     first_bucket = next(b for b in summary["time_buckets"] if b["label"] == "09:35~10:00")
     assert first_bucket["count"] == 1 and first_bucket["avg"] == 2.0
     assert summary["industries"][0]["industry"] == "电子"
+
+
+def test_build_volume_baseline_averages_requested_trading_days():
+    """基准取「前 N 个有数据的交易日」，且不含当日。"""
+    import duckdb
+
+    connection = duckdb.connect()
+    connection.execute("CREATE TABLE a_stock_minute_bar (ts_code VARCHAR, trade_time TIMESTAMP, vol DOUBLE)")
+    rows = []
+    for day, vol in (("2026-09-14", 100), ("2026-09-15", 200), ("2026-09-16", 300), ("2026-09-17", 400)):
+        rows.append(("000001.SZ", f"{day} 09:31:00", vol))
+        rows.append(("000001.SZ", f"{day} 09:32:00", vol))     # 累计到 09:32 为 2×vol
+    rows.append(("000001.SZ", "2026-09-18 09:31:00", 9999))    # 当日数据必须被排除
+    connection.executemany("INSERT INTO a_stock_minute_bar VALUES (?, ?, ?)", rows)
+
+    from src.core.services.market_alerts import build_volume_baseline
+
+    from src.core.services.market_alerts import baseline_at
+
+    two_days = build_volume_baseline(connection, date(2026, 9, 18), days=2)
+    assert baseline_at(two_days, "09:31")["000001.SZ"] == 350     # (300+400)/2
+    assert baseline_at(two_days, "09:32")["000001.SZ"] == 700     # 累计两根
+
+    four_days = build_volume_baseline(connection, date(2026, 9, 18), days=4)
+    assert baseline_at(four_days, "09:31")["000001.SZ"] == 250    # (100+200+300+400)/4
+    assert baseline_at(four_days, "14:00") == {}                  # 没有数据的时刻返回空
+    connection.close()

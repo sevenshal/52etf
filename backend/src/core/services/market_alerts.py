@@ -4,7 +4,7 @@
 
 - 盘中每分钟一次 `rt_k` 通配符全市场快照，直接拿到现价/昨收/今开/当日累计量/当日累计额；
   5 分钟涨速由本进程前几轮快照差分得到，不额外拉分钟线。
-- 同时段量比 = 当日累计量 ÷ 前 5 个交易日同一时刻累计量均值，基准表盘前从 DuckDB
+- 同时段量比 = 当日累计量 ÷ 前 20 个交易日同一时刻累计量均值，基准表盘前从 DuckDB
   `a_stock_minute_bar`（全市场滚动 32 个交易日，每天 21:30 盘后同步）算一次，不占接口。
 - 九转高/低计数、均量、名称行业等来自 DuckDB 日线，涨跌停价每天取一次 `stk_limit`。
 
@@ -44,7 +44,7 @@ SCAN_END = dtime(15, 5)
 LUNCH_START = dtime(11, 31)
 LUNCH_END = dtime(13, 0)
 SPEED_LOOKBACK_ROUNDS = 5          # 5 分钟涨速：与 5 轮之前的快照比
-BASELINE_TRADING_DAYS = 5
+BASELINE_TRADING_DAYS = 20   # 分析库滚动保留 32 个交易日，20 日基准仍在窗口内
 MIN_LISTED_TRADING_DAYS = 60
 
 
@@ -147,8 +147,13 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
     return structures
 
 
-def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_DAYS) -> Dict[Tuple[str, str], float]:
-    """同时段基准：前 N 个有数据的交易日，每只股票每个时刻的累计成交量均值。"""
+def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_DAYS) -> pd.DataFrame:
+    """同时段基准：前 N 个有数据的交易日，每只股票每个时刻的累计成交量均值。
+
+    返回 index=ts_code、columns=HH:MM 的 float32 矩阵（约 5500×241）。
+    不要摊平成 {(代码, 时刻): 量} 的字典——那样 130 万个元组键要占 200MB 以上内存，
+    而矩阵只要几 MB，每轮扫描也只需要取出当前分钟那一列。
+    """
     dates = [
         row[0] for row in connection.execute(
             """
@@ -161,7 +166,7 @@ def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_
         ).fetchall()
     ]
     if not dates:
-        return {}
+        return pd.DataFrame()
     frame = connection.execute(
         """
         WITH cum AS (
@@ -177,11 +182,18 @@ def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_
         """,
         [min(dates), max(dates)],
     ).fetchdf()
-    return {
-        (str(row.ts_code), str(row.t)): float(row.base_cum_vol)
-        for row in frame.itertuples(index=False)
-        if row.base_cum_vol and not pd.isna(row.base_cum_vol)
-    }
+    if frame.empty:
+        return pd.DataFrame()
+    matrix = frame.pivot(index="ts_code", columns="t", values="base_cum_vol")
+    return matrix.astype("float32")
+
+
+def baseline_at(baseline: pd.DataFrame, minute_label: str) -> Dict[str, float]:
+    """取出某一分钟那一列：{ts_code: 基准累计量}，缺失的股票不会出现在结果里。"""
+    if baseline is None or baseline.empty or minute_label not in baseline.columns:
+        return {}
+    column = baseline[minute_label].dropna()
+    return {str(code): float(value) for code, value in column.items() if value > 0}
 
 
 def classify(
@@ -243,7 +255,7 @@ def alert_score(pct: float, volume_ratio: Optional[float], td_up: int) -> float:
 def evaluate_snapshot(
     quotes: pd.DataFrame,
     structures: Dict[str, StockStructure],
-    baseline: Dict[Tuple[str, str], float],
+    baseline_minute: Dict[str, float],
     minute_label: str,
     previous_pct: Optional[Dict[str, float]] = None,
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
@@ -264,7 +276,7 @@ def evaluate_snapshot(
         cum_vol = safe_float(getattr(quote, "vol", None)) or 0.0
         if not price or not pre_close:
             continue
-        base = baseline.get((ts_code, minute_label))
+        base = baseline_minute.get(ts_code)
         volume_ratio = round(cum_vol / base, 2) if base and base > 0 else None
 
         label = classify(
@@ -305,24 +317,31 @@ class AlertScanner:
 
     def __init__(self) -> None:
         self._baseline_date: Optional[date] = None
-        self._baseline: Dict[Tuple[str, str], float] = {}
+        self._baseline_days: int = BASELINE_TRADING_DAYS
+        self._baseline: pd.DataFrame = pd.DataFrame()
         self._structures: Dict[str, StockStructure] = {}
         self._pct_history: List[Dict[str, float]] = []
         self._recorded: Dict[date, set] = {}
 
-    def prepare(self, today: date, connection=None) -> Dict[str, Any]:
+    def prepare(self, today: date, connection=None,
+                baseline_days: int = BASELINE_TRADING_DAYS) -> Dict[str, Any]:
         """盘前（或当天首轮）构建基准表与结构快照。"""
         own = connection is None
         connection = connection or connect_analytics_db()
         try:
             self._structures = build_structures(connection, today)
-            self._baseline = build_volume_baseline(connection, today)
+            self._baseline = build_volume_baseline(connection, today, days=baseline_days)
             self._baseline_date = today
+            self._baseline_days = baseline_days
         finally:
             if own:
                 connection.close()
         self._pct_history = []
-        return {"structures": len(self._structures), "baseline_points": len(self._baseline)}
+        return {
+            "structures": len(self._structures),
+            "baseline_points": int(self._baseline.size),
+            "baseline_days": baseline_days,
+        }
 
     def _recorded_today(self, today: date) -> set:
         if today not in self._recorded:
@@ -352,7 +371,10 @@ class AlertScanner:
 
         minute_label = now.strftime("%H:%M")
         previous = self._pct_history[0] if len(self._pct_history) >= SPEED_LOOKBACK_ROUNDS else None
-        hits = evaluate_snapshot(quotes, self._structures, self._baseline, minute_label, previous, thresholds)
+        hits = evaluate_snapshot(
+            quotes, self._structures, baseline_at(self._baseline, minute_label),
+            minute_label, previous, thresholds,
+        )
 
         current_pct: Dict[str, float] = {}
         for quote in quotes.itertuples(index=False):
@@ -414,8 +436,9 @@ def run_alert_scan(now: Optional[datetime] = None,
     return _scanner.scan(now=now, thresholds=thresholds)
 
 
-def prepare_alert_baseline(today: Optional[date] = None) -> Dict[str, Any]:
-    return _scanner.prepare(today or date.today())
+def prepare_alert_baseline(today: Optional[date] = None,
+                           baseline_days: int = BASELINE_TRADING_DAYS) -> Dict[str, Any]:
+    return _scanner.prepare(today or date.today(), baseline_days=baseline_days)
 
 
 def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:

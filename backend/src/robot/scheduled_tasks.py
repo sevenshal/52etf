@@ -628,12 +628,13 @@ def _run_market_alert_scan(
             f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}")
 
 
-def _run_market_alert_baseline():
+def _run_market_alert_baseline(baseline_days: int = 20):
     """提示看板：盘前构建同时段量能基准与九转结构快照。"""
     from ..core.services.market_alerts import prepare_alert_baseline
 
-    result = prepare_alert_baseline()
-    return f"结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')}"
+    result = prepare_alert_baseline(baseline_days=int(baseline_days))
+    return (f"结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} "
+            f"· 基准取前 {result.get('baseline_days')} 个交易日")
 
 
 def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
@@ -1606,7 +1607,18 @@ class ScheduledTaskManager:
                 sort_order=26,
                 runner=_run_market_alert_baseline,
                 default_cron_rule="15 9 * * mon-fri",
-                parameter_schema=(),
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="baseline_days",
+                        label="量能基准交易日数",
+                        value_type="integer",
+                        default=20,
+                        description="同时段量比的分母取前 N 个有数据的交易日均值；分析库分钟线滚动保留 32 个交易日。",
+                        min_value=3,
+                        max_value=32,
+                        step=1,
+                    ),
+                ),
             ),
             "market_alert_scan": TaskDefinition(
                 task_key="market_alert_scan",
@@ -1623,7 +1635,7 @@ class ScheduledTaskManager:
                         label="活跃量比阈值",
                         value_type="number",
                         default=1.5,
-                        description="当日累计量 ÷ 前5日同一时刻累计量均值，达到该倍数才算放量。",
+                        description="当日累计量 ÷ 前 N 个交易日同一时刻累计量均值（N 见盘前基准任务），达到该倍数才算放量。",
                         min_value=1.0,
                         max_value=10.0,
                         step=0.1,

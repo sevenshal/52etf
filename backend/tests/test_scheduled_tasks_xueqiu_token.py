@@ -247,7 +247,7 @@ class XueqiuTokenMonitorTest(TestCase):
             "xueqiu_holdings_refresh": set(),
             "eastmoney_holdings_refresh": set(),
             "a_stock_earnings_gap_scan": set(),
-            "market_alert_baseline": set(),
+            "market_alert_baseline": {"baseline_days"},
             "market_alert_scan": {"min_volume_ratio", "strong_volume_ratio", "min_amount_yi"},
         }
 
