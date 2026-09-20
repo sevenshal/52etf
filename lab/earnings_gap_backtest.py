@@ -28,11 +28,12 @@ import argparse
 import os
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/home/quantd/quant_prod/quant_robot/analytics.duckdb")
 START = "2018-08-01"
-HORIZONS = (5, 20)
+HORIZONS = (5, 20, 90)
 GAP_BUCKETS = [2, 3, 4, 5, 7, 10, 1000]
 
 EVENTS_SQL = """
@@ -40,20 +41,11 @@ WITH cal AS (
     SELECT trade_date, ROW_NUMBER() OVER (ORDER BY trade_date) AS idx
     FROM a_stock_index_daily WHERE ts_code = '000300.SH'
 ),
-reports AS (
-    SELECT ts_code, end_date, ann_date, netprofit_yoy
-    FROM (
-        SELECT ts_code, end_date, ann_date, netprofit_yoy,
-               ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date) AS rn
-        FROM a_stock_fina_indicator
-        WHERE ann_date IS NOT NULL AND ann_date >= DATE '{start}'
-    )
-    WHERE rn = 1 AND netprofit_yoy BETWEEN 30 AND 3000
-),
 ev AS (
     SELECT r.*,
            (SELECT MIN(trade_date) FROM cal WHERE cal.trade_date {t1_op} r.ann_date) AS t1
-    FROM reports r
+    FROM raw_events r
+    WHERE r.np_yoy BETWEEN {min_yoy} AND {max_yoy}
 ),
 ev2 AS (
     SELECT ev.*, c1.idx AS t1_idx, c0.trade_date AS t0,
@@ -64,7 +56,7 @@ ev2 AS (
     JOIN cal c0 ON c0.idx = c1.idx - 1
     JOIN a_stock_basic b ON b.ts_code = ev.ts_code
 )
-SELECT e.ts_code, e.end_date, e.ann_date, e.netprofit_yoy, e.t1, e.t1_idx, e.name,
+SELECT e.ts_code, e.source, e.end_date, e.ann_date, e.np_yoy, e.t1, e.t1_idx, e.name,
        e.t1_idx - COALESCE(e.list_idx, 0) + 1 AS listed_days,
        m1.open, m1.high, m1.low, m1.close, m1.pre_close, m1.amount,
        m0.high AS t0_high, f1.adj_factor AS t1_adj, f0.adj_factor AS t0_adj,
@@ -77,6 +69,17 @@ JOIN a_stock_market_daily m1 ON m1.ts_code = e.ts_code AND m1.trade_date = e.t1
 LEFT JOIN a_stock_market_daily m0 ON m0.ts_code = e.ts_code AND m0.trade_date = e.t0
 LEFT JOIN a_stock_adj_factor f1 ON f1.ts_code = e.ts_code AND f1.trade_date = e.t1
 LEFT JOIN a_stock_adj_factor f0 ON f0.ts_code = e.ts_code AND f0.trade_date = e.t0
+"""
+
+REPORT_EVENTS_SQL = """
+SELECT ts_code, 'report' AS source, end_date, ann_date, netprofit_yoy AS np_yoy
+FROM (
+    SELECT ts_code, end_date, ann_date, netprofit_yoy,
+           ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date) AS rn
+    FROM a_stock_fina_indicator
+    WHERE ann_date IS NOT NULL AND ann_date >= DATE '{start}'
+)
+WHERE rn = 1
 """
 
 FORWARD_SQL = """
@@ -102,6 +105,46 @@ ASOF LEFT JOIN px p ON p.ts_code = t.ts_code AND t.target_date >= p.trade_date
 LEFT JOIN a_stock_index_daily i1 ON i1.ts_code = '000300.SH' AND i1.trade_date = t.t1
 LEFT JOIN a_stock_index_daily i2 ON i2.ts_code = '000300.SH' AND i2.trade_date = t.target_date
 """
+
+
+SOURCE_LABELS = {"report": "财报", "forecast": "预告", "express": "快报"}
+QUARTER_LABELS = {3: "一季报", 6: "中报", 9: "三季报", 12: "年报"}
+EVENT_PARQUET_DIR = os.getenv("EARNINGS_GAP_EVENT_DIR", "")
+
+
+def load_raw_events(con, sources) -> pd.DataFrame:
+    """三个事件源统一成 ts_code/source/end_date/ann_date/np_yoy。
+
+    财报读分析库；预告/快报读 `EARNINGS_GAP_EVENT_DIR` 下由 tushare forecast_vip/express_vip
+    拉好的 parquet（生产分析库还没有这两张表时用）。同一 (股票, 报告期, 事件源) 取首次公告。
+    """
+    frames = []
+    if "report" in sources:
+        frames.append(con.execute(REPORT_EVENTS_SQL.format(start=START)).fetchdf())
+    for name in ("forecast", "express"):
+        if name not in sources:
+            continue
+        path = os.path.join(EVENT_PARQUET_DIR, f"{name}.parquet")
+        if not os.path.exists(path):
+            raise SystemExit(f"缺少 {path}；先用 forecast_vip/express_vip 拉好历史再跑")
+        frame = pd.read_parquet(path)
+        if name == "forecast":
+            # 预告只有变动幅度区间，取下限（最保守）
+            frame["np_yoy"] = pd.to_numeric(frame["p_change_min"], errors="coerce")
+        else:
+            base = pd.to_numeric(frame["yoy_net_profit"], errors="coerce")
+            current = pd.to_numeric(frame["n_income"], errors="coerce")
+            frame["np_yoy"] = np.where(base > 0, (current / base - 1) * 100,
+                                       pd.to_numeric(frame["yoy_dedu_np"], errors="coerce"))
+        frame["source"] = name
+        frame = frame.dropna(subset=["ts_code", "end_date", "ann_date", "np_yoy"])
+        frame = frame.sort_values("ann_date").drop_duplicates(subset=["ts_code", "end_date"], keep="first")
+        frames.append(frame[["ts_code", "source", "end_date", "ann_date", "np_yoy"]])
+    events = pd.concat(frames, ignore_index=True)
+    events = events.dropna(subset=["np_yoy"])
+    events["ann_date"] = pd.to_datetime(events["ann_date"]).dt.date
+    events["end_date"] = pd.to_datetime(events["end_date"]).dt.date
+    return events[events["ann_date"] >= pd.Timestamp(START).date()]
 
 
 def board_limit_ratio(ts_code: str) -> float:
@@ -147,14 +190,24 @@ def main() -> None:
         "--t1",
         choices=("after", "on"),
         default="after",
-        help="after: 公告日之后第一个交易日；on: 公告日当天或之后第一个交易日（tushare ann_date 多为盘后公告的正式披露日=次日）",
+        help="after: 公告日之后第一个交易日；on: 公告日当天或之后第一个交易日（A股财报多为盘后发布，默认 after）",
     )
+    parser.add_argument("--sources", default="report,forecast,express", help="逗号分隔：report/forecast/express")
+    parser.add_argument("--min-yoy", type=float, default=30.0)
+    parser.add_argument("--max-yoy", type=float, default=3000.0)
     args = parser.parse_args()
+    sources = [item.strip() for item in args.sources.split(",") if item.strip()]
     print(f"T+1 口径: {'公告日之后第一个交易日' if args.t1 == 'after' else '公告日当天(若为交易日)或之后第一个交易日'}")
+    print(f"事件源: {'/'.join(SOURCE_LABELS.get(item, item) for item in sources)}；净利同比 {args.min_yoy}%~{args.max_yoy}%")
 
     con = duckdb.connect(DB_PATH, read_only=True)
-    events = con.execute(EVENTS_SQL.format(t1_op=">" if args.t1 == "after" else ">=", start=START)).fetchdf()
-    print(f"净利增速 30%~3000% 的财报事件（T+1 有日K）: {len(events)}")
+    raw_events = load_raw_events(con, sources)
+    print("原始事件数:", raw_events.groupby("source").size().to_dict())
+    con.register("raw_events", raw_events)
+    events = con.execute(EVENTS_SQL.format(
+        t1_op=">" if args.t1 == "after" else ">=", min_yoy=args.min_yoy, max_yoy=args.max_yoy,
+    )).fetchdf()
+    print(f"净利同比达标且 T+1 有日K: {len(events)}")
 
     events = events[events["listed_days"] >= 120]
     events = events[events["amount"] >= 30000]  # 千元
@@ -167,7 +220,7 @@ def main() -> None:
     events["t0_high_adj"] = events["t0_high"] * ratio
     events["true_gap"] = events["low"] > events["t0_high_adj"] + 1e-9
     events = events.dropna(subset=["t1_adj"])
-    print(f"满足现有条件（高开≥2%、收阳、未封板、成交额、上市天数）: {len(events)}，其中真缺口 {int(events['true_gap'].sum())}")
+    print(f"满足全部条件（高开≥2%、收阳、未封板、成交额、上市天数）: {len(events)}，其中真缺口 {int(events['true_gap'].sum())}")
 
     con.register("sig", events[["ts_code", "t1", "t1_idx"]].drop_duplicates())
     fwd = con.execute(FORWARD_SQL, [list(HORIZONS)]).fetchdf()
@@ -179,33 +232,47 @@ def main() -> None:
         events[f"ret{h}"] = events[f"exit{h}"] / (events["close"] * events["t1_adj"]) - 1
         events[f"exc{h}"] = events[f"ret{h}"] - (events[f"idx_exit{h}"] / events[f"idx_t1_{h}"] - 1)
 
-    pd.set_option("display.width", 220)
-    pd.set_option("display.max_columns", 30)
+    events["source_label"] = events["source"].map(SOURCE_LABELS)
+    events["quarter"] = pd.to_datetime(events["end_date"]).dt.month.map(QUARTER_LABELS)
+    events["year"] = pd.to_datetime(events["t1"]).dt.year
+    pd.set_option("display.width", 240)
+    pd.set_option("display.max_columns", 40)
 
-    print("\n== 现有条件 vs 加真缺口（T+1 最低价 > T 日最高价） ==")
+    print("\n== 按事件源 ==")
     print(table([
-        ("现有条件(全部)", events),
-        ("加真缺口", events[events["true_gap"]]),
-        ("回补缺口(无真缺口)", events[~events["true_gap"]]),
+        (SOURCE_LABELS.get(name, name), frame) for name, frame in events.groupby("source", observed=True)
     ]).to_string())
 
-    events["gap_bucket"] = pd.cut(events["gap_pct"], GAP_BUCKETS, right=False,
-                                  labels=[f"{a}~{b}%" if b < 1000 else f"≥{a}%" for a, b in zip(GAP_BUCKETS, GAP_BUCKETS[1:])])
-    for label, subset in (("现有条件", events), ("加真缺口", events[events["true_gap"]])):
-        print(f"\n== 按高开幅度分桶（{label}） ==")
-        print(table([(str(name), frame) for name, frame in subset.groupby("gap_bucket", observed=True)]).to_string())
+    print("\n== 事件源 × 报告期 ==")
+    rows = {}
+    for (source, quarter), frame in events.groupby(["source", "quarter"], observed=True):
+        rows[f"{SOURCE_LABELS.get(source, source)}-{quarter}"] = summarize(frame)
+    print(pd.DataFrame(rows).T.round(2).to_string())
 
-    print("\n== 分年度（现有条件 / 加真缺口，20日） ==")
-    events["year"] = pd.to_datetime(events["t1"]).dt.year
+    print("\n== 事件源 × 年度（20日均值% / 胜率% / 样本） ==")
     rows = {}
     for year, frame in events.groupby("year"):
-        gap = frame[frame["true_gap"]]
-        rows[year] = {
-            "全部样本": len(frame), "全部20日均值%": frame["ret20"].mean() * 100, "全部20日胜率%": (frame["ret20"].dropna() > 0).mean() * 100,
-            "缺口样本": len(gap), "缺口20日均值%": gap["ret20"].mean() * 100, "缺口20日胜率%": (gap["ret20"].dropna() > 0).mean() * 100,
-            "缺口20日超额%": gap["exc20"].mean() * 100,
-        }
-    print(pd.DataFrame(rows).T.round(2).to_string())
+        row = {}
+        for source in sources:
+            part = frame[frame["source"] == source]
+            label = SOURCE_LABELS.get(source, source)
+            ret = part["ret20"].dropna()
+            row[f"{label}样本"] = len(part)
+            row[f"{label}均值%"] = round(ret.mean() * 100, 2) if len(ret) else None
+            row[f"{label}胜率%"] = round((ret > 0).mean() * 100, 1) if len(ret) else None
+        rows[year] = row
+    print(pd.DataFrame(rows).T.to_string())
+
+    print("\n== 真缺口 × 事件源 ==")
+    print(table([
+        (f"{SOURCE_LABELS.get(name, name)}-{'真缺口' if gap else '无缺口'}", frame)
+        for (name, gap), frame in events.groupby(["source", "true_gap"], observed=True)
+    ]).to_string())
+
+    print("\n== 按高开幅度分桶（全部事件源） ==")
+    events["gap_bucket"] = pd.cut(events["gap_pct"], GAP_BUCKETS, right=False,
+                                  labels=[f"{a}~{b}%" if b < 1000 else f"≥{a}%" for a, b in zip(GAP_BUCKETS, GAP_BUCKETS[1:])])
+    print(table([(str(name), frame) for name, frame in events.groupby("gap_bucket", observed=True)]).to_string())
 
     if args.csv:
         events.to_csv(args.csv, index=False)

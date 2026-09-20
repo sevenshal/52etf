@@ -593,3 +593,78 @@ CASHFLOW_API_FIELDS = build_api_fields(
 FINA_INDICATOR_API_FIELDS = build_api_fields(
     FINA_INDICATOR_DATE_FIELDS, FINA_INDICATOR_TEXT_FIELDS, FINA_INDICATOR_NUMERIC_FIELDS
 )
+
+
+# --- 业绩预告(tushare `forecast`，官方文档 https://tushare.pro/document/2?doc_id=45) ---
+# 预告只给净利润变动幅度的区间(下限/上限)，没有营收，也没有环比。
+FORECAST_DATE_FIELDS = (
+    "ann_date",                       # 公告日期
+    "first_ann_date",                 # 首次公告日
+)
+
+FORECAST_TEXT_FIELDS = (
+    "type",                           # 业绩预告类型(预增/预减/扭亏/首亏/续亏/续盈/略增/略减)
+)
+
+FORECAST_LONG_TEXT_FIELDS = (
+    "summary",                        # 业绩预告摘要
+    "change_reason",                  # 业绩变动原因
+)
+
+FORECAST_NUMERIC_FIELDS = (
+    "p_change_min",                   # 预告净利润变动幅度下限(%)
+    "p_change_max",                   # 预告净利润变动幅度上限(%)
+    "net_profit_min",                 # 预告净利润下限(万元)
+    "net_profit_max",                 # 预告净利润上限(万元)
+    "last_parent_net",                # 上年同期归属母公司净利润
+)
+
+# --- 业绩快报(tushare `express`，官方文档 https://tushare.pro/document/2?doc_id=46) ---
+EXPRESS_DATE_FIELDS = (
+    "ann_date",                       # 公告日期
+)
+
+EXPRESS_TEXT_FIELDS = (
+    "is_audit",                       # 是否审计： 1是 0否
+)
+
+EXPRESS_LONG_TEXT_FIELDS = (
+    "perf_summary",                   # 业绩简要说明
+    "remark",                         # 备注
+)
+
+EXPRESS_NUMERIC_FIELDS = (
+    "revenue",                        # 营业收入(元)
+    "operate_profit",                 # 营业利润(元)
+    "total_profit",                   # 利润总额(元)
+    "n_income",                       # 净利润(元)
+    "total_assets",                   # 总资产(元)
+    "total_hldr_eqy_exc_min_int",     # 股东权益合计(不含少数股东权益)(元)
+    "diluted_eps",                    # 每股收益(摊薄)(元)
+    "diluted_roe",                    # 净资产收益率(摊薄)(%)
+    "yoy_net_profit",                 # 去年同期修正后净利润
+    "bps",                            # 每股净资产
+    "yoy_sales",                      # 同比增长率:营业收入
+    "yoy_op",                         # 同比增长率:营业利润
+    "yoy_tp",                         # 同比增长率:利润总额
+    "yoy_dedu_np",                    # 同比增长率:归属母公司股东的净利润
+    "yoy_eps",                        # 同比增长率:基本每股收益
+    "yoy_roe",                        # 同比增减:加权平均净资产收益率
+    "growth_assets",                  # 比年初增长率:总资产
+    "yoy_equity",                     # 比年初增长率:归属母公司的股东权益
+    "growth_bps",                     # 比年初增长率:归属母公司股东的每股净资产
+    "or_last_year",                   # 去年同期营业收入
+    "op_last_year",                   # 去年同期营业利润
+    "tp_last_year",                   # 去年同期利润总额
+    "np_last_year",                   # 去年同期净利润
+    "eps_last_year",                  # 去年同期每股收益
+    "open_net_assets",                # 期初净资产
+    "open_bps",                       # 期初每股净资产
+)
+
+FORECAST_API_FIELDS = build_api_fields(
+    FORECAST_DATE_FIELDS, FORECAST_TEXT_FIELDS, FORECAST_LONG_TEXT_FIELDS, FORECAST_NUMERIC_FIELDS
+)
+EXPRESS_API_FIELDS = build_api_fields(
+    EXPRESS_DATE_FIELDS, EXPRESS_TEXT_FIELDS, EXPRESS_LONG_TEXT_FIELDS, EXPRESS_NUMERIC_FIELDS
+)

@@ -1,9 +1,18 @@
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
-from ...core.services.earnings_gap import EarningsGapDataError, get_earnings_gap
+from pydantic import BaseModel
+
+from ...core.services.earnings_gap import (
+    DEFAULT_CONFIG,
+    EarningsGapDataError,
+    get_earnings_gap,
+    load_config,
+    refresh_earnings_gap,
+    save_config,
+)
 from ...core.services.industry_relation import (
     IndustryRelationDataError,
     fetch_industry_history,
@@ -123,4 +132,42 @@ async def get_industry_relation_history(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except (IndustryRelationDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+class EarningsGapConfigPayload(BaseModel):
+    sources: Optional[List[str]] = None
+    min_profit_yoy: Optional[float] = None
+    max_profit_yoy: Optional[float] = None
+    min_gap_pct: Optional[float] = None
+    min_amount_yuan: Optional[float] = None
+    min_listed_trade_days: Optional[int] = None
+    require_bullish_close: Optional[bool] = None
+    require_unsealed: Optional[bool] = None
+    require_true_gap: Optional[bool] = None
+    min_amount_ratio: Optional[float] = None
+    amount_ratio_days: Optional[int] = None
+
+
+@router.get("/earnings-gap/config")
+def get_earnings_gap_config(account_id: str = Depends(valid_admin_account)):
+    return {"config": load_config(), "defaults": DEFAULT_CONFIG}
+
+
+@router.put("/earnings-gap/config")
+async def update_earnings_gap_config(
+    payload: EarningsGapConfigPayload,
+    recompute: bool = Query(True),
+    account_id: str = Depends(valid_admin_account),
+):
+    """保存阈值；默认保存后立即按新阈值重算一次（全市场扫描，秒级到几十秒）。"""
+    try:
+        config = save_config(payload.model_dump(exclude_none=True), updated_by=account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not recompute:
+        return {"config": config}
+    try:
+        return {"config": config, "signals": await run_in_threadpool(refresh_earnings_gap)}
+    except (EarningsGapDataError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))

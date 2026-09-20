@@ -422,6 +422,16 @@ class AStockConsensusPeBand(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class MarketSignalConfig(Base):
+    """市场 tab 选股信号的可配置阈值（净利润断层等），按信号类型各存一份。"""
+    __tablename__ = "market_signal_configs"
+
+    signal_key = Column(String(64), primary_key=True)
+    payload = Column(JSON, nullable=False)
+    updated_by = Column(String(64))
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
 class MarketSignalSnapshot(Base):
     """市场 tab 全市场选股信号（如净利润断层）的最新一次计算结果，按信号类型各存一份。"""
     __tablename__ = "market_signal_snapshots"

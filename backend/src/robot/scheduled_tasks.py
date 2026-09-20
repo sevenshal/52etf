@@ -533,6 +533,9 @@ def _format_a_stock_base_data_sync_result(result: Dict) -> str:
         f"cashflow_symbols={result.get('cashflow_symbols')} "
         f"fina_indicator_saved_rows={result.get('fina_indicator_saved_rows')} "
         f"fina_indicator_symbols={result.get('fina_indicator_symbols')} "
+        f"forecast_saved_rows={result.get('forecast_saved_rows')} "
+        f"express_saved_rows={result.get('express_saved_rows')} "
+        f"express_periods={result.get('express_periods')} "
         f"fund_flow_source={result.get('fund_flow_source')} "
         f"fund_flow_saved_rows={result.get('fund_flow_saved_rows')} "
         f"fund_flow_trade_dates={result.get('fund_flow_trade_dates')} "
@@ -1573,7 +1576,7 @@ class ScheduledTaskManager:
             "a_stock_base_data_sync": TaskDefinition(
                 task_key="a_stock_base_data_sync",
                 name="A股基础数据同步",
-                description="同步A股基础信息、同花顺细分板块目录/成分/行情、名称变更、全市场与指数/ETF行情、指数成分权重、期权/回购行情、中债信用曲线、利润表和主力资金流到DuckDB分析库。",
+                description="同步A股基础信息、同花顺细分板块目录/成分/行情、名称变更、全市场与指数/ETF行情、指数成分权重、期权/回购行情、中债信用曲线、四张财务报表、业绩预告/快报和主力资金流到DuckDB分析库。",
                 default_time="18:20",
                 default_enabled=True,
                 sort_order=74,
@@ -1911,7 +1914,7 @@ class ScheduledTaskManager:
             "a_stock_earnings_gap_scan": TaskDefinition(
                 task_key="a_stock_earnings_gap_scan",
                 name="净利润断层信号",
-                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的财报和日K扫描全A最近一期财报：净利增速30%~3000%、公告后首个交易日(T+1)跳空高开≥2%、收阳未封板、成交额≥3000万、上市满120个交易日，按T+1收盘出买入信号，结果供「市场-净利润断层」页展示。",
+                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的业绩公告（财报/快报/预告）和日K扫描全A：每只股票取最近一次公告，净利同比达标且公告后首个交易日(T+1)跳空高开、收阳未封板、成交额达标，按T+1收盘出买入信号。阈值在「市场-净利润断层」页配置。",
                 default_time="18:25",
                 default_enabled=True,
                 sort_order=76,

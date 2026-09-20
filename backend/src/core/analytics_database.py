@@ -18,9 +18,17 @@ from .tushare_statement_fields import (
     CASHFLOW_DATE_FIELDS,
     CASHFLOW_NUMERIC_FIELDS,
     CASHFLOW_TEXT_FIELDS,
+    EXPRESS_DATE_FIELDS,
+    EXPRESS_LONG_TEXT_FIELDS,
+    EXPRESS_NUMERIC_FIELDS,
+    EXPRESS_TEXT_FIELDS,
     FINA_INDICATOR_DATE_FIELDS,
     FINA_INDICATOR_NUMERIC_FIELDS,
     FINA_INDICATOR_TEXT_FIELDS,
+    FORECAST_DATE_FIELDS,
+    FORECAST_LONG_TEXT_FIELDS,
+    FORECAST_NUMERIC_FIELDS,
+    FORECAST_TEXT_FIELDS,
     INCOME_DATE_FIELDS,
     INCOME_NUMERIC_FIELDS,
     INCOME_TEXT_FIELDS,
@@ -38,6 +46,8 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_balancesheet",
         "a_stock_cashflow",
         "a_stock_fina_indicator",
+        "a_stock_forecast",
+        "a_stock_express",
         "a_stock_report_rc",
         "a_stock_fund_basic",
         "a_stock_fund_daily",
@@ -213,6 +223,7 @@ def _financial_statement_model(
     date_fields,
     text_fields,
     numeric_fields,
+    long_text_fields=(),
 ):
     """按 tushare 官方字段清单批量生成一张财务报表缓存表的 ORM 模型。
 
@@ -231,6 +242,8 @@ def _financial_statement_model(
         attributes[name] = Column(Date)
     for name in text_fields:
         attributes[name] = Column(String(16))
+    for name in long_text_fields:
+        attributes[name] = Column(Text)
     for name in numeric_fields:
         attributes[name] = Column(Float)
     attributes["created_at"] = Column(DateTime, default=datetime.now, nullable=False)
@@ -272,6 +285,27 @@ AStockFinaIndicator = _financial_statement_model(
     FINA_INDICATOR_DATE_FIELDS,
     FINA_INDICATOR_TEXT_FIELDS,
     FINA_INDICATOR_NUMERIC_FIELDS,
+)
+
+
+AStockForecast = _financial_statement_model(
+    "AStockForecast",
+    "a_stock_forecast",
+    "Tushare A股业绩预告缓存(全字段)，存放在 DuckDB 分析库。",
+    FORECAST_DATE_FIELDS,
+    FORECAST_TEXT_FIELDS,
+    FORECAST_NUMERIC_FIELDS,
+    long_text_fields=FORECAST_LONG_TEXT_FIELDS,
+)
+
+AStockExpress = _financial_statement_model(
+    "AStockExpress",
+    "a_stock_express",
+    "Tushare A股业绩快报缓存(全字段)，存放在 DuckDB 分析库。",
+    EXPRESS_DATE_FIELDS,
+    EXPRESS_TEXT_FIELDS,
+    EXPRESS_NUMERIC_FIELDS,
+    long_text_fields=EXPRESS_LONG_TEXT_FIELDS,
 )
 
 
@@ -888,10 +922,11 @@ class SectorNineTurnSignalSnapshot(AnalyticsBase):
     note = Column(Text)
 
 
-def _financial_statement_column_types(date_fields, text_fields, numeric_fields):
+def _financial_statement_column_types(date_fields, text_fields, numeric_fields, long_text_fields=()):
     """财务报表表的「列名 -> DuckDB 类型」映射，与 ORM 模型生成用的是同一份字段清单。"""
     columns = {name: "DATE" for name in date_fields}
     columns.update({name: "VARCHAR" for name in text_fields})
+    columns.update({name: "VARCHAR" for name in long_text_fields})
     columns.update({name: "FLOAT" for name in numeric_fields})
     return columns
 
@@ -919,6 +954,12 @@ def ensure_analytics_table_columns():
         ),
         "a_stock_fina_indicator": _financial_statement_column_types(
             FINA_INDICATOR_DATE_FIELDS, FINA_INDICATOR_TEXT_FIELDS, FINA_INDICATOR_NUMERIC_FIELDS
+        ),
+        "a_stock_forecast": _financial_statement_column_types(
+            FORECAST_DATE_FIELDS, FORECAST_TEXT_FIELDS, FORECAST_NUMERIC_FIELDS, FORECAST_LONG_TEXT_FIELDS
+        ),
+        "a_stock_express": _financial_statement_column_types(
+            EXPRESS_DATE_FIELDS, EXPRESS_TEXT_FIELDS, EXPRESS_NUMERIC_FIELDS, EXPRESS_LONG_TEXT_FIELDS
         ),
     }
     with analytics_engine.begin() as conn:
@@ -951,6 +992,10 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_ann ON a_stock_income(ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_forecast_symbol_ann ON a_stock_forecast(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_forecast_ann ON a_stock_forecast(ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_express_symbol_ann ON a_stock_express(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_express_ann ON a_stock_express(ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_ann ON a_stock_balancesheet(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_end ON a_stock_balancesheet(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_cashflow_symbol_ann ON a_stock_cashflow(ts_code, ann_date)",

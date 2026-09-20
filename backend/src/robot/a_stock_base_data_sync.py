@@ -17,7 +17,9 @@ from ..core.analytics_database import (
     AStockCashFlow,
     AStockChinaBondYieldCurveDaily,
     AStockChinaBondYieldCurveDef,
+    AStockExpress,
     AStockFinaIndicator,
+    AStockForecast,
     AStockFundAdjFactor,
     AStockFundBasic,
     AStockFundDaily,
@@ -48,9 +50,17 @@ from ..core.tushare_statement_fields import (
     CASHFLOW_DATE_FIELDS,
     CASHFLOW_NUMERIC_FIELDS,
     CASHFLOW_TEXT_FIELDS,
+    EXPRESS_DATE_FIELDS,
+    EXPRESS_LONG_TEXT_FIELDS,
+    EXPRESS_NUMERIC_FIELDS,
+    EXPRESS_TEXT_FIELDS,
     FINA_INDICATOR_DATE_FIELDS,
     FINA_INDICATOR_NUMERIC_FIELDS,
     FINA_INDICATOR_TEXT_FIELDS,
+    FORECAST_DATE_FIELDS,
+    FORECAST_LONG_TEXT_FIELDS,
+    FORECAST_NUMERIC_FIELDS,
+    FORECAST_TEXT_FIELDS,
     INCOME_DATE_FIELDS,
     INCOME_NUMERIC_FIELDS,
     INCOME_TEXT_FIELDS,
@@ -86,6 +96,9 @@ A_STOCK_OPTION_DAILY_WARMUP_DAYS = 200
 A_STOCK_REPO_DAILY_WARMUP_DAYS = 200
 A_STOCK_CHINABOND_WARMUP_DAYS = 200
 INCOME_HISTORY_LOOKBACK_DAYS = 365 * 6
+# 业绩预告会被修正/补发，增量同步时从库里最新公告日往前重拉这么多天
+FORECAST_REPAIR_LOOKBACK_DAYS = 30
+# forecast/express 单次查询上限几千行，按报告期分页拉
 INCOME_INSERT_BATCH_ROWS = 5000
 INCOME_INSERT_BATCH_FRAMES = 500
 A_STOCK_OPTION_DAILY_CHUNK_TRADING_DAYS = 20
@@ -2897,6 +2910,36 @@ class AStockBaseDataSyncService:
             progress_callback=self.progress_callback,
         )
 
+        self._progress(
+            "同步A股业绩预告缓存",
+            89,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=income_end.isoformat(),
+            mode=income_sync_mode,
+        )
+        forecast_result = sync_a_stock_forecast_data(
+            start_date=income_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            tushare_service=self.tushare,
+            analytics_db=self.analytics_db,
+        )
+
+        self._progress(
+            "同步A股业绩快报缓存",
+            90,
+            start_date=income_start.isoformat() if income_start else None,
+            end_date=income_end.isoformat(),
+            mode=income_sync_mode,
+        )
+        express_result = sync_a_stock_express_data(
+            start_date=income_start,
+            end_date=income_end,
+            incremental=income_incremental,
+            tushare_service=self.tushare,
+            analytics_db=self.analytics_db,
+        )
+
         report_rc_default_start = DEFAULT_START_DATE
         if explicit_start:
             report_rc_start = explicit_start
@@ -3155,6 +3198,18 @@ class AStockBaseDataSyncService:
             "fina_indicator_symbols": fina_indicator_result.get("symbols"),
             "fina_indicator_skipped_symbols": fina_indicator_result.get("skipped_symbols"),
             "fina_indicator_total_seconds": fina_indicator_result.get("total_seconds"),
+            "forecast_start_date": forecast_result.get("start_date"),
+            "forecast_end_date": forecast_result.get("end_date"),
+            "forecast_fetched_rows": forecast_result.get("fetched_rows"),
+            "forecast_saved_rows": forecast_result.get("saved_rows"),
+            "forecast_periods": forecast_result.get("periods"),
+            "forecast_seconds": forecast_result.get("seconds"),
+            "express_start_date": express_result.get("start_date"),
+            "express_end_date": express_result.get("end_date"),
+            "express_fetched_rows": express_result.get("fetched_rows"),
+            "express_saved_rows": express_result.get("saved_rows"),
+            "express_periods": express_result.get("periods"),
+            "express_seconds": express_result.get("seconds"),
             "report_rc_start_date": report_rc_result.get("start_date"),
             "report_rc_end_date": report_rc_result.get("end_date"),
             "report_rc_chunks": report_rc_result.get("chunks"),
@@ -3382,6 +3437,55 @@ def _bulk_upsert_fina_indicator_frame(analytics_db: Session, frame: pd.DataFrame
         date_fields=FINA_INDICATOR_DATE_FIELDS,
         text_fields=FINA_INDICATOR_TEXT_FIELDS,
         numeric_fields=FINA_INDICATOR_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
+    )
+
+
+# 预告/快报的摘要类字段是长文本，按普通文本列一起归一化（DuckDB 侧都是 VARCHAR）
+_FORECAST_TEXT_FIELDS = (*FORECAST_TEXT_FIELDS, *FORECAST_LONG_TEXT_FIELDS)
+_EXPRESS_TEXT_FIELDS = (*EXPRESS_TEXT_FIELDS, *EXPRESS_LONG_TEXT_FIELDS)
+
+
+def _normalize_forecast_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_statement_frame(
+        frame,
+        date_fields=FORECAST_DATE_FIELDS,
+        text_fields=_FORECAST_TEXT_FIELDS,
+        numeric_fields=FORECAST_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
+    )
+
+
+def _bulk_upsert_forecast_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    return _bulk_upsert_statement_frame(
+        analytics_db,
+        AStockForecast.__tablename__,
+        frame,
+        date_fields=FORECAST_DATE_FIELDS,
+        text_fields=_FORECAST_TEXT_FIELDS,
+        numeric_fields=FORECAST_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
+    )
+
+
+def _normalize_express_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_statement_frame(
+        frame,
+        date_fields=EXPRESS_DATE_FIELDS,
+        text_fields=_EXPRESS_TEXT_FIELDS,
+        numeric_fields=EXPRESS_NUMERIC_FIELDS,
+        key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
+    )
+
+
+def _bulk_upsert_express_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    return _bulk_upsert_statement_frame(
+        analytics_db,
+        AStockExpress.__tablename__,
+        frame,
+        date_fields=EXPRESS_DATE_FIELDS,
+        text_fields=_EXPRESS_TEXT_FIELDS,
+        numeric_fields=EXPRESS_NUMERIC_FIELDS,
         key_columns=_STATEMENT_PERIOD_KEY_COLUMNS,
     )
 
@@ -4892,6 +4996,128 @@ def sync_a_stock_fina_indicator_data(
         progress_callback=progress_callback,
         force_full_refresh=force_full_refresh,
     )
+
+
+def reporting_periods_between(start: date, end: date) -> List[date]:
+    """[start, end] 覆盖到的报告期（季末日），从新到旧。"""
+    periods = []
+    year = end.year
+    while year >= start.year - 1:
+        for month, day in ((12, 31), (9, 30), (6, 30), (3, 31)):
+            period = date(year, month, day)
+            # 一个报告期的公告集中在期末前后半年内，窗口有交集就要同步
+            if period - timedelta(days=45) <= end and period + timedelta(days=200) >= start:
+                periods.append(period)
+        year -= 1
+    return sorted(set(periods), reverse=True)
+
+
+def _sync_period_statement(
+    *,
+    label: str,
+    table_name: str,
+    fetch_period_fn,
+    normalize_fn,
+    upsert_fn,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    incremental: bool,
+    analytics_session: Session,
+) -> Dict:
+    """业绩预告/快报的通用同步：按报告期整市场拉取（这两个接口没有逐只股票的必要）。"""
+    end_value = _parse_date(end_date) or date.today()
+    started = time.monotonic()
+    explicit_start = _parse_date(start_date)
+    _, latest_ann_date = _statement_ann_date_bounds(analytics_session, table_name)
+    analytics_session.commit()
+    if explicit_start:
+        start_value = explicit_start
+    elif incremental and latest_ann_date:
+        # 预告/快报会被修正、补发，最新公告日往前回看一段时间重拉
+        start_value = latest_ann_date - timedelta(days=FORECAST_REPAIR_LOOKBACK_DAYS)
+    else:
+        start_value = DEFAULT_START_DATE - timedelta(days=INCOME_HISTORY_LOOKBACK_DAYS)
+
+    result = {
+        "status": "ok",
+        "start_date": start_value.isoformat(),
+        "end_date": end_value.isoformat(),
+        "fetched_rows": 0,
+        "saved_rows": 0,
+        "periods": 0,
+        "latest_ann_date": latest_ann_date.isoformat() if latest_ann_date else None,
+    }
+    if start_value > end_value:
+        result["status"] = "up_to_date"
+        result["seconds"] = 0.0
+        return result
+
+    for period in reporting_periods_between(start_value, end_value):
+        frame = fetch_period_fn(period)
+        result["periods"] += 1
+        if frame is None or frame.empty:
+            continue
+        result["fetched_rows"] += int(len(frame))
+        result["saved_rows"] += upsert_fn(analytics_session, normalize_fn(frame))
+    result["seconds"] = round(time.monotonic() - started, 1)
+    logger.info("%s sync done: %s", label, result)
+    return result
+
+
+def sync_a_stock_forecast_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+) -> Dict:
+    """同步业绩预告（按报告期整市场拉）。"""
+    owns_analytics_db = analytics_db is None
+    analytics_session = analytics_db or AnalyticsSession()
+    service = tushare_service or TushareService.getInstance()
+    try:
+        return _sync_period_statement(
+            label="业绩预告",
+            table_name=AStockForecast.__tablename__,
+            fetch_period_fn=service.get_a_stock_forecast_period_frame,
+            normalize_fn=_normalize_forecast_frame,
+            upsert_fn=_bulk_upsert_forecast_frame,
+            start_date=start_date,
+            end_date=end_date,
+            incremental=incremental,
+            analytics_session=analytics_session,
+        )
+    finally:
+        if owns_analytics_db:
+            analytics_session.close()
+
+
+def sync_a_stock_express_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    incremental: bool = True,
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+) -> Dict:
+    """同步业绩快报（按报告期整市场拉）。"""
+    owns_analytics_db = analytics_db is None
+    analytics_session = analytics_db or AnalyticsSession()
+    service = tushare_service or TushareService.getInstance()
+    try:
+        return _sync_period_statement(
+            label="业绩快报",
+            table_name=AStockExpress.__tablename__,
+            fetch_period_fn=service.get_a_stock_express_period_frame,
+            normalize_fn=_normalize_express_frame,
+            upsert_fn=_bulk_upsert_express_frame,
+            start_date=start_date,
+            end_date=end_date,
+            incremental=incremental,
+            analytics_session=analytics_session,
+        )
+    finally:
+        if owns_analytics_db:
+            analytics_session.close()
 
 
 def _count_analytics_table_rows(analytics_db: Session, table_name: str) -> int:

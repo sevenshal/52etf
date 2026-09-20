@@ -319,6 +319,10 @@
   margin-top: 8px;
 }
 
+.earnings-gap-full {
+  width: 100%;
+}
+
 .earnings-gap .earnings-gap-sub {
   font-size: 12px;
 }
