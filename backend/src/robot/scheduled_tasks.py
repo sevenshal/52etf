@@ -628,6 +628,14 @@ def _run_market_alert_scan(
             f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}")
 
 
+def _run_sw_industry_sync():
+    """同步申万三级行业分类与全市场成分股（行业关联看板的骨架）。"""
+    from ..core.services.industry_relation import sync_sw_industries
+
+    result = sync_sw_industries()
+    return f"行业 {result.get('industries')} 个 · 成分股 {result.get('members')} 只"
+
+
 def _run_market_alert_baseline(baseline_days: int = 20):
     """提示看板：盘前构建同时段量能基准与九转结构快照。"""
     from ..core.services.market_alerts import prepare_alert_baseline
@@ -1597,6 +1605,17 @@ class ScheduledTaskManager:
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
                     ),
                 ),
+            ),
+            "sw_industry_sync": TaskDefinition(
+                task_key="sw_industry_sync",
+                name="申万行业分类同步",
+                description="同步申万三级行业分类与全市场成分股，供行业关联看板聚合使用（行业划分很少变动，每天一次即可）。",
+                default_time="08:40",
+                default_enabled=True,
+                sort_order=25,
+                runner=_run_sw_industry_sync,
+                default_cron_rule="40 8 * * mon-fri",
+                parameter_schema=(),
             ),
             "market_alert_baseline": TaskDefinition(
                 task_key="market_alert_baseline",

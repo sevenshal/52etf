@@ -199,6 +199,22 @@
   color: #2f9e63;
 }
 
+.market-industry__row--active > td {
+  background: #eef6ff !important;
+}
+
+.market-industry__members {
+  margin-top: 12px;
+}
+
+.market-industry .is-up {
+  color: #e5484d;
+}
+
+.market-industry .is-down {
+  color: #2f9e63;
+}
+
 .earnings-gap-search {
   width: 220px;
 }

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from ...core.services.earnings_gap import EarningsGapDataError, get_earnings_gap
+from ...core.services.industry_relation import IndustryRelationDataError, fetch_industry_relation
 from ...core.services.market_alerts import fetch_alerts, run_alert_scan
 from ...core.services.market_overview import (
     MarketOverviewDataError,
@@ -90,3 +91,12 @@ async def get_market_alerts(
 async def trigger_alert_scan(account_id: str = Depends(valid_admin_account)):
     """手动触发一轮扫描（定时任务每分钟自动跑，这里用于调试）。"""
     return await run_in_threadpool(run_alert_scan)
+
+
+@router.get("/industry-relation")
+async def get_industry_relation(account_id: str = Depends(valid_admin_account)):
+    """行业关联：申万一/二/三级行业的盘中聚合与成分股明细。"""
+    try:
+        return await run_in_threadpool(fetch_industry_relation)
+    except (IndustryRelationDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
