@@ -199,6 +199,72 @@
   color: #2f9e63;
 }
 
+.market-industry__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-bottom: 8px;
+}
+
+.market-industry__meta {
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.market-industry__stack {
+  width: 100%;
+}
+
+.market-industry__structure {
+  margin-bottom: 12px;
+}
+
+.market-industry .industry-link {
+  color: #2f6fdb;
+  cursor: pointer;
+}
+
+.market-industry .industry-link:hover {
+  text-decoration: underline;
+}
+
+.market-industry .industry-labels {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.market-industry .ant-table-cell {
+  padding: 4px 6px !important;
+  font-size: 12px;
+}
+
+/* 前3标签：三段色块顶格，涨停那天在色块里写连板数 */
+.trend-tri {
+  display: inline-flex;
+  gap: 2px;
+  height: 18px;
+}
+
+.trend-seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  background: #f2f4f7;
+  border-radius: 2px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.trend-strong { background: #c62828; }
+.trend-active { background: #ef7a6d; }
+.trend-watch { background: #a9ddb5; color: #2f6b45; }
+.trend-avoid { background: #2f9e63; }
+.trend-limit-down { outline: 1px solid #0a7a38; }
+
 .market-industry__row--active > td {
   background: #eef6ff !important;
 }

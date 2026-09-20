@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from ...core.services.earnings_gap import EarningsGapDataError, get_earnings_gap
-from ...core.services.industry_relation import IndustryRelationDataError, fetch_industry_relation
+from ...core.services.industry_relation import (
+    IndustryRelationDataError,
+    fetch_industry_history,
+    fetch_industry_relation,
+)
 from ...core.services.market_alerts import fetch_alerts, run_alert_scan
 from ...core.services.market_overview import (
     MarketOverviewDataError,
@@ -94,9 +98,29 @@ async def trigger_alert_scan(account_id: str = Depends(valid_admin_account)):
 
 
 @router.get("/industry-relation")
-async def get_industry_relation(account_id: str = Depends(valid_admin_account)):
-    """行业关联：申万一/二/三级行业的盘中聚合与成分股明细。"""
+async def get_industry_relation(
+    universe: str = Query("all", max_length=16),
+    focus: str = Query("", max_length=4),
+    account_id: str = Depends(valid_admin_account),
+):
+    """行业关联：申万一/二/三级行业的盘中聚合与成分股明细，支持市场范围与焦点过滤。"""
     try:
-        return await run_in_threadpool(fetch_industry_relation)
+        return await run_in_threadpool(fetch_industry_relation, universe, focus)
+    except (IndustryRelationDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/industry-relation/history")
+async def get_industry_relation_history(
+    level: str = Query("l1", pattern="^(?i)(l1|l2|l3)$"),
+    name: str = Query(..., min_length=1, max_length=64),
+    days: int = Query(60, ge=5, le=250),
+    account_id: str = Depends(valid_admin_account),
+):
+    """某个行业的申万行业指数走势（关联结构面板）。"""
+    try:
+        return await run_in_threadpool(fetch_industry_history, level, name, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except (IndustryRelationDataError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc))

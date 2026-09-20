@@ -1,5 +1,5 @@
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -128,4 +128,79 @@ def test_load_members_current_and_historical():
 
     now = load_members(con, as_of=date(2026, 9, 18))
     assert set(now["ts_code"]) == {"600519.SH"}                     # 移出的不再计入
+    con.close()
+
+
+def _daily_frame(rows):
+    frame = pd.DataFrame(rows, columns=["ts_code", "trade_date", "open", "close", "pre_close", "vol", "amount", "limit_status"])
+    return frame
+
+
+def test_focus_matches_labels_and_boards():
+    from src.core.services.industry_relation import focus_matches
+
+    limit_first = {"limit_up": True, "boards": 1, "label": LABEL_ACTIVE}
+    limit_third = {"limit_up": True, "boards": 3, "label": LABEL_STRONG}
+    watch = {"limit_up": False, "boards": 0, "label": LABEL_WATCH}
+
+    assert focus_matches(limit_first, "") is True            # 不过滤
+    assert focus_matches(limit_first, "lu") is True
+    assert focus_matches(limit_first, "fb") is True and focus_matches(limit_third, "fb") is False
+    assert focus_matches(limit_third, "lb") is True and focus_matches(limit_first, "lb") is False
+    assert focus_matches(limit_third, "st") is True and focus_matches(watch, "st") is False
+    assert focus_matches(watch, "gw") is True
+
+
+def test_load_universe_codes_by_board_index_and_micro():
+    import duckdb
+
+    from src.core.services.industry_relation import load_universe_codes
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_sw_member (ts_code VARCHAR, l1_name VARCHAR, l2_name VARCHAR, l3_name VARCHAR)")
+    con.executemany("INSERT INTO a_stock_sw_member VALUES (?, '行业', '二级', '三级')",
+                    [("600000.SH",), ("688001.SH",), ("000001.SZ",), ("300001.SZ",), ("920001.BJ",)])
+    con.execute("CREATE TABLE a_stock_index_weight (index_code VARCHAR, con_code VARCHAR, trade_date DATE)")
+    con.executemany("INSERT INTO a_stock_index_weight VALUES ('000300.SH', ?, DATE '2026-09-18')",
+                    [("600000.SH",), ("000001.SZ",)])
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, total_mv DOUBLE)")
+    con.executemany("INSERT INTO a_stock_market_daily VALUES (?, DATE '2026-09-18', ?)",
+                    [("600000.SH", 900.0), ("300001.SZ", 100.0), ("000001.SZ", 500.0)])
+
+    today = date(2026, 9, 20)
+    assert load_universe_codes(con, "all", today) is None                 # 全A 不过滤
+    assert load_universe_codes(con, "star", today) == {"688001.SH"}
+    assert load_universe_codes(con, "sh_main", today) == {"600000.SH"}    # 科创板不算上证主板
+    assert load_universe_codes(con, "gem", today) == {"300001.SZ"}
+    assert load_universe_codes(con, "bj", today) == {"920001.BJ"}
+    assert load_universe_codes(con, "hs300", today) == {"600000.SH", "000001.SZ"}
+    micro = load_universe_codes(con, "micro", today)
+    assert "300001.SZ" in micro                                            # 市值最小的进微盘
+    con.close()
+
+
+def test_load_recent_labels_returns_last_days_with_boards():
+    import duckdb
+
+    from src.core.services.industry_relation import load_recent_labels
+
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE a_stock_market_daily (
+        ts_code VARCHAR, trade_date DATE, open DOUBLE, close DOUBLE, pre_close DOUBLE,
+        vol DOUBLE, amount DOUBLE, limit_status INTEGER)""")
+    rows = []
+    price = 10.0
+    for i in range(30):
+        day = date(2026, 8, 1) + timedelta(days=i)
+        prev = price
+        price = round(price * 1.02, 2)          # 持续上涨 → 九转高计数累积
+        status = 2 if i >= 28 else 1            # 最后两天涨停
+        rows.append(("000001.SZ", day, prev, price, prev, 1_000_000, 200_000, status))
+    con.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+    history = load_recent_labels(con, date(2026, 9, 1), days=3)["000001.SZ"]
+
+    assert len(history) == 3
+    assert [item["boards"] for item in history] == [0, 1, 2]      # 连板数递增
+    assert all(item["d"] for item in history)
     con.close()

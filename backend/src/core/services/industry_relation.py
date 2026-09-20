@@ -39,7 +39,41 @@ MEMBER_PAGE_SIZE = 3000
 LEVELS = ("l1", "l2", "l3")
 CACHE_TTL_SECONDS = 30
 LIMIT_UP_STATUS = (2, 3)
-MIN_RANK_COUNT = 5        # 成分股少于此数的行业不参与排名，避免小样本噪声顶上榜首
+LIMIT_DOWN_STATUS = (5, 6)
+MIN_RANK_COUNT = 5
+RECENT_LABEL_DAYS = 3          # 成分股「前3标签」看前 3 个交易日的收盘口径状态
+MICRO_CAP_COUNT = 400          # 微盘股范围取总市值最小的 N 只
+
+# 市场范围：代码前缀类直接按 ts_code 判断，指数类走 a_stock_index_weight
+UNIVERSE_OPTIONS: Tuple[Dict[str, Any], ...] = (
+    {"key": "all", "name": "全A"},
+    {"key": "sh_main", "name": "上证主板", "prefixes": ("60",), "suffix": ".SH"},
+    {"key": "sz_main", "name": "深证主板", "prefixes": ("00",), "suffix": ".SZ"},
+    {"key": "star", "name": "科创板", "prefixes": ("688",), "suffix": ".SH"},
+    {"key": "gem", "name": "创业板", "prefixes": ("30",), "suffix": ".SZ"},
+    {"key": "bj", "name": "北交所", "suffix": ".BJ"},
+    {"key": "sz50", "name": "上证50", "index_code": "000016.SH"},
+    {"key": "hs300", "name": "沪深300", "index_code": "000300.SH"},
+    {"key": "zz500", "name": "中证500", "index_code": "000905.SH"},
+    {"key": "zz1000", "name": "中证1000", "index_code": "000852.SH"},
+    {"key": "zz2000", "name": "中证2000", "index_code": "932000.CSI"},
+    {"key": "micro", "name": "微盘股", "micro": True},
+)
+UNIVERSE_BY_KEY = {item["key"]: item for item in UNIVERSE_OPTIONS}
+
+# 焦点过滤：既可以按标签，也可以按涨停/连板状态
+FOCUS_OPTIONS: Tuple[Dict[str, str], ...] = (
+    {"key": "", "name": "全部"},
+    {"key": "lu", "name": "涨停"},
+    {"key": "fb", "name": "首板"},
+    {"key": "eb", "name": "二板"},
+    {"key": "lb", "name": "多板"},
+    {"key": "st", "name": "强势"},
+    {"key": "by", "name": "活跃"},
+    {"key": "gw", "name": "观望"},
+    {"key": "av", "name": "规避"},
+    {"key": "ld", "name": "跌停"},
+)        # 成分股少于此数的行业不参与排名，避免小样本噪声顶上榜首
 
 _cache: Dict[str, Tuple[float, Any]] = {}
 
@@ -124,6 +158,168 @@ def load_board_counts(connection, today: date, lookback_days: int = 20) -> Dict[
         if streak:
             counts[str(ts_code)] = streak
     return counts
+
+
+def load_universe_codes(connection, universe: str, today: date) -> Optional[set]:
+    """市场范围 → 股票代码集合；返回 None 表示全A（不过滤）。"""
+    option = UNIVERSE_BY_KEY.get(universe or "all")
+    if not option or option["key"] == "all":
+        return None
+
+    if option.get("index_code"):
+        rows = connection.execute(
+            """
+            SELECT con_code FROM a_stock_index_weight
+            WHERE index_code = ? AND trade_date = (
+                SELECT max(trade_date) FROM a_stock_index_weight WHERE index_code = ?
+            )
+            """,
+            [option["index_code"], option["index_code"]],
+        ).fetchall()
+        return {str(row[0]).strip().upper() for row in rows if row and row[0]}
+
+    if option.get("micro"):
+        rows = connection.execute(
+            """
+            SELECT ts_code FROM a_stock_market_daily
+            WHERE trade_date = (SELECT max(trade_date) FROM a_stock_market_daily)
+              AND total_mv IS NOT NULL
+            ORDER BY total_mv ASC LIMIT ?
+            """,
+            [MICRO_CAP_COUNT],
+        ).fetchall()
+        return {str(row[0]).strip().upper() for row in rows if row and row[0]}
+
+    # 代码前缀类范围（板块），直接用交易所后缀 + 代码前缀判断
+    suffix = option.get("suffix")
+    prefixes = option.get("prefixes")
+    rows = connection.execute("SELECT DISTINCT ts_code FROM a_stock_sw_member").fetchall()
+    codes = set()
+    for row in rows:
+        ts_code = str(row[0]).strip().upper()
+        if suffix and not ts_code.endswith(suffix):
+            continue
+        if prefixes and not ts_code.split(".")[0].startswith(prefixes):
+            continue
+        codes.add(ts_code)
+    return codes
+
+
+def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -> Dict[str, List[Dict[str, Any]]]:
+    """前 N 个交易日的收盘口径标签与连板数：{ts_code: [{d, label, boards}, ...]}（按日期升序）。
+
+    用日线还原，所以历史上线第一天就有数据，不必等盘中扫描攒。
+    量比分母用该日前 20 日均量，与盘中同时段量比口径一致（只是粒度到日）。
+    """
+    frame = connection.execute(
+        """
+        SELECT ts_code, trade_date, open, close, pre_close, vol, amount, limit_status
+        FROM a_stock_market_daily
+        WHERE trade_date >= ?
+        ORDER BY ts_code, trade_date
+        """,
+        [today - timedelta(days=90)],
+    ).fetchdf()
+    if frame.empty:
+        return {}
+
+    frame = frame.sort_values(["ts_code", "trade_date"])
+    grouped = frame.groupby("ts_code", sort=False)
+    # 前 20 日均量（不含当日）与九转计数所需的 4 日前收盘
+    frame["avg_vol20"] = grouped["vol"].transform(lambda x: x.shift(1).rolling(20, min_periods=5).mean())
+    frame["close_ref4"] = grouped["close"].transform(lambda x: x.shift(4))
+    frame["close_ref3"] = grouped["close"].transform(lambda x: x.shift(3))
+    frame["td_up"] = 0
+    frame["td_down"] = 0
+
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    for ts_code, group in grouped:
+        closes = group["close"].tolist()
+        up_runs, down_runs = [], []
+        up = down = 0
+        for index in range(len(closes)):
+            ref = closes[index - 4] if index >= 4 else None
+            if ref is None or pd.isna(ref):
+                up = down = 0
+            elif closes[index] > ref:
+                up, down = up + 1, 0
+            elif closes[index] < ref:
+                down, up = down + 1, 0
+            else:
+                up = down = 0
+            up_runs.append(up)
+            down_runs.append(down)
+
+        tail = group.tail(days)
+        history: List[Dict[str, Any]] = []
+        offset = len(group) - len(tail)
+        for position, row in enumerate(tail.itertuples(index=False)):
+            index = offset + position
+            label = _daily_label(row, up_runs[index], down_runs[index])
+            boards = 0
+            if row.limit_status in LIMIT_UP_STATUS:
+                boards = 1
+                back = index - 1
+                while back >= 0 and group["limit_status"].iloc[back] in LIMIT_UP_STATUS:
+                    boards += 1
+                    back -= 1
+            history.append({
+                "d": row.trade_date.strftime("%Y-%m-%d") if hasattr(row.trade_date, "strftime") else str(row.trade_date)[:10],
+                "label": label,
+                "boards": boards,
+                "limit_down": bool(row.limit_status in LIMIT_DOWN_STATUS),
+            })
+        results[str(ts_code)] = history
+    return results
+
+
+def _daily_label(row: Any, td_up: int, td_down: int) -> Optional[str]:
+    """按收盘口径给某一天打标签，阈值与盘中一致（量比分母换成 20 日均量）。"""
+    close = safe_float(row.close)
+    pre_close = safe_float(row.pre_close)
+    day_open = safe_float(row.open)
+    if not close or not pre_close or not day_open:
+        return None
+    pct = (close / pre_close - 1) * 100
+    amount_yuan = (safe_float(row.amount) or 0.0) * 1000     # 日线 amount 单位千元
+    avg_vol = safe_float(getattr(row, "avg_vol20", None))
+    volume_ratio = (safe_float(row.vol) or 0.0) / avg_vol if avg_vol else None
+    close_ref4 = safe_float(getattr(row, "close_ref4", None))
+    close_ref3 = safe_float(getattr(row, "close_ref3", None))
+
+    if (td_up >= DEFAULT_THRESHOLDS.active_td_up_min and pct > 0 and close > day_open
+            and amount_yuan >= DEFAULT_THRESHOLDS.min_amount_yuan
+            and volume_ratio is not None and volume_ratio >= DEFAULT_THRESHOLDS.min_volume_ratio):
+        if (DEFAULT_THRESHOLDS.strong_td_up_min <= td_up <= DEFAULT_THRESHOLDS.strong_td_up_max
+                and volume_ratio >= DEFAULT_THRESHOLDS.strong_volume_ratio):
+            return LABEL_STRONG
+        return LABEL_ACTIVE
+    sharp_drop = bool(
+        close_ref4 and close_ref3 and close < close_ref4 and close < close_ref3
+        and (close_ref3 - close) / close * 100 > DEFAULT_THRESHOLDS.drop_pct_vs_3d
+    )
+    if td_down >= DEFAULT_THRESHOLDS.watch_td_down_min or sharp_drop:
+        if td_down >= DEFAULT_THRESHOLDS.avoid_td_down_min and pct < 0:
+            return LABEL_AVOID
+        return LABEL_WATCH
+    return None
+
+
+def focus_matches(stock: Dict[str, Any], focus: str) -> bool:
+    if not focus:
+        return True
+    if focus == "lu":
+        return bool(stock.get("limit_up"))
+    if focus == "ld":
+        return bool(stock.get("limit_down"))
+    if focus == "fb":
+        return bool(stock.get("limit_up")) and (stock.get("boards") or 0) <= 1
+    if focus == "eb":
+        return bool(stock.get("limit_up")) and (stock.get("boards") or 0) == 2
+    if focus == "lb":
+        return bool(stock.get("limit_up")) and (stock.get("boards") or 0) >= 3
+    label_map = {"st": LABEL_STRONG, "by": LABEL_ACTIVE, "gw": LABEL_WATCH, "av": LABEL_AVOID}
+    return stock.get("label") == label_map.get(focus)
 
 
 def sentiment_score(row: Dict[str, Any]) -> float:
@@ -275,8 +471,8 @@ def build_stock_rows(
     return rows
 
 
-def _load_relation(now: datetime, thresholds: AlertThresholds) -> Dict[str, Any]:
-    from .market_alerts import get_scanner_state, get_market_snapshot
+def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, focus: str) -> Dict[str, Any]:
+    from .market_alerts import get_market_snapshot, get_scanner_state
 
     today = now.date()
     state = get_scanner_state(today)
@@ -288,24 +484,53 @@ def _load_relation(now: datetime, thresholds: AlertThresholds) -> Dict[str, Any]
     try:
         members = load_members(connection)
         boards = load_board_counts(connection, today)
+        universe_codes = load_universe_codes(connection, universe, today)
+        recent_labels = _cached_recent_labels(connection, today)
     finally:
         connection.close()
 
-    limits = state.get("limits") or {}
     minute_label = now.strftime("%H:%M")
-    baseline_minute = baseline_at(state.get("baseline"), minute_label)
     stocks = build_stock_rows(
-        quotes, members, state.get("structures") or {}, baseline_minute, limits, boards, thresholds,
+        quotes, members, state.get("structures") or {},
+        baseline_at(state.get("baseline"), minute_label),
+        state.get("limits") or {}, boards, thresholds,
     )
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")
+
+    hit_times = _load_hit_times(today)
+    for stock in stocks:
+        stock["labels_3d"] = recent_labels.get(stock["ts_code"], [])
+        stock["hit_time"] = hit_times.get(stock["ts_code"])
+
+    if universe_codes is not None:
+        stocks = [stock for stock in stocks if stock["ts_code"] in universe_codes]
+    if focus:
+        stocks = [stock for stock in stocks if focus_matches(stock, focus)]
+    if not stocks:
+        return {
+            "date": today.isoformat(),
+            "fetched_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "universe": universe, "focus": focus,
+            "universe_name": UNIVERSE_BY_KEY.get(universe or "all", {}).get("name", "全A"),
+            "picked": 0, "min_rank_count": MIN_RANK_COUNT,
+            "universe_options": list(UNIVERSE_OPTIONS), "focus_options": list(FOCUS_OPTIONS),
+            "l1": [], "l2": [], "l3": [], "members": [],
+        }
 
     return {
         "date": today.isoformat(),
         "fetched_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "申万三级行业（SW2021）· 盘中快照复用提示看板",
+        "universe": universe or "all",
+        "universe_name": UNIVERSE_BY_KEY.get(universe or "all", {}).get("name", "全A"),
+        "focus": focus or "",
         "picked": len(stocks),
         "min_rank_count": MIN_RANK_COUNT,
+        "universe_options": [
+            {"key": item["key"], "name": item["name"]} for item in UNIVERSE_OPTIONS
+        ],
+        "focus_options": list(FOCUS_OPTIONS),
         "l1": aggregate_by_level(stocks, "l1"),
         "l2": aggregate_by_level(stocks, "l2"),
         "l3": aggregate_by_level(stocks, "l3"),
@@ -313,14 +538,87 @@ def _load_relation(now: datetime, thresholds: AlertThresholds) -> Dict[str, Any]
     }
 
 
+def _load_hit_times(today: date) -> Dict[str, str]:
+    """今日提示看板的首次命中时刻，作为成分股表的「命中时间」列。"""
+    try:
+        from ..database import MarketAlertHit, get_db_ctx
+
+        with get_db_ctx() as db:
+            rows = db.query(MarketAlertHit.ts_code, MarketAlertHit.hit_time).filter(
+                MarketAlertHit.trade_date == today
+            ).all()
+        return {str(row[0]): str(row[1]) for row in rows}
+    except Exception as exc:  # noqa: BLE001  命中时间只是附加信息
+        logger.warning("读取当日命中时刻失败: %s", exc)
+        return {}
+
+
+def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, Any]]]:
+    """前3标签按日变化，缓存到当天结束。"""
+    key = f"recent_labels:{today.isoformat()}"
+    hit = _cache.get(key)
+    if hit:
+        return hit[1]
+    value = load_recent_labels(connection, today)
+    _cache[key] = (time.time(), value)
+    return value
+
+
 def fetch_industry_relation(
+    universe: str = "all",
+    focus: str = "",
     now: Optional[datetime] = None,
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
 ) -> Dict[str, Any]:
     now = now or datetime.now()
-    hit = _cache.get("relation")
+    key = f"relation:{universe}:{focus}"
+    hit = _cache.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL_SECONDS:
         return hit[1]
-    value = _load_relation(now, thresholds)
-    _cache["relation"] = (time.time(), value)
+    value = _load_relation(now, thresholds, universe or "all", focus or "")
+    _cache[key] = (time.time(), value)
     return value
+
+
+def fetch_industry_history(level: str, name: str, days: int = 60) -> Dict[str, Any]:
+    """某个行业的指数日线走势（申万行业指数），用于关联结构面板。"""
+    level_key = str(level or "l1").upper()
+    if level_key not in {"L1", "L2", "L3"}:
+        raise ValueError("行业层级必须是 l1/l2/l3")
+    connection = connect_analytics_db()
+    try:
+        row = connection.execute(
+            "SELECT index_code FROM a_stock_sw_industry WHERE level = ? AND industry_name = ? LIMIT 1",
+            [level_key, name],
+        ).fetchone()
+        if not row:
+            raise IndustryRelationDataError(f"找不到行业 {name}（{level_key}）")
+        index_code = str(row[0])
+        frame = connection.execute(
+            """
+            SELECT trade_date, close, vol, amount, pe, pb
+            FROM a_stock_sw_daily WHERE ts_code = ?
+            ORDER BY trade_date DESC LIMIT ?
+            """,
+            [index_code, max(5, min(int(days or 60), 250))],
+        ).fetchdf()
+    finally:
+        connection.close()
+    if frame.empty:
+        raise IndustryRelationDataError(f"{name} 没有行业指数日线，请先跑「A股基础数据同步」")
+    frame = frame.sort_values("trade_date")
+    closes = frame["close"].tolist()
+    return {
+        "level": level_key,
+        "name": name,
+        "index_code": index_code,
+        "dates": [
+            d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+            for d in frame["trade_date"]
+        ],
+        "close": [safe_float(v, 2) for v in closes],
+        "amount_yi": [safe_float((v or 0) / 1e4, 2) for v in frame["amount"]],   # sw_daily amount 单位万元
+        "pe": [safe_float(v, 2) for v in frame["pe"]],
+        "pb": [safe_float(v, 2) for v in frame["pb"]],
+        "pct_range": round((closes[-1] / closes[0] - 1) * 100, 2) if closes and closes[0] else None,
+    }
