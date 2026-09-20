@@ -2,8 +2,8 @@
 
 数据来源与调用预算：
 
-- 行业骨架：tushare `index_classify`（SW2021 三级）+ `index_member_all`（全市场成分，分页 2 次），
-  行业划分很少变动，每天同步一次即可，盘中不调。
+- 行业骨架：申万三级分类、当前成分、成分变更历史与行业指数日线，都由「A股基础数据同步」
+  任务统一落到 DuckDB（见 robot/a_stock_base_data_sync.sync_sw_industry_data），本模块只读不拉。
 - 个股盘中状态：复用提示看板每分钟那一次 `rt_k` 全市场快照与同一套四档标签，增量调用为 0。
 - 连板：DuckDB `a_stock_market_daily.limit_status` 的历史连续涨停天数，盘前算一次。
 
@@ -31,8 +31,6 @@ from .market_alerts import (
     baseline_at,
     classify,
 )
-from .tushare import TushareService
-
 
 logger = logging.getLogger(__name__)
 
@@ -50,95 +48,56 @@ class IndustryRelationDataError(RuntimeError):
     pass
 
 
-# ---------- 申万行业骨架同步 ----------
-
-def sync_sw_industries(service: Optional[Any] = None) -> Dict[str, Any]:
-    """同步申万三级行业分类与全市场成分股（每天一次，2~3 次接口调用）。"""
-    service = service or TushareService.get_instance()
-    classify_rows: List[Dict[str, Any]] = []
-    for level in ("L1", "L2", "L3"):
-        frame = service.pro.index_classify(
-            level=level, src=SW_SOURCE,
-            fields="index_code,industry_name,level,industry_code,parent_code",
-        )
-        if frame is None or frame.empty:
-            raise IndustryRelationDataError(f"tushare index_classify 未返回 {level} 行业分类")
-        for row in frame.itertuples(index=False):
-            classify_rows.append({
-                "index_code": str(row.index_code),
-                "industry_name": str(row.industry_name),
-                "industry_code": str(getattr(row, "industry_code", "") or ""),
-                "level": level,
-                "parent_code": str(getattr(row, "parent_code", "") or ""),
-                "src": SW_SOURCE,
-            })
-
-    member_frames: List[pd.DataFrame] = []
-    offset = 0
-    while True:
-        frame = service.pro.index_member_all(
-            is_new="Y", limit=MEMBER_PAGE_SIZE, offset=offset,
-            fields="l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,in_date,out_date,is_new",
-        )
-        if frame is None or frame.empty:
-            break
-        member_frames.append(frame)
-        offset += len(frame)
-        if len(frame) < MEMBER_PAGE_SIZE or offset > 50_000:
-            break
-    if not member_frames:
-        raise IndustryRelationDataError("tushare index_member_all 未返回成分股")
-    members = pd.concat(member_frames, ignore_index=True).drop_duplicates("ts_code")
-
-    connection = connect_analytics_db()
-    try:
-        connection.execute("DELETE FROM a_stock_sw_industry")
-        connection.executemany(
-            "INSERT INTO a_stock_sw_industry (index_code, industry_name, industry_code, level, parent_code, src, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                (row["index_code"], row["industry_name"], row["industry_code"],
-                 row["level"], row["parent_code"], row["src"], datetime.now())
-                for row in classify_rows
-            ],
-        )
-        connection.execute("DELETE FROM a_stock_sw_member")
-        connection.executemany(
-            "INSERT INTO a_stock_sw_member (ts_code, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,"
-            " in_date, out_date, is_new, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (str(row.ts_code), str(row.l1_code or ""), str(row.l1_name or ""),
-                 str(row.l2_code or ""), str(row.l2_name or ""), str(row.l3_code or ""), str(row.l3_name or ""),
-                 _to_date(getattr(row, "in_date", None)), _to_date(getattr(row, "out_date", None)),
-                 str(getattr(row, "is_new", "") or ""), datetime.now())
-                for row in members.itertuples(index=False)
-            ],
-        )
-    finally:
-        connection.close()
-    _cache.clear()
-    return {"industries": len(classify_rows), "members": int(len(members))}
-
-
-def _to_date(value: Any) -> Optional[date]:
-    text = str(value or "").strip()
-    if not text or text.lower() in {"none", "nan"}:
-        return None
-    try:
-        return datetime.strptime(text, "%Y%m%d").date()
-    except ValueError:
-        return None
-
-
 # ---------- 聚合 ----------
 
-def load_members(connection) -> pd.DataFrame:
-    frame = connection.execute(
-        "SELECT ts_code, l1_name, l2_name, l3_name FROM a_stock_sw_member WHERE l1_name <> ''"
-    ).fetchdf()
+def load_members(connection, as_of: Optional[date] = None) -> pd.DataFrame:
+    """行业成分。as_of 为空取当前归属；给了日期就用变更历史还原那天的归属。"""
+    if as_of is None:
+        frame = connection.execute(
+            "SELECT ts_code, l1_name, l2_name, l3_name FROM a_stock_sw_member WHERE l1_name <> ''"
+        ).fetchdf()
+    else:
+        # 变更历史按 index_code 记录，用三级行业的 index_code 反查一/二级名称
+        frame = connection.execute(
+            """
+            SELECT c.con_code AS ts_code,
+                   l1.industry_name AS l1_name,
+                   l2.industry_name AS l2_name,
+                   l3.industry_name AS l3_name
+            FROM a_stock_sw_member_change c
+            JOIN a_stock_sw_industry l3 ON l3.index_code = c.index_code AND l3.level = 'L3'
+            LEFT JOIN a_stock_sw_industry l2 ON l2.industry_code = l3.parent_code AND l2.level = 'L2'
+            LEFT JOIN a_stock_sw_industry l1 ON l1.industry_code = l2.parent_code AND l1.level = 'L1'
+            WHERE c.in_date <= ? AND (c.out_date IS NULL OR c.out_date > ?)
+            """,
+            [as_of, as_of],
+        ).fetchdf()
     if frame.empty:
-        raise IndustryRelationDataError("分析库没有申万成分股，请先跑「申万行业分类同步」任务")
+        raise IndustryRelationDataError("分析库没有申万成分股，请先跑「A股基础数据同步」任务")
     return frame
+
+
+def load_industry_daily(connection, ts_codes: List[str], days: int = 60) -> pd.DataFrame:
+    """申万行业指数日线，用于行业历史走势与估值。"""
+    if not ts_codes:
+        return pd.DataFrame()
+    placeholders = ",".join("?" for _ in ts_codes)
+    return connection.execute(
+        f"""
+        SELECT ts_code, trade_date, name, close, pct_chg_placeholder, vol, amount, pe, pb
+        FROM (
+            SELECT ts_code, trade_date, name, close,
+                   close / NULLIF(LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date), 0) - 1
+                       AS pct_chg_placeholder,
+                   vol, amount, pe, pb
+            FROM a_stock_sw_daily
+            WHERE ts_code IN ({placeholders})
+        )
+        ORDER BY ts_code, trade_date DESC
+        LIMIT ?
+        """,
+        [*ts_codes, days * max(1, len(ts_codes))],
+    ).fetchdf()
 
 
 def load_board_counts(connection, today: date, lookback_days: int = 20) -> Dict[str, int]:
