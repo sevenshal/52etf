@@ -19,9 +19,15 @@ from ..tushare_statement_fields import (
     CASHFLOW_API_FIELDS,
     CASHFLOW_DATE_FIELDS,
     CASHFLOW_NUMERIC_FIELDS,
+    EXPRESS_API_FIELDS,
+    EXPRESS_DATE_FIELDS,
+    EXPRESS_NUMERIC_FIELDS,
     FINA_INDICATOR_API_FIELDS,
     FINA_INDICATOR_DATE_FIELDS,
     FINA_INDICATOR_NUMERIC_FIELDS,
+    FORECAST_API_FIELDS,
+    FORECAST_DATE_FIELDS,
+    FORECAST_NUMERIC_FIELDS,
     INCOME_API_FIELDS,
     INCOME_DATE_FIELDS,
     INCOME_NUMERIC_FIELDS,
@@ -2467,6 +2473,98 @@ class TushareService(QuoteProvider):
         if "report_type" in result.columns:
             result["report_type"] = result["report_type"].astype("string")
         return result.dropna(subset=["ts_code", "end_date"])
+
+    def _statement_pages(self, api_fn, api_fields, api_name, describe, limit, **params) -> Optional[pd.DataFrame]:
+        """翻页拉完一个接口；首页就失败（无权限等）返回 None，由调用方决定降级。"""
+        frames = []
+        offset = 0
+        while True:
+            frame = self._fetch_statement_page(
+                self._fina_indicator_range_rate_limiter,
+                api_fn,
+                api_fields,
+                api_name,
+                f"{describe} offset={offset}",
+                limit=limit,
+                offset=offset,
+                **params,
+            )
+            if frame is None:
+                return None if not frames else pd.concat(frames, ignore_index=True)
+            if frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    @staticmethod
+    def _normalize_statement_frame(frame: pd.DataFrame, date_fields, numeric_fields) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        result = frame.drop_duplicates(subset=["ts_code", "end_date", "ann_date"], keep="last").copy()
+        for column in ("end_date", *date_fields):
+            if column in result.columns:
+                result[column] = pd.to_datetime(result[column], format="%Y%m%d", errors="coerce").dt.date
+        for column in numeric_fields:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["ts_code", "end_date"])
+
+    def get_a_stock_forecast_period_frame(self, period: date, limit: int = 3000) -> pd.DataFrame:
+        """按报告期获取全市场业绩预告。
+
+        forecast 的非 VIP 接口必须传 ts_code 或 ann_date（只传 start_date/end_date 会报
+        "ann_date和ts_code至少输入一个参数"），所以整市场只能走 forecast_vip 的 period；
+        没有 VIP 权限时退回按公告日逐天拉。
+        """
+        period_value = self._to_date(period)
+        if not period_value:
+            return pd.DataFrame()
+        frame = self._statement_pages(
+            self.pro.forecast_vip, FORECAST_API_FIELDS, "forecast_vip",
+            f"period={period_value}", limit, period=period_value.strftime("%Y%m%d"),
+        )
+        if frame is None:
+            frame = self._forecast_by_ann_dates(period_value, limit)
+        return self._normalize_statement_frame(frame, FORECAST_DATE_FIELDS, FORECAST_NUMERIC_FIELDS)
+
+    def _forecast_by_ann_dates(self, period: date, limit: int) -> pd.DataFrame:
+        """没有 forecast_vip 权限时的兜底：按公告日逐天拉该报告期可能的披露窗口。"""
+        self.logger.warning("Falling back to per-ann_date forecast fetch for period=%s", period)
+        frames = []
+        # 预告披露集中在报告期结束前一个月到结束后四个月
+        cursor = period - timedelta(days=45)
+        end = period + timedelta(days=125)
+        while cursor <= end:
+            frame = self._statement_pages(
+                self.pro.forecast, FORECAST_API_FIELDS, "forecast",
+                f"ann_date={cursor}", limit, ann_date=cursor.strftime("%Y%m%d"),
+            )
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+            cursor += timedelta(days=1)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def get_a_stock_express_period_frame(self, period: date, limit: int = 3000) -> pd.DataFrame:
+        """按报告期获取全市场业绩快报（express_vip；没权限时退回按公告日区间拉，实测不传 ts_code 也能用）。"""
+        period_value = self._to_date(period)
+        if not period_value:
+            return pd.DataFrame()
+        frame = self._statement_pages(
+            self.pro.express_vip, EXPRESS_API_FIELDS, "express_vip",
+            f"period={period_value}", limit, period=period_value.strftime("%Y%m%d"),
+        )
+        if frame is None:
+            self.logger.warning("Falling back to ann_date-range express fetch for period=%s", period_value)
+            frame = self._statement_pages(
+                self.pro.express, EXPRESS_API_FIELDS, "express",
+                f"period={period_value} range", limit,
+                start_date=(period_value - timedelta(days=45)).strftime("%Y%m%d"),
+                end_date=(period_value + timedelta(days=125)).strftime("%Y%m%d"),
+            )
+        return self._normalize_statement_frame(frame, EXPRESS_DATE_FIELDS, EXPRESS_NUMERIC_FIELDS)
 
     def get_a_stock_fina_indicator_range_frame(
         self,
