@@ -138,21 +138,50 @@ const buildIndustryColumns = (level, compact) => {
     ];
   }
 
+  // 涨跌、涨跌停、连板三组各并成一列：红绿分色即可区分，省下 4 列宽度
+  const pair = (title, upKey, downKey, { width = 72, tip = '' } = {}) => ({
+    title: tip ? <Tooltip title={tip}>{title}</Tooltip> : title,
+    key: `${upKey}_${downKey}`,
+    width,
+    align: 'right',
+    sorter: (a, b) => (a[upKey] || 0) - (b[upKey] || 0),
+    render: (_, record) => (
+      <span className="industry-pair">
+        <Text className="is-up">{record[upKey] || 0}</Text>
+        <Text type="secondary">/</Text>
+        <Text className="is-down">{record[downKey] || 0}</Text>
+      </span>
+    ),
+  });
+
   return [
     ...head,
     { title: '成交额', dataIndex: 'amount_yi', width: 72, align: 'right', sorter: (a, b) => a.amount_yi - b.amount_yi },
     num('成分', 'count', { width: 50 }),
-    num('强势', 'st', { color: 'is-up', tip: '收盘/盘中口径的强势家数' }),
+    num('强势', 'st', { color: 'is-up', tip: '强势家数' }),
     num('活跃', 'by', { color: 'is-up' }),
     num('观望', 'gw', { color: 'is-down' }),
     num('规避', 'av', { color: 'is-down' }),
-    num('上涨', 'up', { color: 'is-up', width: 50 }),
-    num('下跌', 'down', { color: 'is-down', width: 50 }),
-    num('涨停', 'lu', { color: 'is-up' }),
-    num('多板', 'lb3', { color: 'is-up', tip: '三板及以上' }),
-    num('二板', 'eb', { color: 'is-up' }),
-    num('首板', 'fb', { color: 'is-up' }),
-    num('跌停', 'ld', { color: 'is-down' }),
+    pair('涨/跌', 'up', 'down', { width: 78, tip: '上涨家数 / 下跌家数' }),
+    pair('涨停/跌停', 'lu', 'ld', { width: 82, tip: '涨停家数 / 跌停家数' }),
+    {
+      title: <Tooltip title="多板（三板及以上） / 二板 / 首板">多/二/首</Tooltip>,
+      key: 'boards',
+      width: 80,
+      align: 'right',
+      // 按连板梯队排序：多板权重最高，其次二板、首板
+      sorter: (a, b) => ((a.lb3 || 0) * 100 + (a.eb || 0) * 10 + (a.fb || 0))
+        - ((b.lb3 || 0) * 100 + (b.eb || 0) * 10 + (b.fb || 0)),
+      render: (_, record) => (
+        <span className="industry-pair">
+          <Text className="is-up" strong={Boolean(record.lb3)}>{record.lb3 || 0}</Text>
+          <Text type="secondary">/</Text>
+          <Text className="is-up">{record.eb || 0}</Text>
+          <Text type="secondary">/</Text>
+          <Text className="is-up">{record.fb || 0}</Text>
+        </span>
+      ),
+    },
     ...tail,
   ];
 };
@@ -247,7 +276,7 @@ const MarketIndustryRelation = () => {
     [compact],
   );
   // 完整模式列多，给一个横向滚动宽度；精简模式正好铺满
-  const industryScrollX = compact ? undefined : 1040;
+  const industryScrollX = compact ? undefined : 860;
 
   const rowProps = level => record => ({
     onClick: () => pick(level, record.name),

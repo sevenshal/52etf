@@ -248,6 +248,13 @@
   text-decoration: underline;
 }
 
+.market-industry .industry-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
 .market-industry .industry-labels {
   display: inline-flex;
   align-items: center;
