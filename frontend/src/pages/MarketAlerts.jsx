@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import { CloseOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
+import StockKlineChart from '../components/StockKlineChart';
 import './Market.css';
 
 const { Text } = Typography;
@@ -39,6 +41,8 @@ const MarketAlerts = () => {
   const [error, setError] = useState('');
   const [tradeDate, setTradeDate] = useState(null);
   const [label, setLabel] = useState('');
+  const [industry, setIndustry] = useState(null);     // 点击行业柱筛选
+  const [klineStock, setKlineStock] = useState(null); // 内嵌K线面板（点名称打开，不弹窗）
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -122,7 +126,15 @@ const MarketAlerts = () => {
         { type: 'value', axisLabel: { formatter: value => `${value}%` }, splitLine: { show: false } },
       ],
       series: [
-        { name: '命中数', type: 'bar', barWidth: '50%', itemStyle: { color: '#8aa6d8' }, data: rows.map(item => item.count) },
+        {
+          name: '命中数',
+          type: 'bar',
+          barWidth: '50%',
+          data: rows.map(item => ({
+            value: item.count,
+            itemStyle: { color: industry === item.industry ? '#2f6fdb' : '#8aa6d8' },
+          })),
+        },
         {
           name: '平均涨幅',
           type: 'line',
@@ -133,7 +145,12 @@ const MarketAlerts = () => {
         },
       ],
     };
-  }, [summary]);
+  }, [summary, industry]);
+
+  const visibleRows = useMemo(
+    () => (data?.rows || []).filter(row => !industry || row.industry === industry),
+    [data, industry],
+  );
 
   const columns = useMemo(() => [
     { title: '命中时间', dataIndex: 'hit_time', width: 86, sorter: (a, b) => (a.hit_time || '').localeCompare(b.hit_time || '') },
@@ -141,10 +158,28 @@ const MarketAlerts = () => {
       title: '名称',
       dataIndex: 'name',
       width: 110,
-      render: (value, record) => <StockDetailLink symbol={record.ts_code}>{value || record.code}</StockDetailLink>,
+      render: (value, record) => (
+        <Space size={4}>
+          <Text className="alert-name-link" onClick={() => setKlineStock(record)}>{value || record.code}</Text>
+          <StockDetailLink symbol={record.ts_code} className="alert-name-external">↗</StockDetailLink>
+        </Space>
+      ),
     },
     { title: '代码', dataIndex: 'code', width: 90, render: value => <Text type="secondary">{value}</Text> },
-    { title: '行业', dataIndex: 'industry', width: 100, ellipsis: true },
+    {
+      title: '行业',
+      dataIndex: 'industry',
+      width: 100,
+      ellipsis: true,
+      render: value => (
+        <Text
+          className="alert-industry-link"
+          onClick={() => setIndustry(prev => (prev === value ? null : value))}
+        >
+          {value || '-'}
+        </Text>
+      ),
+    },
     {
       title: '标签',
       dataIndex: 'label',
@@ -268,17 +303,54 @@ const MarketAlerts = () => {
               </Col>
               <Col xs={24} xl={8}>
                 <Card size="small" title="行业分布" extra={<Text type="secondary">柱=命中数 · 线=平均涨幅</Text>}>
-                  {industryOption ? <ReactECharts option={industryOption} style={{ height: 240 }} notMerge lazyUpdate /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                  {industryOption ? (
+                    <ReactECharts
+                      option={industryOption}
+                      style={{ height: 240 }}
+                      notMerge
+                      lazyUpdate
+                      onEvents={{
+                        click: params => setIndustry(prev => (prev === params.name ? null : params.name)),
+                      }}
+                    />
+                  ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
                 </Card>
               </Col>
             </Row>
 
-            <Card size="small" className="market-alerts__table" title={`命中列表（${data.rows.length} 只）`}>
+            {klineStock && (
+              <Card
+                size="small"
+                className="market-alerts__kline"
+                title={(
+                  <Space size={8}>
+                    <span>{klineStock.name} {klineStock.code}</span>
+                    <Tag color={LABEL_META[klineStock.label]?.color}>{klineStock.label}</Tag>
+                    <Text type="secondary">命中 {klineStock.hit_time} · {fmtPct(klineStock.pct)} · 命中后 {fmtPct(klineStock.cum_pct)}</Text>
+                  </Space>
+                )}
+                extra={<Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setKlineStock(null)} />}
+              >
+                <StockKlineChart symbol={klineStock.ts_code} height={420} />
+              </Card>
+            )}
+
+            <Card
+              size="small"
+              className="market-alerts__table"
+              title={`命中列表（${visibleRows.length}${industry ? ` / ${data.rows.length}` : ''} 只）`}
+              extra={industry ? (
+                <Space size={6}>
+                  <Tag closable color="blue" onClose={() => setIndustry(null)}>{industry}</Tag>
+                  <Text type="secondary">点击行业或柱子取消筛选</Text>
+                </Space>
+              ) : <Text type="secondary">点击名称看K线 · 点击行业筛选</Text>}
+            >
               <Table
                 size="small"
                 rowKey="ts_code"
                 columns={columns}
-                dataSource={data.rows}
+                dataSource={visibleRows}
                 pagination={{ pageSize: 50, showSizeChanger: true }}
                 scroll={{ x: 1100, y: 480 }}
               />

@@ -187,6 +187,26 @@
   line-height: 1.6;
 }
 
+.market-alerts .alert-name-link,
+.market-alerts .alert-industry-link {
+  color: #2f6fdb;
+  cursor: pointer;
+}
+
+.market-alerts .alert-name-link:hover,
+.market-alerts .alert-industry-link:hover {
+  text-decoration: underline;
+}
+
+.market-alerts .alert-name-external {
+  color: #98a5b8;
+  font-size: 11px;
+}
+
+.market-alerts__kline {
+  margin-top: 12px;
+}
+
 .market-alerts__table {
   margin-top: 12px;
 }
