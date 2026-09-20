@@ -259,6 +259,13 @@
   font-size: 12px;
 }
 
+/* 完整列模式下表头会换行，压一下行高避免把表撑高 */
+.market-industry .ant-table-thead > tr > th {
+  padding: 4px 6px !important;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* 前3标签：三段色块顶格，涨停那天在色块里写连板数 */
 .trend-tri {
   display: inline-flex;
