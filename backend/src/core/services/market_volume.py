@@ -23,6 +23,7 @@ SZ_TS_CODE = "399106.SZ"
 MAX_TRADE_DAYS = 6  # 5 个可选目标日 + 最早一天作为前收基准
 HISTORY_LOOKBACK_CALENDAR_DAYS = 12
 MARKET_CLOSE_MINUTE = "15:00"
+ESTIMATE_LOOKBACK_DAYS = 5
 CACHE_TTL_SECONDS = 20
 YI = 1e8
 # 对比日该分钟成交额低于此值（如尾盘集合竞价 14:57~14:59）时不算偏离，避免极小分母放大成几千%
@@ -164,6 +165,27 @@ def build_volume_compare(
             "sz_pct": None if sz_pct is None else round(sz_pct, 3),
         })
 
+    # 盘中预估全天成交额：已累计 + 过去 5 个交易日「同一时刻之后剩余时段」成交额的平均
+    estimate_days: List[str] = []
+    estimated_total: Optional[float] = None
+    if last_time and last_time < MARKET_CLOSE_MINUTE:
+        remainders: List[float] = []
+        for date in reversed(dates[:target_index]):
+            minutes = {minute: amount for minute, _, amount in sh.get(date, [])}
+            sz_minutes = {minute: amount for minute, _, amount in sz.get(date, [])}
+            rest = sum(
+                amount + sz_minutes[minute]
+                for minute, amount in minutes.items()
+                if minute > last_time and minute in sz_minutes
+            )
+            if rest > 0:
+                remainders.append(rest)
+                estimate_days.append(date)
+            if len(remainders) >= ESTIMATE_LOOKBACK_DAYS:
+                break
+        if remainders:
+            estimated_total = target_cum + sum(remainders) / len(remainders)
+
     diff = target_cum - compare_same_time_cum
     return {
         "source": "tushare idx_mins / rt_idx_min_daily（上证指数 + 深证综指成交额）",
@@ -178,6 +200,8 @@ def build_volume_compare(
         "compare_full_total": _yi(compare_cum),
         "diff": _yi(diff),
         "diff_pct": round(diff / compare_same_time_cum * 100, 2) if compare_same_time_cum else None,
+        "estimated_total": _yi(estimated_total),
+        "estimate_days": sorted(estimate_days),
         "points": points,
     }
 

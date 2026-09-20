@@ -2,8 +2,9 @@
 
 口径：
 - 指数概览：tushare rt_idx_k 取现价/昨收，rt_idx_min_daily 取当日分钟收盘算分时涨跌曲线（迷你图）。
-- 涨跌分布：DuckDB 分析库 a_stock_market_daily 最新交易日，按 pct_chg 分档；
-  涨停/跌停用同步好的 limit_status（2/3 涨停、5/6 跌停）单列，不重复计入相邻档。
+- 涨跌分布：盘中用 tushare rt_k 通配符一次拉回全市场实时日K，
+  涨停/跌停按当日 stk_limit 的涨停价/跌停价判定；非交易日、或已收盘且分析库已同步当日快照时，
+  改读 DuckDB a_stock_market_daily（涨停/跌停用同步好的 limit_status：2/3 涨停、5/6 跌停）。
 - 每日成交额：tushare index_daily 的 000001.SH + 399106.SZ 成交额（千元）相加；
   深市必须用深证综指 399106，深证成指 399001 只统计 500 只成分股。
 """
@@ -11,13 +12,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from .duckdb_analytics import connect_analytics_db, safe_float
-from .market_volume import SH_TS_CODE, SZ_TS_CODE, YI
+from .market_volume import SH_TS_CODE, SZ_TS_CODE, YI, fetch_intraday_volume_compare
 from .tushare import TushareService
 
 
@@ -42,10 +43,15 @@ DIST_BUCKETS: Tuple[Tuple[str, Optional[float], Optional[float]], ...] = (
 LIMIT_UP_STATUS = (2, 3)
 LIMIT_DOWN_STATUS = (5, 6)
 
+MARKET_CLOSE_TIME = dtime(15, 0)
+MARKET_OPEN_TIME = dtime(9, 25)
+PRICE_EPSILON = 1e-4
+
 DAILY_AMOUNT_MAX_DAYS = 250
 INDEX_CACHE_TTL_SECONDS = 30
-DIST_CACHE_TTL_SECONDS = 300
-DAILY_CACHE_TTL_SECONDS = 300
+DIST_SNAPSHOT_CACHE_TTL_SECONDS = 300
+DIST_REALTIME_CACHE_TTL_SECONDS = 60
+DAILY_CACHE_TTL_SECONDS = 60
 # index_daily 的 amount 单位是千元
 INDEX_DAILY_AMOUNT_TO_YI = 1e3 / YI
 
@@ -156,6 +162,7 @@ def build_distribution(rows: List[Tuple[Any, ...]], trade_date: Any) -> Dict[str
     """rows: (pct_chg, limit_status) 序列 → 分档计数。"""
     names = ["涨停"] + [name for name, _, _ in DIST_BUCKETS] + ["跌停"]
     counts = [0] * len(names)
+    flat = 0
     for pct_chg, limit_status in rows:
         status = int(limit_status) if limit_status is not None else None
         if status in LIMIT_UP_STATUS:
@@ -167,13 +174,15 @@ def build_distribution(rows: List[Tuple[Any, ...]], trade_date: Any) -> Dict[str
         value = safe_float(pct_chg)
         if value is None:
             continue
+        if value == 0:
+            flat += 1   # 平盘仍按 kpan 口径落在 0~-3% 档里，只是不计入涨跌家数
         for index, (_, low, high) in enumerate(DIST_BUCKETS, start=1):
             if (low is None or value > low) and (high is None or value <= high):
                 counts[index] += 1
                 break
     total = sum(counts)
     up = counts[0] + sum(counts[1:4])
-    down = counts[-1] + sum(counts[4:-1])
+    down = counts[-1] + sum(counts[4:-1]) - flat
     return {
         "date": trade_date.isoformat() if hasattr(trade_date, "isoformat") else str(trade_date or ""),
         "names": names,
@@ -181,38 +190,152 @@ def build_distribution(rows: List[Tuple[Any, ...]], trade_date: Any) -> Dict[str
         "total": total,
         "up_count": up,
         "down_count": down,
+        "flat_count": flat,
         "limit_up": counts[0],
         "limit_down": counts[-1],
     }
 
 
-def _load_distribution() -> Dict[str, Any]:
-    connection = connect_analytics_db()
+def market_session(now: Optional[datetime] = None, is_trade_day: bool = True) -> Dict[str, Any]:
+    """当前处于交易日的哪个阶段：盘前 / 盘中 / 已收盘。"""
+    now = now or datetime.now()
+    current = now.time()
+    return {
+        "is_trade_day": bool(is_trade_day),
+        "is_pre_open": bool(is_trade_day and current < MARKET_OPEN_TIME),
+        "is_closed": bool(not is_trade_day or current >= MARKET_CLOSE_TIME),
+    }
+
+
+def _is_trade_day(service: Any, day: date) -> bool:
+    """当天是否交易日（trade_cal 一天只查一次）。"""
+    def _query() -> bool:
+        frame = service.get_trade_calendar_frame(day, day)
+        if frame is None or frame.empty:
+            return day.weekday() < 5   # 日历取不到时退化成按工作日判断
+        column = "is_open" if "is_open" in frame.columns else frame.columns[-1]
+        return bool(int(frame.iloc[0][column]) == 1)
+
+    return _cached(f"trade_day:{day.isoformat()}", 12 * 3600, _query)
+
+
+def build_realtime_distribution(
+    quotes: Optional[pd.DataFrame],
+    limits: Dict[str, Tuple[Optional[float], Optional[float]]],
+    trade_date: date,
+) -> Dict[str, Any]:
+    """rt_k 实时行情 → 分档计数；涨停/跌停以 stk_limit 的涨跌停价判定。"""
+    if quotes is None or quotes.empty:
+        raise MarketOverviewDataError("tushare rt_k 未返回实时行情")
+    rows: List[Tuple[Any, Any]] = []
+    for quote in quotes.itertuples(index=False):
+        close = safe_float(getattr(quote, "close", None))
+        pre_close = safe_float(getattr(quote, "pre_close", None))
+        if not close or not pre_close:
+            continue
+        up_limit, down_limit = limits.get(str(quote.ts_code).strip().upper(), (None, None))
+        if up_limit and close >= up_limit - PRICE_EPSILON:
+            rows.append((None, LIMIT_UP_STATUS[0]))
+            continue
+        if down_limit and close <= down_limit + PRICE_EPSILON:
+            rows.append((None, LIMIT_DOWN_STATUS[0]))
+            continue
+        rows.append(((close / pre_close - 1) * 100, None))
+    result = build_distribution(rows, trade_date)
+    result["mode"] = "realtime"
+    return result
+
+
+def _load_realtime_distribution(service: Any, today: date) -> Dict[str, Any]:
+    quotes = service.get_a_stock_realtime_market_frame()
+    if quotes is None or quotes.empty:
+        raise MarketOverviewDataError("tushare rt_k 未返回实时行情")
+    if "trade_time" in quotes.columns:
+        quotes = quotes[pd.to_datetime(quotes["trade_time"], errors="coerce").dt.date == today]
+    if quotes.empty:
+        raise MarketOverviewDataError("tushare rt_k 返回的不是当日行情")
+
+    limits: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
     try:
-        latest = connection.execute(
-            "SELECT max(trade_date) FROM a_stock_market_daily"
-        ).fetchone()
-        trade_date = latest[0] if latest else None
-        if trade_date is None:
-            raise MarketOverviewDataError("分析库没有全市场日线数据")
-        rows = connection.execute(
-            "SELECT pct_chg, limit_status FROM a_stock_market_daily WHERE trade_date = ?",
-            [trade_date],
-        ).fetchall()
+        limit_frame = service.get_a_stock_stk_limit_frame(today)
+        if limit_frame is not None and not limit_frame.empty:
+            limits = {
+                str(row.ts_code).strip().upper(): (safe_float(row.up_limit), safe_float(row.down_limit))
+                for row in limit_frame.itertuples(index=False)
+            }
+    except Exception as exc:  # noqa: BLE001  涨跌停价拿不到时只是少了涨停/跌停两档
+        logger.warning("tushare stk_limit 获取 %s 失败: %s", today, exc)
+
+    result = build_realtime_distribution(quotes, limits, today)
+    if not limits:
+        result["warning"] = "涨跌停价(stk_limit)获取失败，涨停/跌停档暂缺"
+    return result
+
+
+def _load_snapshot_distribution(connection) -> Dict[str, Any]:
+    latest = connection.execute("SELECT max(trade_date) FROM a_stock_market_daily").fetchone()
+    trade_date = latest[0] if latest else None
+    if trade_date is None:
+        raise MarketOverviewDataError("分析库没有全市场日线数据")
+    rows = connection.execute(
+        "SELECT pct_chg, limit_status FROM a_stock_market_daily WHERE trade_date = ?",
+        [trade_date],
+    ).fetchall()
+    result = build_distribution(rows, trade_date)
+    result["mode"] = "snapshot"
+    return result
+
+
+def _snapshot_date(connection) -> Optional[date]:
+    latest = connection.execute("SELECT max(trade_date) FROM a_stock_market_daily").fetchone()
+    value = latest[0] if latest else None
+    return value if isinstance(value, date) else None
+
+
+def _load_distribution(now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or datetime.now()
+    today = now.date()
+    service = TushareService.get_instance()
+    session = market_session(now, _is_trade_day(service, today))
+
+    try:
+        connection = connect_analytics_db()
+    except Exception as exc:  # noqa: BLE001
+        raise MarketOverviewDataError(f"分析库不可读: {exc}") from exc
+    try:
+        snapshot_date = _snapshot_date(connection)
+        # 非交易日，或已收盘且当日快照已同步 → 直接读快照；其余情况（盘中、收盘后还没同步）走实时
+        use_snapshot = (
+            not session["is_trade_day"]
+            or session["is_pre_open"]
+            or (session["is_closed"] and snapshot_date == today)
+        )
+        if use_snapshot:
+            result = _load_snapshot_distribution(connection)
+        else:
+            try:
+                result = _load_realtime_distribution(service, today)
+            except Exception as exc:  # noqa: BLE001  实时失败时退回快照，页面不至于空着
+                logger.warning("实时涨跌分布获取失败，回退快照: %s", exc)
+                result = _load_snapshot_distribution(connection)
+                result["warning"] = f"实时行情获取失败，显示 {result['date']} 快照: {exc}"
     except MarketOverviewDataError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise MarketOverviewDataError(f"读取全市场日线失败: {exc}") from exc
+        raise MarketOverviewDataError(f"读取涨跌分布失败: {exc}") from exc
     finally:
         connection.close()
 
-    result = build_distribution(rows, trade_date)
-    result["fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result["session"] = session
+    result["fetched_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
     return result
 
 
 def fetch_breadth_distribution() -> Dict[str, Any]:
-    return _cached("distribution", DIST_CACHE_TTL_SECONDS, _load_distribution)
+    now = datetime.now()
+    intraday = market_session(now, True)["is_closed"] is False
+    ttl = DIST_REALTIME_CACHE_TTL_SECONDS if intraday else DIST_SNAPSHOT_CACHE_TTL_SECONDS
+    return _cached("distribution", ttl, lambda: _load_distribution(now))
 
 
 def build_daily_amount(
@@ -254,6 +377,32 @@ def build_daily_amount(
     }
 
 
+def append_today_estimate(result: Dict[str, Any], intraday: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """index_daily 还没有当日数据时，用分时累计 + 预估补一根当日柱。"""
+    if not intraday:
+        return result
+    target_date = intraday.get("target_date")
+    if not target_date or target_date in result["dates"]:
+        return result
+    actual = intraday.get("target_total")
+    if actual is None:
+        return result
+    estimated = intraday.get("estimated_total")
+    value = estimated if estimated is not None else actual
+    result["dates"] = result["dates"] + [target_date]
+    result["amounts"] = result["amounts"] + [round(value, 1)]
+    result["up"] = result["up"] + [1 if (intraday.get("diff") or 0) >= 0 else 0]
+    result["today"] = {
+        "date": target_date,
+        "actual": actual,
+        "estimated": estimated,
+        "is_estimated": estimated is not None,
+        "estimate_days": intraday.get("estimate_days") or [],
+        "last_time": intraday.get("last_time"),
+    }
+    return result
+
+
 def _load_daily_amount(days: int, today: Optional[date] = None) -> Dict[str, Any]:
     service = TushareService.get_instance()
     today = today or date.today()
@@ -272,6 +421,10 @@ def _load_daily_amount(days: int, today: Optional[date] = None) -> Dict[str, Any
             raise MarketOverviewDataError(f"tushare index_daily 获取 {ts_code} 失败: {exc}") from exc
 
     result = build_daily_amount(frames.get(SH_TS_CODE), frames.get(SZ_TS_CODE), days)
+    try:
+        result = append_today_estimate(result, fetch_intraday_volume_compare())
+    except Exception as exc:  # noqa: BLE001  当日预估失败时只显示已同步的历史柱
+        logger.warning("当日成交额预估失败: %s", exc)
     result["fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return result
 

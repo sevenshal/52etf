@@ -330,7 +330,11 @@ const IndexStrip = ({ amountData }) => {
           )}
         </div>
         <div className="market-tile__sub">
-          {amountData ? `${amountData.compare_date} 同期 ${fmtYi(prevCum)}` : '加载中…'}
+          {amountData
+            ? (amountData.estimated_total
+              ? `预估全天 ${fmtYi(amountData.estimated_total)} · ${amountData.compare_date} 同期 ${fmtYi(prevCum)}`
+              : `${amountData.compare_date} 同期 ${fmtYi(prevCum)}`)
+            : '加载中…'}
         </div>
       </div>
       {items.map(item => (
@@ -356,11 +360,17 @@ const DistributionCard = () => {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const load = useCallback(() => {
     request.get('/api/market/breadth-distribution')
-      .then(response => setData(response.data))
+      .then(response => { setData(response.data); setError(''); })
       .catch(err => setError(formatErrorMessage(err, '加载涨跌分布失败')));
   }, []);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const option = useMemo(() => {
     if (!data) return null;
@@ -389,12 +399,18 @@ const DistributionCard = () => {
       size="small"
       title="大盘涨跌分布"
       extra={(
-        <Text type="secondary">
-          {data ? `${data.date} · 共 ${data.total} 只 · 涨 ${data.up_count} / 跌 ${data.down_count}` : '全A按当日涨跌幅分档'}
-        </Text>
+        <Space size={6}>
+          {data && <Tag color={data.mode === 'realtime' ? 'processing' : 'default'}>{data.mode === 'realtime' ? '实时' : '收盘快照'}</Tag>}
+          <Text type="secondary">
+            {data
+              ? `${data.date} · 共 ${data.total} 只 · 涨 ${data.up_count} / 跌 ${data.down_count} / 平 ${data.flat_count}`
+              : '全A按当日涨跌幅分档'}
+          </Text>
+        </Space>
       )}
     >
       {error && <Alert type="warning" showIcon message={error} />}
+      {data?.warning && <Alert type="warning" showIcon message={data.warning} />}
       {option ? <ReactECharts option={option} style={{ height: 220 }} notMerge lazyUpdate /> : !error && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
     </Card>
   );
@@ -422,7 +438,16 @@ const DailyAmountCard = ({ todayAmount }) => {
       animation: false,
       grid: { left: 64, right: 24, top: 30, bottom: 52 },
       legend: { top: 0, data: ['成交额', '区间均值'] },
-      tooltip: { trigger: 'axis', valueFormatter: value => fmtYi(value) },
+      tooltip: {
+        trigger: 'axis',
+        formatter: params => params.map(item => {
+          const isToday = data.today && item.dataIndex === data.amounts.length - 1;
+          const suffix = isToday && data.today.is_estimated
+            ? `（已成交 ${fmtYi(data.today.actual)}，按前 ${data.today.estimate_days.length} 日同时段补足预估）`
+            : '';
+          return `${item.axisValue} ${item.seriesName} ${fmtYi(item.value)}${suffix}`;
+        }).join('<br>'),
+      },
       dataZoom: [{ type: 'inside' }, { type: 'slider', height: 14, bottom: 8 }],
       xAxis: { type: 'category', data: data.dates, axisLabel: { interval: Math.floor(data.dates.length / 8) } },
       yAxis: { type: 'value', name: '亿元', splitLine: { lineStyle: { color: '#eef1f6' } } },
@@ -430,11 +455,16 @@ const DailyAmountCard = ({ todayAmount }) => {
         {
           name: '成交额',
           type: 'bar',
-          data: (data.amounts || []).map((value, index) => ({
-            value,
-            itemStyle: { color: data.up[index] ? UP_COLOR : DOWN_COLOR },
-          })),
-          markLine: todayAmount ? {
+          data: (data.amounts || []).map((value, index) => {
+            const isToday = data.today && index === data.amounts.length - 1;
+            return {
+              value,
+              itemStyle: isToday && data.today.is_estimated
+                ? { color: '#1f6fd1', opacity: 0.55, borderColor: '#1f6fd1', borderType: 'dashed', borderWidth: 1 }
+                : { color: data.up[index] ? UP_COLOR : DOWN_COLOR },
+            };
+          }),
+          markLine: todayAmount && !data.today ? {
             symbol: 'none',
             silent: true,
             lineStyle: { color: '#1f6fd1', width: 1.4 },
@@ -461,6 +491,9 @@ const DailyAmountCard = ({ todayAmount }) => {
       extra={(
         <Space size={8} wrap>
           <Text type="secondary">沪+深 · 亿元 · 均值 {data ? fmtYi(data.avg) : '--'}</Text>
+          {data?.today?.is_estimated && (
+            <Tag color="blue">{data.today.date} 预估 {fmtYi(data.today.estimated)}（{data.today.last_time} 已成交 {fmtYi(data.today.actual)}）</Tag>
+          )}
           <Radio.Group
             size="small"
             value={days}
