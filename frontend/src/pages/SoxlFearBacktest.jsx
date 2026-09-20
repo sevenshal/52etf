@@ -490,10 +490,12 @@ const SoxlFearBacktest = () => {
     };
 
     // history state 会被浏览器 structuredClone，dayjs 实例会丢失原型方法（isValid 报错），
-    // 这里统一把日期字符串/对象转成 dayjs
+    // 这里统一把日期字符串/对象转成 dayjs；转不出有效日期就退回默认区间，避免整页白屏
     const rawRange = mergedValues.date_range || [];
-    mergedValues.date_range = rawRange.map(value => (dayjs.isDayjs(value) ? value : dayjs(value)));
-    if (!mergedValues.date_range.length) {
+    mergedValues.date_range = rawRange
+      .map(value => (dayjs.isDayjs(value) ? value : dayjs(value)))
+      .filter(value => dayjs.isDayjs(value) && value.isValid());
+    if (mergedValues.date_range.length !== 2) {
       mergedValues.date_range = [dayjs('2021-01-01'), dayjs()];
     }
 
