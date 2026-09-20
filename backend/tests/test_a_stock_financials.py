@@ -135,3 +135,64 @@ def test_a_restated_period_keeps_only_the_latest_announcement(tmp_path, monkeypa
 def test_unknown_symbol_and_blank_input_are_handled(db):
     assert financials.load_a_stock_financials("000001.SZ")["periods"] == []
     assert financials.load_a_stock_financials("")["periods"] == []
+
+
+# --------------------------------------------------------------------------
+# 扣非 ROE(TTM)
+# --------------------------------------------------------------------------
+def _period(end_date, *, annual, profit_dedt, equity=28_944_631_725.69, label=None):
+    return {
+        "end_date": end_date,
+        "is_annual": annual,
+        "period_label": label or end_date,
+        "indicator": {"profit_dedt": profit_dedt},
+        "balancesheet": {"total_hldr_eqy_exc_min_int": equity},
+    }
+
+
+def test_interim_period_rolls_the_cumulative_deducted_profit():
+    """2026中报：TTM = 上半年累计 + 2025年报 − 2025上半年累计。"""
+    periods = [
+        _period("2026-06-30", annual=False, profit_dedt=808_334_196.16, label="2026中报"),
+        _period("2025-12-31", annual=True, profit_dedt=1_500_000_000.0),
+        _period("2025-06-30", annual=False, profit_dedt=437_566_350.45),
+    ]
+    result = financials.compute_ttm_deducted_roe(periods)
+
+    expected = 808_334_196.16 + 1_500_000_000.0 - 437_566_350.45
+    assert result["profit_dedt_ttm"] == pytest.approx(expected)
+    assert result["roe_dt_ttm_pct"] == pytest.approx(expected / 28_944_631_725.69 * 100, abs=0.01)
+    assert result["basis"] == "rolling"
+    assert result["period_label"] == "2026中报"
+    # 半年利润直接当成一年会高估
+    assert result["profit_dedt_ttm"] != pytest.approx(808_334_196.16 * 2)
+
+
+def test_annual_period_is_already_twelve_months():
+    result = financials.compute_ttm_deducted_roe(
+        [_period("2025-12-31", annual=True, profit_dedt=1_500_000_000.0, label="2025年报")]
+    )
+
+    assert result["profit_dedt_ttm"] == pytest.approx(1_500_000_000.0)
+    assert result["basis"] == "annual"
+
+
+def test_missing_prior_periods_give_nothing_rather_than_half_a_year():
+    periods = [_period("2026-06-30", annual=False, profit_dedt=808_334_196.16, label="2026中报")]
+    result = financials.compute_ttm_deducted_roe(periods)
+
+    assert result["profit_dedt_ttm"] is None
+    assert result["roe_dt_ttm_pct"] is None
+    assert result["basis"] is None
+
+
+def test_non_positive_or_missing_equity_keeps_the_profit_but_not_the_ratio():
+    periods = [_period("2025-12-31", annual=True, profit_dedt=1_500_000_000.0, equity=0.0)]
+    result = financials.compute_ttm_deducted_roe(periods)
+
+    assert result["profit_dedt_ttm"] == pytest.approx(1_500_000_000.0)
+    assert result["roe_dt_ttm_pct"] is None
+
+
+def test_no_periods_at_all():
+    assert financials.compute_ttm_deducted_roe([])["roe_dt_ttm_pct"] is None
