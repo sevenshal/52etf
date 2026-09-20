@@ -431,6 +431,30 @@ class MarketSignalSnapshot(Base):
     payload = Column(JSON, nullable=False)
     computed_at = Column(DateTime, default=datetime.now, nullable=False)
 
+class MarketAlertHit(Base):
+    """提示看板：盘中扫描命中的个股，每只每个交易日只记首次命中。"""
+    __tablename__ = "market_alert_hits"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    hit_time = Column(String(8), nullable=False)      # 命中时刻 HH:MM
+    name = Column(String(64))
+    industry = Column(String(64))
+    label = Column(String(8), nullable=False)         # 强势 / 活跃 / 观望 / 规避
+    score = Column(Float)                             # 0~100 综合分，用于同档内排序
+    price = Column(Float)                             # 命中价
+    pct = Column(Float)                               # 命中时当日涨幅
+    amount_yi = Column(Float)                         # 命中时累计成交额（亿）
+    volume_ratio = Column(Float)                      # 同时段量比
+    speed5 = Column(Float)                            # 5 分钟涨速
+    td_up = Column(Integer)                           # 九转高计数
+    td_down = Column(Integer)                         # 九转低计数
+    days_since_low9 = Column(Integer)                 # 距上次低9的交易日数（只记录，不参与判定）
+    last_price = Column(Float)                        # 最新价，盘中每轮刷新
+    cum_pct = Column(Float)                           # 命中后涨幅 = 最新价 / 命中价 - 1
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class AStockFearGreedIntraday(Base):
     """A股盘中贪恐快照（12:00 等盘中时点），独立于日频最终历史库 etf_fear_greed_clone_history。"""
     __tablename__ = "a_stock_fear_greed_intraday"

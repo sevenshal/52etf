@@ -1,0 +1,300 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import ReactECharts from 'echarts-for-react';
+import request from '../utils/request';
+import StockDetailLink from '../components/StockDetailLink';
+import './Market.css';
+
+const { Text } = Typography;
+
+const AUTO_REFRESH_MS = 60 * 1000;
+const UP_COLOR = '#e5484d';
+const DOWN_COLOR = '#2f9e63';
+
+const LABEL_META = {
+  强势: { color: 'red', desc: '九转高计数 3~4 且同时段量比 ≥2' },
+  活跃: { color: 'volcano', desc: '九转高计数 ≥2 · 上涨 · 成交额 ≥0.8亿 · 量比 ≥1.5' },
+  观望: { color: 'green', desc: '九转低计数 ≥2 或急跌结构' },
+  规避: { color: 'success', desc: '九转低计数 ≥4 且当日下跌' },
+};
+const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
+
+const formatErrorMessage = (error, fallback) => {
+  const detail = error?.response?.data?.detail || error?.message;
+  return typeof detail === 'string' && detail ? detail : fallback;
+};
+
+const fmtPct = value => (value === null || value === undefined ? '-' : `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(2)}%`);
+const pctClass = value => (value > 0 ? 'is-up' : value < 0 ? 'is-down' : '');
+
+const signedBars = values => values.map(value => (
+  value === null || value === undefined
+    ? null
+    : { value, itemStyle: { color: value >= 0 ? UP_COLOR : DOWN_COLOR, opacity: 0.8 } }
+));
+
+const MarketAlerts = () => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [tradeDate, setTradeDate] = useState(null);
+  const [label, setLabel] = useState('');
+
+  const load = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
+    try {
+      const params = {};
+      if (tradeDate) params.date = tradeDate;
+      if (label) params.label = label;
+      const response = await request.get('/api/market/alerts', { params });
+      setData(response.data);
+      setError('');
+    } catch (err) {
+      setError(formatErrorMessage(err, '加载提示看板失败'));
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [tradeDate, label]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(() => load({ silent: true }), AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const summary = data?.summary;
+
+  const distributionOption = useMemo(() => {
+    if (!summary?.return_distribution?.length) return null;
+    return {
+      animation: false,
+      grid: { left: 8, right: 8, top: 24, bottom: 24, containLabel: true },
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: summary.return_distribution.map(item => item.label), axisLabel: { fontSize: 11 } },
+      yAxis: { type: 'value', splitLine: { lineStyle: { color: '#f0f0f0' } } },
+      series: [{
+        type: 'bar',
+        barCategoryGap: '30%',
+        label: { show: true, position: 'top', fontSize: 11 },
+        data: summary.return_distribution.map((item, index) => ({
+          value: item.count,
+          itemStyle: { color: ['#b01818', '#e23a3a', '#f2a3a3', '#a9ddb5', '#0a8f3c'][index] },
+        })),
+      }],
+    };
+  }, [summary]);
+
+  const timeOption = useMemo(() => {
+    if (!summary?.time_buckets?.length) return null;
+    return {
+      animation: false,
+      grid: { left: 8, right: 8, top: 24, bottom: 40, containLabel: true },
+      tooltip: {
+        trigger: 'axis',
+        formatter: params => {
+          const bucket = summary.time_buckets[params[0].dataIndex];
+          return bucket.count
+            ? `${bucket.label}<br/>命中 ${bucket.count} 只 · 平均 ${fmtPct(bucket.avg)}`
+            : `${bucket.label}<br/>无命中`;
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: summary.time_buckets.map(item => item.label),
+        axisLabel: { fontSize: 10, rotate: 35, interval: 0 },
+      },
+      yAxis: { type: 'value', axisLabel: { formatter: value => `${value}%` }, splitLine: { lineStyle: { color: '#f0f0f0' } } },
+      series: [{ type: 'bar', barWidth: '55%', data: signedBars(summary.time_buckets.map(item => item.avg)) }],
+    };
+  }, [summary]);
+
+  const industryOption = useMemo(() => {
+    if (!summary?.industries?.length) return null;
+    const rows = summary.industries.slice(0, 12);
+    return {
+      animation: false,
+      grid: { left: 8, right: 40, top: 24, bottom: 40, containLabel: true },
+      tooltip: { trigger: 'axis' },
+      legend: { top: 0, data: ['命中数', '平均涨幅'] },
+      xAxis: { type: 'category', data: rows.map(item => item.industry), axisLabel: { fontSize: 10, rotate: 35, interval: 0 } },
+      yAxis: [
+        { type: 'value', splitLine: { lineStyle: { color: '#f0f0f0' } } },
+        { type: 'value', axisLabel: { formatter: value => `${value}%` }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: '命中数', type: 'bar', barWidth: '50%', itemStyle: { color: '#8aa6d8' }, data: rows.map(item => item.count) },
+        {
+          name: '平均涨幅',
+          type: 'line',
+          yAxisIndex: 1,
+          showSymbol: true,
+          itemStyle: { color: '#e58a1a' },
+          data: rows.map(item => item.avg),
+        },
+      ],
+    };
+  }, [summary]);
+
+  const columns = useMemo(() => [
+    { title: '命中时间', dataIndex: 'hit_time', width: 86, sorter: (a, b) => (a.hit_time || '').localeCompare(b.hit_time || '') },
+    {
+      title: '名称',
+      dataIndex: 'name',
+      width: 110,
+      render: (value, record) => <StockDetailLink symbol={record.ts_code}>{value || record.code}</StockDetailLink>,
+    },
+    { title: '代码', dataIndex: 'code', width: 90, render: value => <Text type="secondary">{value}</Text> },
+    { title: '行业', dataIndex: 'industry', width: 100, ellipsis: true },
+    {
+      title: '标签',
+      dataIndex: 'label',
+      width: 80,
+      render: value => (
+        <Tooltip title={LABEL_META[value]?.desc}>
+          <Tag color={LABEL_META[value]?.color}>{value}</Tag>
+        </Tooltip>
+      ),
+      sorter: (a, b) => LABEL_ORDER.indexOf(a.label) - LABEL_ORDER.indexOf(b.label),
+    },
+    { title: '综合分', dataIndex: 'score', width: 84, align: 'right', sorter: (a, b) => (a.score || 0) - (b.score || 0) },
+    {
+      title: '命中涨幅',
+      dataIndex: 'pct',
+      width: 92,
+      align: 'right',
+      sorter: (a, b) => (a.pct || 0) - (b.pct || 0),
+      render: value => <Text className={pctClass(value)}>{fmtPct(value)}</Text>,
+    },
+    { title: '量比', dataIndex: 'volume_ratio', width: 76, align: 'right', sorter: (a, b) => (a.volume_ratio || 0) - (b.volume_ratio || 0) },
+    { title: '成交额(亿)', dataIndex: 'amount_yi', width: 100, align: 'right', sorter: (a, b) => (a.amount_yi || 0) - (b.amount_yi || 0) },
+    {
+      title: '九转',
+      key: 'td',
+      width: 76,
+      align: 'right',
+      render: (_, record) => (record.td_up ? `高${record.td_up}` : record.td_down ? `低${record.td_down}` : '-'),
+    },
+    { title: '命中价', dataIndex: 'price', width: 84, align: 'right' },
+    { title: '现价', dataIndex: 'last_price', width: 84, align: 'right' },
+    {
+      title: '命中后涨幅',
+      dataIndex: 'cum_pct',
+      width: 106,
+      align: 'right',
+      defaultSortOrder: 'descend',
+      sorter: (a, b) => (a.cum_pct || 0) - (b.cum_pct || 0),
+      render: value => <Text className={pctClass(value)}>{fmtPct(value)}</Text>,
+    },
+  ], []);
+
+  return (
+    <div className="market-alerts">
+      <div className="market-toolbar">
+        <Space wrap>
+          <Text type="secondary">交易日</Text>
+          <Select
+            className="market-date-select"
+            value={data?.date || tradeDate}
+            options={(data?.dates || []).map(item => ({ value: item, label: item }))}
+            onChange={setTradeDate}
+            placeholder="最新交易日"
+          />
+          <Radio.Group
+            size="small"
+            value={label}
+            onChange={event => setLabel(event.target.value)}
+            optionType="button"
+            options={[{ label: '全部', value: '' }, ...LABEL_ORDER.map(item => ({ label: item, value: item }))]}
+          />
+        </Space>
+        {data?.thresholds && (
+          <Text type="secondary">
+            口径：九转高计数 ≥{data.thresholds.active_td_up_min} · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
+            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势 ≥{data.thresholds.strong_volume_ratio}）· 每只每日首次命中
+          </Text>
+        )}
+      </div>
+
+      {error && <Alert className="market-alert" type="warning" showIcon message={error} />}
+
+      <Spin spinning={loading && !data}>
+        {summary?.total ? (
+          <>
+            <Row gutter={[12, 12]} className="market-alerts__stats">
+              <Col xs={12} md={6} xl={4}><Card size="small"><Statistic title="命中总数" value={summary.total} suffix="只" /></Card></Col>
+              <Col xs={12} md={6} xl={4}>
+                <Card size="small">
+                  <Statistic title="平均命中后涨幅" value={summary.avg ?? 0} precision={2} suffix="%"
+                    valueStyle={{ color: summary.avg >= 0 ? UP_COLOR : DOWN_COLOR }} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6} xl={4}><Card size="small"><Statistic title="胜率" value={summary.win_rate ?? 0} precision={1} suffix="%" /></Card></Col>
+              <Col xs={12} md={6} xl={4}>
+                <Card size="small">
+                  <Statistic title="最强" value={summary.best?.name || '-'}
+                    suffix={summary.best ? fmtPct(summary.best.cum_pct) : ''} valueStyle={{ fontSize: 16 }} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Card size="small">
+                  <Statistic title="最弱" value={summary.worst?.name || '-'}
+                    suffix={summary.worst ? fmtPct(summary.worst.cum_pct) : ''} valueStyle={{ fontSize: 16 }} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6} xl={4}>
+                <Card size="small" className="market-alerts__labels">
+                  <div className="ant-statistic-title">各标签表现</div>
+                  {LABEL_ORDER.filter(item => summary.by_label?.[item]).map(item => (
+                    <div key={item} className="market-alerts__label-row">
+                      <Tag color={LABEL_META[item]?.color}>{item}</Tag>
+                      <span>{summary.by_label[item].count} 只</span>
+                      <span className={pctClass(summary.by_label[item].avg)}>{fmtPct(summary.by_label[item].avg)}</span>
+                    </div>
+                  ))}
+                </Card>
+              </Col>
+            </Row>
+
+            <Row gutter={[12, 12]}>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="命中后涨幅分布" extra={<Text type="secondary">{summary.scored} 条有后续</Text>}>
+                  {distributionOption ? <ReactECharts option={distributionOption} style={{ height: 240 }} notMerge lazyUpdate /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                </Card>
+              </Col>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="按命中时段的平均涨幅" extra={<Text type="secondary">看什么时候的提示值得跟</Text>}>
+                  {timeOption ? <ReactECharts option={timeOption} style={{ height: 240 }} notMerge lazyUpdate /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                </Card>
+              </Col>
+              <Col xs={24} xl={8}>
+                <Card size="small" title="行业分布" extra={<Text type="secondary">柱=命中数 · 线=平均涨幅</Text>}>
+                  {industryOption ? <ReactECharts option={industryOption} style={{ height: 240 }} notMerge lazyUpdate /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+                </Card>
+              </Col>
+            </Row>
+
+            <Card size="small" className="market-alerts__table" title={`命中列表（${data.rows.length} 只）`}>
+              <Table
+                size="small"
+                rowKey="ts_code"
+                columns={columns}
+                dataSource={data.rows}
+                pagination={{ pageSize: 50, showSizeChanger: true }}
+                scroll={{ x: 1100, y: 480 }}
+              />
+            </Card>
+          </>
+        ) : (
+          !loading && (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={data?.date ? `${data.date} 暂无命中记录` : '还没有命中记录，盘中扫描任务跑起来后会自动出现'}
+            />
+          )
+        )}
+      </Spin>
+    </div>
+  );
+};
+
+export default MarketAlerts;

@@ -18,6 +18,11 @@ export const adminRouteDescriptors = [
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
   },
   {
+    path: '/market/alerts',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
+    props: { initialTab: 'alerts' },
+  },
+  {
     path: '/market/fund-flow',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
     props: { initialTab: 'fund-flow' },
