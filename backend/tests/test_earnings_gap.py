@@ -215,6 +215,7 @@ def test_get_earnings_gap_reads_snapshot_until_refresh(monkeypatch):
     def fake_compute(now=None):
         calls.append(now)
         return {
+            "payload_version": eg.PAYLOAD_VERSION,
             "computed_at": f"2026-09-21 15:01:0{len(calls)}",
             "trade_date": "2026-09-21",
             "items": [{"symbol": "600001.SH", "signal_date": "2026-09-21"}],
@@ -231,3 +232,27 @@ def test_get_earnings_gap_reads_snapshot_until_refresh(monkeypatch):
     assert len(calls) == 1
     assert eg.get_earnings_gap(refresh=True)["computed_at"] == "2026-09-21 15:01:02"
     assert eg.load_earnings_gap_snapshot()["computed_at"] == "2026-09-21 15:01:02"
+
+
+def test_old_payload_version_snapshot_is_recomputed(monkeypatch):
+    """加了新字段（如估值列）后，旧结构的快照必须自动重算，不能一直显示空列。"""
+    calls = []
+
+    def fake_compute(now=None):
+        calls.append(now)
+        return {"payload_version": eg.PAYLOAD_VERSION, "computed_at": "2026-09-20 18:25:00",
+                "trade_date": "2026-09-18", "items": [], "warnings": []}
+
+    monkeypatch.setattr(eg, "compute_earnings_gap", fake_compute)
+    eg.save_earnings_gap_snapshot({
+        "computed_at": "2026-09-19 18:29:41", "trade_date": "2026-09-18",
+        "items": [{"symbol": "603353.SH", "signal_date": "2026-08-31"}], "warnings": [],
+    })
+    assert eg.load_earnings_gap_snapshot().get("payload_version") is None
+
+    payload = eg.get_earnings_gap()
+    assert payload["computed_at"] == "2026-09-20 18:25:00"
+    assert len(calls) == 1
+    # 重算后的新快照直接复用，不再反复重算
+    assert eg.get_earnings_gap()["computed_at"] == "2026-09-20 18:25:00"
+    assert len(calls) == 1

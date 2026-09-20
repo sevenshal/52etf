@@ -34,6 +34,9 @@ from .duckdb_analytics import connect_analytics_db, safe_float
 logger = logging.getLogger(__name__)
 
 SIGNAL_KEY = "earnings_gap"
+# 快照结构版本：新增/改动 items 里的字段时 +1，旧版本快照会被自动重算，
+# 否则页面会一直显示上一版代码算出来的老快照（新列全是空）
+PAYLOAD_VERSION = 2
 
 MIN_PROFIT_YOY = 30.0
 MAX_PROFIT_YOY = 3000.0
@@ -421,6 +424,7 @@ def compute_earnings_gap(now: Optional[datetime] = None, service=None, connectio
 
         items = _build_items(connection, signals, calendar)
         return {
+            "payload_version": PAYLOAD_VERSION,
             "computed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "trade_date": last_trade_date.isoformat(),
             "criteria": CRITERIA,
@@ -521,6 +525,11 @@ def refresh_earnings_gap(now: Optional[datetime] = None) -> Dict[str, Any]:
 def get_earnings_gap(refresh: bool = False) -> Dict[str, Any]:
     if not refresh:
         snapshot = load_earnings_gap_snapshot()
-        if snapshot:
+        if snapshot and int(snapshot.get("payload_version") or 0) >= PAYLOAD_VERSION:
             return snapshot
+        if snapshot:
+            logger.info(
+                "earnings gap snapshot payload_version=%s < %s, recomputing",
+                snapshot.get("payload_version"), PAYLOAD_VERSION,
+            )
     return refresh_earnings_gap()
