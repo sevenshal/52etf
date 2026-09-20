@@ -867,7 +867,8 @@ class TushareService(QuoteProvider):
         normalized = [self.normalize_symbol(str(code).strip()) for code in codes]
         normalized = [
             code for code in normalized
-            if code and code.endswith((".SH", ".SZ")) and not self._is_a_share_etf_ts_code(code)
+            # rt_k 覆盖沪深京三个交易所；北交所代码同样可查，不要在这里丢掉
+            if code and code.endswith((".SH", ".SZ", ".BJ")) and not self._is_a_share_etf_ts_code(code)
         ]
         if not normalized:
             return pd.DataFrame()
@@ -891,6 +892,28 @@ class TushareService(QuoteProvider):
             if column in result.columns:
                 result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["close"]).sort_values("ts_code")
+
+    # rt_k 支持带交易所后缀的通配符，一次就能取回全市场（单次上限 6000 行，A股约 5.6 千只）。
+    # 各段不能互相包含（如同时给 6*.SH 和 688*.SH 会重复计数并超限）。
+    A_SHARE_WILDCARDS = ("6*.SH", "0*.SZ", "3*.SZ", "4*.BJ", "8*.BJ", "9*.BJ")
+
+    def get_a_stock_realtime_market_frame(self) -> pd.DataFrame:
+        """全市场A股实时日K（rt_k 通配符，单次请求），用于盘中涨跌家数/分布统计。"""
+        self._rt_k_rate_limiter.wait()
+        frame = self.pro.rt_k(
+            ts_code=",".join(self.A_SHARE_WILDCARDS),
+            fields="ts_code,close,pre_close,open,high,low,vol,amount,trade_time",
+        )
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        if "trade_time" in result.columns:
+            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"])
 
     def get_a_stock_realtime_etf_rt_k_frame(self, ts_codes) -> pd.DataFrame:
         """ETF实时日线（rt_etf_k），覆盖 rt_k 查不到的沪市 ETF。

@@ -4,6 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
 from ...core.services.earnings_gap import EarningsGapDataError, get_earnings_gap
+from ...core.services.market_overview import (
+    MarketOverviewDataError,
+    fetch_breadth_distribution,
+    fetch_daily_amount,
+    fetch_index_overview,
+)
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
 from .account import valid_admin_account
 
@@ -34,4 +40,34 @@ async def get_earnings_gap_signals(
     try:
         return await run_in_threadpool(get_earnings_gap, refresh)
     except (EarningsGapDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/index-overview")
+async def get_index_overview(account_id: str = Depends(valid_admin_account)):
+    """指数概览条：上证/深证成指/创业板指/科创50 的现价、涨跌幅与当日分时曲线。"""
+    try:
+        return await run_in_threadpool(fetch_index_overview)
+    except MarketOverviewDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/breadth-distribution")
+async def get_breadth_distribution(account_id: str = Depends(valid_admin_account)):
+    """全A涨跌分布：分析库最新交易日按涨跌幅分档，涨停/跌停单列。"""
+    try:
+        return await run_in_threadpool(fetch_breadth_distribution)
+    except (MarketOverviewDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/daily-amount")
+async def get_daily_amount(
+    days: int = Query(120, ge=20, le=250),
+    account_id: str = Depends(valid_admin_account),
+):
+    """每日两市成交额（亿元）。"""
+    try:
+        return await run_in_threadpool(fetch_daily_amount, days)
+    except MarketOverviewDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

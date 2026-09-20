@@ -127,3 +127,28 @@ def test_deviation_skipped_when_compare_minute_is_tiny():
     point = build_volume_compare(sh, sz)["points"][0]
     assert point["compare_amount"] == 0.06
     assert point["deviation_pct"] is None
+
+
+def test_intraday_estimate_uses_previous_days_remaining_amount():
+    """盘中预估 = 已累计 + 过去交易日同一时刻之后剩余成交额的平均。"""
+    def _day(date, rows):
+        return _lines(date, rows)
+
+    # 两个历史日：09:30 之后的剩余量分别是 6 亿和 10 亿（沪+深各一半）
+    sh = parse_trends_lines(
+        _day("2026-09-16", [("09:30", 10.0, 1e8), ("09:31", 10.0, 3e8)])
+        + _day("2026-09-17", [("09:30", 10.0, 1e8), ("09:31", 10.0, 5e8)])
+        + _day("2026-09-18", [("09:30", 10.0, 2e8)])
+    )
+    sz = parse_trends_lines(
+        _day("2026-09-16", [("09:30", 5.0, 1e8), ("09:31", 5.0, 3e8)])
+        + _day("2026-09-17", [("09:30", 5.0, 1e8), ("09:31", 5.0, 5e8)])
+        + _day("2026-09-18", [("09:30", 5.0, 2e8)])
+    )
+
+    result = build_volume_compare(sh, sz, target_date="2026-09-18")
+
+    assert result["is_intraday"] is True and result["last_time"] == "09:30"
+    assert result["target_total"] == 4.0                 # 已累计 4 亿
+    assert result["estimate_days"] == ["2026-09-16", "2026-09-17"]
+    assert result["estimated_total"] == 12.0             # 4 + (6 + 10) / 2
