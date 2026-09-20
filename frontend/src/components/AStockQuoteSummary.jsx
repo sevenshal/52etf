@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Tooltip } from 'antd';
 import { Switch } from 'antd';
 import { formatChineseAmount as formatChinese } from '../utils/format';
+import { scaleToLivePrice } from '../utils/valuationMetrics';
 
 const toNumber = value => {
   if (value === null || value === undefined || value === '') return null;
@@ -30,9 +31,12 @@ const STATUS_LABELS = {
   PCALL: '盘后竞价', INIT: '盘后待启动', ENDPT: '盘后闭市', POSSP: '盘后停牌',
 };
 
-const Metric = ({ label, value }) => (
+const Metric = ({ label, value, hint }) => (
   <div style={{ minWidth: 0, color: '#666', lineHeight: 1.8 }}>
-    {label}：<strong style={{ color: '#262626', fontWeight: 600 }}>{value}</strong>
+    {hint
+      ? <Tooltip title={hint}><span style={{ borderBottom: '1px dotted #bfbfbf' }}>{label}</span></Tooltip>
+      : label}
+    ：<strong style={{ color: '#262626', fontWeight: 600 }}>{value}</strong>
   </div>
 );
 
@@ -169,18 +173,22 @@ const AStockQuoteSummary = ({
     const valuationClose = toNumber(summary.valuation_close);
     const priceRatio = last !== null && valuationClose > 0 ? last / valuationClose : null;
     const dynamicPe = toNumber(quote.pe_rate);
-    const livePb = toNumber(quote.pb_rate)
-      ?? (priceRatio !== null && toNumber(summary.pb) !== null ? Number(summary.pb) * priceRatio : null);
+    const livePb = toNumber(quote.pb_rate) ?? scaleToLivePrice(summary.pb, priceRatio);
     const dividendTtm = valuationClose !== null && toNumber(summary.dv_ttm) !== null
       ? valuationClose * Number(summary.dv_ttm) / 100
       : null;
+    // 快照里的 pe/pb/ps 是上一个收盘口径，盘中一律按当前价折算
+    const peTtm = scaleToLivePrice(summary.pe_ttm, priceRatio);
     return {
       last, preclose, high, low, change, changePct, amplitude,
-      totalShares, circulatingShares, dynamicPe, livePb, dividendTtm,
+      totalShares, circulatingShares, dynamicPe, livePb, dividendTtm, peTtm,
       dynamicEps: last !== null && dynamicPe > 0 ? last / dynamicPe : null,
       bps: last !== null && livePb > 0 ? last / livePb : null,
-      pe: priceRatio !== null && toNumber(summary.pe) !== null ? Number(summary.pe) * priceRatio : null,
-      peTtm: priceRatio !== null && toNumber(summary.pe_ttm) !== null ? Number(summary.pe_ttm) * priceRatio : null,
+      pe: scaleToLivePrice(summary.pe, priceRatio),
+      psTtm: scaleToLivePrice(summary.ps_ttm, priceRatio),
+      ps: scaleToLivePrice(summary.ps, priceRatio),
+      // 扣非ROE 是财报口径的比率，不随盘中股价变动，直接用接口给的值
+      roeDtTtm: toNumber(summary.roe_dt_ttm_pct),
       dividendYieldTtm: dividendTtm !== null && last > 0 ? dividendTtm / last * 100 : null,
       totalMarketCap: last !== null && totalShares !== null ? last * totalShares : null,
       circulatingMarketCap: last !== null && circulatingShares !== null ? last * circulatingShares : null,
@@ -211,6 +219,16 @@ const AStockQuoteSummary = ({
     ['股息(TTM)', formatFixed(values.dividendTtm)],
     ['股息率(TTM)', values.dividendYieldTtm === null ? '--' : `${formatFixed(values.dividendYieldTtm)}%`],
     ['每股净资产', formatFixed(values.bps)],
+    ['市销率(TTM)', formatFixed(values.psTtm)],
+    ['市销率(静)', formatFixed(values.ps)],
+    [
+      '扣非ROE(TTM)',
+      values.roeDtTtm === null ? '--' : `${formatFixed(values.roeDtTtm)}%`,
+      '最近 12 个月扣除非经常性损益的归母净利 ÷ 最新一期期末归母净资产。'
+      + '扣掉卖资产、政府补助这类一次性收益，看的是主业本身的回报；'
+      + '非年报期按「最新累计 + 上一年年报 − 去年同期累计」滚动。'
+      + `数据截至 ${summary.roe_dt_ttm_period || '最新报告期'}。`,
+    ],
     ['总股本', formatChinese(values.totalShares)],
     ['总市值', formatChinese(values.totalMarketCap)],
     ['流通股', formatChinese(values.circulatingShares)],
@@ -245,7 +263,9 @@ const AStockQuoteSummary = ({
         border: '1px solid #f0f0f0',
         borderRadius: 6,
       }}>
-        {metrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
+        {metrics.map(([label, value, hint]) => (
+          <Metric key={label} label={label} value={value} hint={hint} />
+        ))}
       </div>
       <ConsensusValuationMetrics
         consensus={consensus}

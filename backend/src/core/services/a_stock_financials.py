@@ -199,3 +199,63 @@ def load_a_stock_financials(
         })
 
     return {"ts_code": symbol, "periods": result_periods}
+
+
+def compute_ttm_deducted_roe(periods: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """扣非 ROE(TTM)：最近 12 个月扣非归母净利 ÷ 最新一期期末归母净资产。
+
+    扣非净利是年初至今累计口径，非年报期按
+        TTM = 最新累计 + 上一年年报 − 去年同期累计
+    滚动（和 `value_investing_scanner` 的 TTM 覆盖层同一条规则）；最新一期本身就是年报时，
+    全年数直接就是 TTM。三期凑不齐（次新股、缺报告期）时返回 None——宁可不显示，
+    也不能拿半年的利润当成一年的。
+
+    分母用最新一期的**期末**归母净资产，和财务数据卡片里的「净资产收益率(扣非摊薄)」
+    同一个分母口径，区别只是分子换成滚动 12 个月。
+    """
+    empty = {
+        "roe_dt_ttm_pct": None,
+        "profit_dedt_ttm": None,
+        "equity": None,
+        "period_end": None,
+        "period_label": None,
+        "basis": None,
+    }
+    if not periods:
+        return empty
+
+    latest = periods[0]
+    end_date = str(latest.get("end_date") or "")
+    if len(end_date) != 10:
+        return empty
+    equity = safe_float((latest.get("balancesheet") or {}).get("total_hldr_eqy_exc_min_int"))
+    latest_profit = safe_float((latest.get("indicator") or {}).get("profit_dedt"))
+
+    if latest.get("is_annual"):
+        profit_ttm, basis = latest_profit, "annual"
+    else:
+        year, suffix = int(end_date[:4]), end_date[5:]
+        by_end_date = {str(period.get("end_date")): period for period in periods}
+        prior_annual = by_end_date.get(f"{year - 1}-12-31")
+        prior_same = by_end_date.get(f"{year - 1}-{suffix}")
+        annual_profit = safe_float((prior_annual or {}).get("indicator", {}).get("profit_dedt"))
+        same_profit = safe_float((prior_same or {}).get("indicator", {}).get("profit_dedt"))
+        profit_ttm = (
+            latest_profit + annual_profit - same_profit
+            if None not in (latest_profit, annual_profit, same_profit)
+            else None
+        )
+        basis = "rolling"
+
+    return {
+        "roe_dt_ttm_pct": (
+            safe_float(profit_ttm / equity * 100.0, 2)
+            if profit_ttm is not None and equity is not None and equity > 0
+            else None
+        ),
+        "profit_dedt_ttm": profit_ttm,
+        "equity": equity,
+        "period_end": end_date,
+        "period_label": latest.get("period_label"),
+        "basis": basis if profit_ttm is not None else None,
+    }

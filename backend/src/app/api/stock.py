@@ -15,7 +15,11 @@ from ...core.services.szdt import SZDTService
 from ...core.static_info import get_static_info_snapshot_map
 from ...core.analytics_database import AnalyticsSession
 from ...core.services.a_stock_consensus import load_a_stock_klines
-from ...core.services.a_stock_financials import DEFAULT_PERIOD_COUNT, load_a_stock_financials
+from ...core.services.a_stock_financials import (
+    DEFAULT_PERIOD_COUNT,
+    compute_ttm_deducted_roe,
+    load_a_stock_financials,
+)
 from ...core.services.a_stock_chart_events import load_a_stock_chart_events
 from ...core.services.a_stock_fund_flow import fetch_stock_fund_flow_daily
 from .xueqiu_holdings import load_a_stock_fear_index_memberships
@@ -183,7 +187,7 @@ def get_a_stock_summary(
             text(
                 """
                 SELECT trade_date, close, total_share, float_share,
-                       pe, pe_ttm, pb, dv_ratio, dv_ttm
+                       pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm
                 FROM a_stock_market_daily
                 WHERE ts_code = :symbol
                 ORDER BY trade_date DESC
@@ -195,6 +199,17 @@ def get_a_stock_summary(
     finally:
         analytics_db.close()
         AnalyticsSession.remove()
+
+    # 扣非ROE(TTM) 走财报口径，不随盘中股价变动；取不到时头部照常显示行情，不能因此 500
+    deducted_roe = {}
+    try:
+        deducted_roe = compute_ttm_deducted_roe(
+            load_a_stock_financials(normalized_symbol, periods=DEFAULT_PERIOD_COUNT)["periods"]
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "compute ttm deducted roe failed for %s", normalized_symbol, exc_info=True
+        )
 
     def shares(static_key, daily_key):
         value = static_info.get(static_key)
@@ -216,6 +231,10 @@ def get_a_stock_summary(
         "pe": _safe_quote_number(latest.get("pe")) if latest else None,
         "pe_ttm": _safe_quote_number(latest.get("pe_ttm")) if latest else None,
         "pb": _safe_quote_number(latest.get("pb")) if latest else None,
+        "ps": _safe_quote_number(latest.get("ps")) if latest else None,
+        "ps_ttm": _safe_quote_number(latest.get("ps_ttm")) if latest else None,
+        "roe_dt_ttm_pct": deducted_roe.get("roe_dt_ttm_pct"),
+        "roe_dt_ttm_period": deducted_roe.get("period_label"),
         "dv_ratio": _safe_quote_number(latest.get("dv_ratio")) if latest else None,
         "dv_ttm": _safe_quote_number(latest.get("dv_ttm")) if latest else None,
     }
