@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -322,6 +323,8 @@ class AlertScanner:
         self._structures: Dict[str, StockStructure] = {}
         self._pct_history: List[Dict[str, float]] = []
         self._recorded: Dict[date, set] = {}
+        self._limits: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+        self._limits_date: Optional[date] = None
 
     def prepare(self, today: date, connection=None,
                 baseline_days: int = BASELINE_TRADING_DAYS) -> Dict[str, Any]:
@@ -343,6 +346,22 @@ class AlertScanner:
             "baseline_days": baseline_days,
         }
 
+    def limits(self, today: date) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
+        """当日涨跌停价，每天只取一次 stk_limit。"""
+        if self._limits_date == today:
+            return self._limits
+        try:
+            frame = TushareService.get_instance().get_a_stock_stk_limit_frame(today)
+            self._limits = {
+                str(row.ts_code).strip().upper(): (safe_float(row.up_limit), safe_float(row.down_limit))
+                for row in frame.itertuples(index=False)
+            } if frame is not None and not frame.empty else {}
+            self._limits_date = today
+        except Exception as exc:  # noqa: BLE001  取不到只影响涨停/连板统计
+            logger.warning("tushare stk_limit 获取 %s 失败: %s", today, exc)
+            self._limits = {}
+        return self._limits
+
     def _recorded_today(self, today: date) -> set:
         if today not in self._recorded:
             with get_db_ctx() as db:
@@ -361,7 +380,7 @@ class AlertScanner:
         if not self._structures:
             return {"skipped": "分析库没有日线数据"}
 
-        quotes = TushareService.get_instance().get_a_stock_realtime_market_frame()
+        quotes = get_market_snapshot()
         if quotes is None or quotes.empty:
             return {"skipped": "快照为空"}
         if "trade_time" in quotes.columns:
@@ -428,7 +447,36 @@ class AlertScanner:
         }
 
 
+_snapshot_cache: Tuple[float, Optional[pd.DataFrame]] = (0.0, None)
+SNAPSHOT_TTL_SECONDS = 30
+
+
+def get_market_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
+    """全市场快照（rt_k 通配符），30 秒内复用。
+
+    提示看板扫描与行业关联聚合共用这一份，保证每分钟只打一次 tushare。
+    """
+    global _snapshot_cache
+    cached_at, cached = _snapshot_cache
+    if not force and cached is not None and time.time() - cached_at < SNAPSHOT_TTL_SECONDS:
+        return cached
+    frame = TushareService.get_instance().get_a_stock_realtime_market_frame()
+    _snapshot_cache = (time.time(), frame)
+    return frame
+
+
 _scanner = AlertScanner()
+
+
+def get_scanner_state(today: date) -> Dict[str, Any]:
+    """行业关联复用扫描器盘前算好的结构/基准/涨跌停价，没准备好就现算。"""
+    if _scanner._baseline_date != today:
+        _scanner.prepare(today)
+    return {
+        "structures": _scanner._structures,
+        "baseline": _scanner._baseline,
+        "limits": _scanner.limits(today),
+    }
 
 
 def run_alert_scan(now: Optional[datetime] = None,
