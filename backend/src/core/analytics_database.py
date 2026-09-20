@@ -153,6 +153,38 @@ class AStockSWMember(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockSWMemberChange(AnalyticsBase):
+    """申万行业成分变更历史：一只股票在某个行业里的进出区间，可还原任意历史日期的归属。"""
+    __tablename__ = "a_stock_sw_member_change"
+
+    index_code = Column(String(16), primary_key=True)
+    con_code = Column(String(16), primary_key=True)
+    in_date = Column(Date, primary_key=True)
+    out_date = Column(Date)
+    is_new = Column(String(8))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockSWDaily(AnalyticsBase):
+    """申万行业指数日线行情（sw_daily），含估值与市值。"""
+    __tablename__ = "a_stock_sw_daily"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    name = Column(String(64))
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    pe = Column(Float)
+    pb = Column(Float)
+    float_mv = Column(Float)
+    total_mv = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class AStockTHSDaily(AnalyticsBase):
     """同花顺行业/概念/主题板块日行情。"""
     __tablename__ = "a_stock_ths_daily"
@@ -913,6 +945,8 @@ def ensure_analytics_schema():
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l1 ON a_stock_sw_member(l1_name)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_change_con ON a_stock_sw_member_change(con_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_daily_date ON a_stock_sw_daily(trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l3 ON a_stock_sw_member(l3_name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",

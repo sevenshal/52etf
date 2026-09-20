@@ -91,6 +91,11 @@ TUSHARE_MINUTE_MAX_REQUESTS_PER_MINUTE = max(
     0,
     int(os.getenv("TUSHARE_MINUTE_MAX_REQUESTS_PER_MINUTE", "450")),
 )
+# index_member / sw_daily 官方限频 500 次/分钟，留点余量
+TUSHARE_SW_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_SW_MAX_REQUESTS_PER_MINUTE", "450")),
+)
 
 # 沪深 ETF 代码前缀（rt_k 对沪市 ETF 返回空，需走 rt_etf_k 接口）
 TUSHARE_A_SHARE_ETF_PREFIXES = ("15", "50", "51", "52", "56", "58")
@@ -198,6 +203,10 @@ class TushareService(QuoteProvider):
     )
     _minute_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_MINUTE_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
+    _sw_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_SW_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
 
@@ -578,6 +587,68 @@ class TushareService(QuoteProvider):
             if result.empty:
                 return pd.DataFrame()
         return result.drop_duplicates(subset=["source", "datetime", "title"], keep="last")
+
+    def get_sw_industry_classify_frame(self, level: str, src: str = "SW2021") -> pd.DataFrame:
+        """申万行业分类（index_classify），level 取 L1/L2/L3。"""
+        frame = self.pro.index_classify(
+            level=level, src=src,
+            fields="index_code,industry_name,level,industry_code,parent_code",
+        )
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def get_sw_member_all_frame(self, page_size: int = 3000) -> pd.DataFrame:
+        """申万当前成分股（index_member_all，分页取全市场）。"""
+        frames: List[pd.DataFrame] = []
+        offset = 0
+        while True:
+            frame = self.pro.index_member_all(
+                is_new="Y", limit=page_size, offset=offset,
+                fields="l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,in_date,out_date,is_new",
+            )
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            offset += len(frame)
+            if len(frame) < page_size or offset > 50_000:
+                break
+        return pd.concat(frames, ignore_index=True).drop_duplicates("ts_code") if frames else pd.DataFrame()
+
+    def get_sw_member_history_frame(self, index_code: str) -> pd.DataFrame:
+        """单个申万行业的成分变更历史（index_member，含已移出的成分与 out_date）。
+
+        全量回补要按行业逐个拉（约 511 次），官方限频 500 次/分钟，必须过限流器。
+        """
+        self._sw_rate_limiter.wait()
+        frame = self.pro.index_member(
+            index_code=index_code,
+            fields="index_code,con_code,in_date,out_date,is_new",
+        )
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    SW_DAILY_FIELDS = "ts_code,trade_date,name,open,low,high,close,vol,amount,pe,pb,float_mv,total_mv"
+
+    def get_sw_daily_by_date_frame(self, trade_date: date) -> pd.DataFrame:
+        """某个交易日全部申万指数行情（一次约 440 行）。"""
+        value = self._to_date(trade_date)
+        if not value:
+            return pd.DataFrame()
+        self._sw_rate_limiter.wait()
+        frame = self.pro.sw_daily(trade_date=value.strftime("%Y%m%d"), fields=self.SW_DAILY_FIELDS)
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def get_sw_daily_history_frame(self, ts_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+        """单个申万指数的历史行情（首次回补用，一次即可取回全历史）。"""
+        start_value, end_value = self._to_date(start_date), self._to_date(end_date)
+        if not start_value or not end_value:
+            return pd.DataFrame()
+        self._sw_rate_limiter.wait()
+        frame = self.pro.sw_daily(
+            ts_code=str(ts_code).strip().upper(),
+            start_date=start_value.strftime("%Y%m%d"),
+            end_date=end_value.strftime("%Y%m%d"),
+            fields=self.SW_DAILY_FIELDS,
+        )
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
     def get_ths_index_frame(self, index_type: str) -> pd.DataFrame:
         normalized_type = str(index_type or "").strip().upper()

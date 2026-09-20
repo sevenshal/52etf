@@ -31,6 +31,10 @@ from ..core.analytics_database import (
     AStockOptionDaily,
     AStockReportRc,
     AStockRepoDaily,
+    AStockSWDaily,
+    AStockSWIndustry,
+    AStockSWMember,
+    AStockSWMemberChange,
     AStockTHSDaily,
     AStockTHSMember,
     AnalyticsSession,
@@ -101,6 +105,40 @@ THS_DAILY_REFRESH_DAYS = 30
 THS_DAILY_REPAIR_TRADING_DAYS = 3
 THS_DAILY_MIN_ROWS = 1000
 THS_DAILY_HISTORY_START_DATE = date(2026, 6, 25)
+
+
+# 申万行业指数日线在 tushare 上最早到 2012 年 8 月
+SW_DAILY_START_DATE = date(2012, 1, 1)
+
+
+def _sw_daily_rows(frame) -> List[Dict]:
+    """sw_daily 返回帧 → 可直接批量插入的行。"""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    rows: List[Dict] = []
+    now = datetime.now()
+    for row in frame.itertuples(index=False):
+        trade_date = _parse_date(getattr(row, "trade_date", None))
+        ts_code = str(getattr(row, "ts_code", "")).strip().upper()
+        if not trade_date or not ts_code:
+            continue
+        rows.append({
+            "ts_code": ts_code,
+            "trade_date": trade_date,
+            "name": _clean_text(getattr(row, "name", "")),
+            "open": _safe_float(getattr(row, "open", None)),
+            "high": _safe_float(getattr(row, "high", None)),
+            "low": _safe_float(getattr(row, "low", None)),
+            "close": _safe_float(getattr(row, "close", None)),
+            "vol": _safe_float(getattr(row, "vol", None)),
+            "amount": _safe_float(getattr(row, "amount", None)),
+            "pe": _safe_float(getattr(row, "pe", None)),
+            "pb": _safe_float(getattr(row, "pb", None)),
+            "float_mv": _safe_float(getattr(row, "float_mv", None)),
+            "total_mv": _safe_float(getattr(row, "total_mv", None)),
+            "updated_at": now,
+        })
+    return rows
 
 
 def _clean_text(value) -> Optional[str]:
@@ -477,6 +515,144 @@ class AStockBaseDataSyncService:
         if name_frames:
             name_frame = pd.concat(name_frames, ignore_index=True).drop_duplicates()
             self._replace_name_changes_range(name_frame, name_start, name_end)
+
+    def sync_sw_industry_data(self, end_date: date, incremental: bool = True) -> Dict:
+        """同步申万三级行业：分类骨架、当前成分、成分变更历史、行业指数日线。
+
+        - 分类与当前成分每次全量替换（511 个行业 / 约 5900 只成分，3 次请求）。
+        - 成分变更历史每个行业一次 index_member；只在表为空或非增量时全量重建，
+          平时不动（行业成分变更是低频事件，每天重拉 500 次请求不值得）。
+        - 行业指数日线：表为空时按指数回补全历史（约 440 次请求，一次拿到 2012 年至今），
+          之后按缺失交易日增量（每个交易日 1 次请求，一次返回全部指数）。
+        """
+        errors: List[str] = []
+        industry_rows: List[Dict] = []
+        for level in ("L1", "L2", "L3"):
+            frame = self.tushare.get_sw_industry_classify_frame(level)
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                errors.append(f"index_classify {level}")
+                continue
+            for row in frame.itertuples(index=False):
+                industry_rows.append({
+                    "index_code": str(row.index_code).strip().upper(),
+                    "industry_name": _clean_text(row.industry_name),
+                    "industry_code": _clean_text(getattr(row, "industry_code", "")),
+                    "level": level,
+                    "parent_code": _clean_text(getattr(row, "parent_code", "")),
+                    "src": "SW2021",
+                    "updated_at": datetime.now(),
+                })
+
+        member_frame = self.tushare.get_sw_member_all_frame()
+        member_rows: List[Dict] = []
+        if isinstance(member_frame, pd.DataFrame) and not member_frame.empty:
+            for row in member_frame.itertuples(index=False):
+                member_rows.append({
+                    "ts_code": str(row.ts_code).strip().upper(),
+                    "l1_code": _clean_text(row.l1_code), "l1_name": _clean_text(row.l1_name),
+                    "l2_code": _clean_text(row.l2_code), "l2_name": _clean_text(row.l2_name),
+                    "l3_code": _clean_text(row.l3_code), "l3_name": _clean_text(row.l3_name),
+                    "in_date": _parse_date(getattr(row, "in_date", None)),
+                    "out_date": _parse_date(getattr(row, "out_date", None)),
+                    "is_new": _clean_text(getattr(row, "is_new", "")),
+                    "updated_at": datetime.now(),
+                })
+        else:
+            errors.append("index_member_all")
+
+        # 分类与当前成分：抓全了才替换，抓不全保留旧数据
+        if industry_rows:
+            self.analytics_db.query(AStockSWIndustry).delete()
+            self.analytics_db.bulk_insert_mappings(AStockSWIndustry, industry_rows)
+        if member_rows:
+            self.analytics_db.query(AStockSWMember).delete()
+            self.analytics_db.bulk_insert_mappings(AStockSWMember, member_rows)
+        self.analytics_db.commit()
+
+        history_rows_saved = 0
+        history_existing = _count_analytics_table_rows(self.analytics_db, AStockSWMemberChange.__tablename__)
+        if industry_rows and (not incremental or history_existing <= 0):
+            self._progress("同步申万行业成分变更历史", 12, industries=len(industry_rows))
+            changes: List[Dict] = []
+            for index, item in enumerate(industry_rows, start=1):
+                frame = self.tushare.get_sw_member_history_frame(item["index_code"])
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    continue
+                for row in frame.itertuples(index=False):
+                    in_date = _parse_date(getattr(row, "in_date", None))
+                    con_code = str(getattr(row, "con_code", "")).strip().upper()
+                    if not in_date or not con_code:
+                        continue
+                    changes.append({
+                        "index_code": item["index_code"],
+                        "con_code": con_code,
+                        "in_date": in_date,
+                        "out_date": _parse_date(getattr(row, "out_date", None)),
+                        "is_new": _clean_text(getattr(row, "is_new", "")),
+                        "updated_at": datetime.now(),
+                    })
+                if index % 50 == 0:
+                    self._progress(f"同步申万行业成分变更历史 {index}/{len(industry_rows)}", 12)
+            if changes:
+                # 同一 (行业, 成分, 进入日) 只留一条，避免主键冲突
+                unique = {(row["index_code"], row["con_code"], row["in_date"]): row for row in changes}
+                self.analytics_db.query(AStockSWMemberChange).delete()
+                self.analytics_db.bulk_insert_mappings(AStockSWMemberChange, list(unique.values()))
+                self.analytics_db.commit()
+                history_rows_saved = len(unique)
+
+        daily_result = self._sync_sw_daily(end_date, incremental=incremental)
+        return {
+            "industries": len(industry_rows),
+            "members": len(member_rows),
+            "member_history_rows": history_rows_saved,
+            "daily_saved_rows": daily_result.get("saved_rows", 0),
+            "daily_mode": daily_result.get("mode"),
+            "errors": errors + daily_result.get("errors", []),
+        }
+
+    def _sync_sw_daily(self, end_date: date, incremental: bool = True) -> Dict:
+        """申万行业指数日线：表为空按指数回补全历史，否则按缺失交易日增量。"""
+        errors: List[str] = []
+        saved_rows = 0
+        existing = _count_analytics_table_rows(self.analytics_db, AStockSWDaily.__tablename__)
+        latest = _latest_analytics_date(self.analytics_db, AStockSWDaily, "trade_date")
+
+        if existing <= 0 or not incremental:
+            codes = [
+                str(row[0]) for row in
+                self.analytics_db.query(AStockSWIndustry.index_code).all()
+            ]
+            if not codes:
+                return {"saved_rows": 0, "mode": "skip", "errors": ["没有申万行业目录，跳过日线回补"]}
+            self._progress("回补申万行业指数日线历史", 13, indexes=len(codes))
+            self.analytics_db.query(AStockSWDaily).delete()
+            self.analytics_db.commit()
+            for index, code in enumerate(codes, start=1):
+                frame = self.tushare.get_sw_daily_history_frame(code, SW_DAILY_START_DATE, end_date)
+                rows = _sw_daily_rows(frame)
+                if rows:
+                    self.analytics_db.bulk_insert_mappings(AStockSWDaily, rows)
+                    saved_rows += len(rows)
+                if index % 50 == 0:
+                    self.analytics_db.commit()
+                    self._progress(f"回补申万行业指数日线 {index}/{len(codes)}", 13, sw_daily_saved_rows=saved_rows)
+            self.analytics_db.commit()
+            return {"saved_rows": saved_rows, "mode": "backfill", "errors": errors}
+
+        start = (latest + timedelta(days=1)) if latest else end_date
+        if start > end_date:
+            return {"saved_rows": 0, "mode": "up-to-date", "errors": errors}
+        trading_days = self._trading_dates(start, end_date)
+        for trade_day in trading_days:
+            frame = self.tushare.get_sw_daily_by_date_frame(trade_day)
+            rows = _sw_daily_rows(frame)
+            if rows:
+                self.analytics_db.query(AStockSWDaily).filter(AStockSWDaily.trade_date == trade_day).delete()
+                self.analytics_db.bulk_insert_mappings(AStockSWDaily, rows)
+                saved_rows += len(rows)
+        self.analytics_db.commit()
+        return {"saved_rows": saved_rows, "mode": "incremental", "errors": errors}
 
     def sync_ths_board_data(self, end_date: date) -> Dict:
         """刷新主库板块目录，并把成分和近期行情缓存到 DuckDB。
@@ -2488,6 +2664,13 @@ class AStockBaseDataSyncService:
         self._progress("同步同花顺细分板块目录、成分和行情", 10)
         ths_board_result = self.sync_ths_board_data(end_value)
 
+        self._progress("同步申万三级行业分类、成分与行业指数日线", 12)
+        try:
+            sw_industry_result = self.sync_sw_industry_data(end_value, incremental=incremental)
+        except Exception as exc:  # noqa: BLE001  申万失败不应拖垮整轮基础数据同步
+            self.logger.warning("申万行业数据同步失败: %s", exc)
+            sw_industry_result = {"errors": [str(exc)]}
+
         market_warmup_days = max(RAW_FETCH_LOOKBACK_DAYS, A_STOCK_MARKET_DAILY_WARMUP_DAYS)
         market_default_start = _warmup_start(DEFAULT_START_DATE, market_warmup_days)
         if explicit_start:
@@ -2862,6 +3045,12 @@ class AStockBaseDataSyncService:
             "ths_daily_rows": ths_daily_rows,
             "ths_daily_saved_rows": ths_board_result.get("daily_saved_rows"),
             "ths_daily_errors": ths_board_result.get("daily_errors"),
+            "sw_industries": sw_industry_result.get("industries"),
+            "sw_members": sw_industry_result.get("members"),
+            "sw_member_history_rows": sw_industry_result.get("member_history_rows"),
+            "sw_daily_saved_rows": sw_industry_result.get("daily_saved_rows"),
+            "sw_daily_mode": sw_industry_result.get("daily_mode"),
+            "sw_errors": sw_industry_result.get("errors"),
             "fund_basic_rows": fund_basic_rows,
             "market_start_date": market_start.isoformat(),
             "market_trade_days": len(trading_dates),

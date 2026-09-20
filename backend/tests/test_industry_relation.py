@@ -96,3 +96,36 @@ def test_small_industries_are_listed_but_not_ranked():
     assert rows["大行业"]["rank"] == 1 and rows["大行业"]["rank_str"] == "1/1"
     # 小行业的统计值仍然算出来了，只是不排名
     assert rows["小行业"]["count"] == 2 and rows["小行业"]["lu"] == 1
+
+
+def test_load_members_current_and_historical():
+    """当前归属读 a_stock_sw_member；给了日期就用变更历史还原那天的归属。"""
+    import duckdb
+
+    from src.core.services.industry_relation import load_members
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_sw_member (ts_code VARCHAR, l1_name VARCHAR, l2_name VARCHAR, l3_name VARCHAR)")
+    con.execute("INSERT INTO a_stock_sw_member VALUES ('600519.SH', '食品饮料', '白酒Ⅱ', '白酒Ⅲ')")
+    con.execute("CREATE TABLE a_stock_sw_industry (index_code VARCHAR, industry_name VARCHAR, industry_code VARCHAR, level VARCHAR, parent_code VARCHAR)")
+    con.executemany("INSERT INTO a_stock_sw_industry VALUES (?, ?, ?, ?, ?)", [
+        ("801120.SI", "食品饮料", "120000", "L1", "0"),
+        ("801125.SI", "白酒Ⅱ", "120100", "L2", "120000"),
+        ("851251.SI", "白酒Ⅲ", "120101", "L3", "120100"),
+    ])
+    con.execute("CREATE TABLE a_stock_sw_member_change (index_code VARCHAR, con_code VARCHAR, in_date DATE, out_date DATE, is_new VARCHAR)")
+    con.executemany("INSERT INTO a_stock_sw_member_change VALUES (?, ?, ?, ?, ?)", [
+        ("851251.SI", "600519.SH", date(2001, 7, 31), None, "Y"),
+        ("851251.SI", "000001.SZ", date(2015, 1, 1), date(2020, 1, 1), "N"),   # 2020 年已移出
+    ])
+
+    current = load_members(con)
+    assert list(current["ts_code"]) == ["600519.SH"]
+
+    old = load_members(con, as_of=date(2018, 6, 30))
+    assert set(old["ts_code"]) == {"600519.SH", "000001.SZ"}       # 当年两只都在
+    assert set(old["l1_name"]) == {"食品饮料"}
+
+    now = load_members(con, as_of=date(2026, 9, 18))
+    assert set(now["ts_code"]) == {"600519.SH"}                     # 移出的不再计入
+    con.close()
