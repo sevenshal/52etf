@@ -169,6 +169,52 @@
   margin-top: 12px;
 }
 
+.market-alerts__stats {
+  margin-bottom: 12px;
+}
+
+.market-alerts__labels .ant-statistic-title {
+  margin-bottom: 4px;
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 14px;
+}
+
+.market-alerts__label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.market-alerts__table {
+  margin-top: 12px;
+}
+
+.market-alerts .is-up {
+  color: #e5484d;
+}
+
+.market-alerts .is-down {
+  color: #2f9e63;
+}
+
+.market-industry__row--active > td {
+  background: #eef6ff !important;
+}
+
+.market-industry__members {
+  margin-top: 12px;
+}
+
+.market-industry .is-up {
+  color: #e5484d;
+}
+
+.market-industry .is-down {
+  color: #2f9e63;
+}
+
 .earnings-gap-search {
   width: 220px;
 }

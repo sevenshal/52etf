@@ -4,6 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import AStockFundFlow from './AStockFundFlow';
 import MarketOverview from './MarketOverview';
+import MarketAlerts from './MarketAlerts';
+import MarketIndustryRelation from './MarketIndustryRelation';
 import MarketEarningsGap from './MarketEarningsGap';
 import './Market.css';
 
@@ -11,6 +13,8 @@ const { Text } = Typography;
 
 const MARKET_TAB_ITEMS = [
   { key: 'overview', label: '大盘观测', path: '/market' },
+  { key: 'alerts', label: '提示看板', path: '/market/alerts' },
+  { key: 'industry', label: '行业关联', path: '/market/industry' },
   { key: 'fund-flow', label: '资金流向', path: '/market/fund-flow' },
   { key: 'earnings-gap', label: '净利润断层', path: '/market/earnings-gap' },
 ];
@@ -97,6 +101,8 @@ const Market = ({ initialTab = 'overview' }) => {
         <Tabs activeKey={activeTab} onChange={handleTabChange} items={MARKET_TAB_ITEMS} />
       </div>
       {activeTab === 'overview' && <MarketOverview />}
+      {activeTab === 'alerts' && <MarketAlerts />}
+      {activeTab === 'industry' && <MarketIndustryRelation />}
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
       {activeTab === 'earnings-gap' && <MarketEarningsGap />}
     </div>

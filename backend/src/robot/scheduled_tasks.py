@@ -608,6 +608,43 @@ def _run_a_stock_base_data_sync(
     return _format_a_stock_base_data_sync_result(result)
 
 
+def _run_market_alert_scan(
+    min_volume_ratio: float = 1.3,
+    strong_volume_ratio: float = 2.0,
+    min_amount_yi: float = 0.8,
+):
+    """提示看板：盘中一轮全市场扫描（每分钟一次，非交易时段自动跳过）。"""
+    from ..core.services.market_alerts import AlertThresholds, run_alert_scan
+
+    thresholds = AlertThresholds(
+        min_amount_yuan=float(min_amount_yi) * 1e8,
+        min_volume_ratio=float(min_volume_ratio),
+        strong_volume_ratio=float(strong_volume_ratio),
+    )
+    result = run_alert_scan(thresholds=thresholds)
+    if result.get("skipped"):
+        return f"跳过：{result['skipped']}"
+    return (f"{result.get('minute')} 扫描 {result.get('scanned')} 只 · "
+            f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}")
+
+
+def _run_sw_industry_sync():
+    """同步申万三级行业分类与全市场成分股（行业关联看板的骨架）。"""
+    from ..core.services.industry_relation import sync_sw_industries
+
+    result = sync_sw_industries()
+    return f"行业 {result.get('industries')} 个 · 成分股 {result.get('members')} 只"
+
+
+def _run_market_alert_baseline(baseline_days: int = 20):
+    """提示看板：盘前构建同时段量能基准与九转结构快照。"""
+    from ..core.services.market_alerts import prepare_alert_baseline
+
+    result = prepare_alert_baseline(baseline_days=int(baseline_days))
+    return (f"结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} "
+            f"· 基准取前 {result.get('baseline_days')} 个交易日")
+
+
 def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
     """Run daily incremental sync; manual API runs request a 128-trading-day backfill."""
     from ..core.services.chan_minute_sync import ChanMinuteSyncManager
@@ -1566,6 +1603,81 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=True,
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
+            ),
+            "sw_industry_sync": TaskDefinition(
+                task_key="sw_industry_sync",
+                name="申万行业分类同步",
+                description="同步申万三级行业分类与全市场成分股，供行业关联看板聚合使用（行业划分很少变动，每天一次即可）。",
+                default_time="08:40",
+                default_enabled=True,
+                sort_order=25,
+                runner=_run_sw_industry_sync,
+                default_cron_rule="40 8 * * mon-fri",
+                parameter_schema=(),
+            ),
+            "market_alert_baseline": TaskDefinition(
+                task_key="market_alert_baseline",
+                name="提示看板盘前基准",
+                description="盘前用分析库分钟线算同时段量能基准，并算好全市场九转计数结构。",
+                default_time="09:15",
+                default_enabled=True,
+                sort_order=26,
+                runner=_run_market_alert_baseline,
+                default_cron_rule="15 9 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="baseline_days",
+                        label="量能基准交易日数",
+                        value_type="integer",
+                        default=20,
+                        description="同时段量比的分母取前 N 个有数据的交易日均值；分析库分钟线滚动保留 32 个交易日。",
+                        min_value=3,
+                        max_value=32,
+                        step=1,
+                    ),
+                ),
+            ),
+            "market_alert_scan": TaskDefinition(
+                task_key="market_alert_scan",
+                name="提示看板盘中扫描",
+                description="盘中每分钟一次全市场快照扫描，按强势/活跃/观望/规避记录首次命中（每轮只调 1 次 tushare）。",
+                default_time="09:35",
+                default_enabled=True,
+                sort_order=27,
+                runner=_run_market_alert_scan,
+                default_cron_rule="*/1 9-15 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="min_volume_ratio",
+                        label="活跃量比阈值",
+                        value_type="number",
+                        default=1.3,
+                        description="当日累计量 ÷ 前 N 个交易日同一时刻累计量均值（N 见盘前基准任务），达到该倍数才算放量。",
+                        min_value=1.0,
+                        max_value=10.0,
+                        step=0.1,
+                    ),
+                    TaskParameterDefinition(
+                        key="strong_volume_ratio",
+                        label="强势量比阈值",
+                        value_type="number",
+                        default=2.0,
+                        description="在活跃基础上再叠加的量比要求，配合九转高计数 3~4 才打强势。",
+                        min_value=1.0,
+                        max_value=10.0,
+                        step=0.1,
+                    ),
+                    TaskParameterDefinition(
+                        key="min_amount_yi",
+                        label="成交额门槛（亿）",
+                        value_type="number",
+                        default=0.8,
+                        description="当日累计成交额低于该值不打多头标签，过滤没有流动性的个股。",
+                        min_value=0.1,
+                        max_value=50.0,
+                        step=0.1,
                     ),
                 ),
             ),

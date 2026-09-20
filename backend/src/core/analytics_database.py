@@ -123,6 +123,36 @@ class AStockTHSMember(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockSWIndustry(AnalyticsBase):
+    """申万三级行业分类（SW2021），行业关联看板的分级骨架。"""
+    __tablename__ = "a_stock_sw_industry"
+
+    index_code = Column(String(16), primary_key=True)
+    industry_name = Column(String(64))
+    industry_code = Column(String(16))
+    level = Column(String(4))          # L1 / L2 / L3
+    parent_code = Column(String(16))
+    src = Column(String(16), default="SW2021")
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockSWMember(AnalyticsBase):
+    """申万行业成分股：每只股票对应的一/二/三级行业（只保留最新归属）。"""
+    __tablename__ = "a_stock_sw_member"
+
+    ts_code = Column(String(16), primary_key=True)
+    l1_code = Column(String(16))
+    l1_name = Column(String(64))
+    l2_code = Column(String(16))
+    l2_name = Column(String(64))
+    l3_code = Column(String(16))
+    l3_name = Column(String(64))
+    in_date = Column(Date)
+    out_date = Column(Date)
+    is_new = Column(String(8))
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class AStockTHSDaily(AnalyticsBase):
     """同花顺行业/概念/主题板块日行情。"""
     __tablename__ = "a_stock_ths_daily"
@@ -882,6 +912,8 @@ def ensure_analytics_schema():
     ensure_analytics_table_columns()
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_a_stock_basic_industry_status ON a_stock_basic(industry, list_status)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l1 ON a_stock_sw_member(l1_name)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l3 ON a_stock_sw_member(l3_name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_ann ON a_stock_income(ann_date)",
