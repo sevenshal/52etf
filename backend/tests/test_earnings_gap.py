@@ -414,3 +414,53 @@ def test_config_save_and_load_round_trip():
     assert config["min_amount_yuan"] == eg.DEFAULT_CONFIG["min_amount_yuan"]
     eg.save_config(eg.DEFAULT_CONFIG)
     assert eg.load_config() == eg.DEFAULT_CONFIG
+
+
+def test_payload_is_json_serializable_when_sources_are_mixed():
+    """生产 500 复现：预告表有数据后，concat 会给财报行补出 NaN 的 forecast_type，
+    `NaN or None` 又留不住（NaN 是真值），payload 里漏出 NaN 就会让整个接口报
+    ValueError: Out of range float values are not JSON compliant: nan。
+    名称/行业为 NULL 的股票同样不能漏 NaN。"""
+    import json
+
+    calendar = _calendar(date(2024, 1, 1), date(2026, 9, 18))
+    t1 = date(2026, 8, 24)
+    bars = [
+        ("600001.SH", t1, 10.3, 10.8, 10.25, 10.6, 10.0, 80000.0),
+        ("600002.SH", t1, 10.3, 10.8, 10.25, 10.6, 10.0, 80000.0),
+    ]
+    connection = _build_db(
+        bars,
+        [("600001.SH", date(2026, 6, 30), date(2026, 8, 21), 60.0)],
+        [("600001.SH", None, None, date(2018, 1, 2)),  # 名称和行业都是 NULL
+         ("600002.SH", "预告股", "电子", date(2018, 1, 2))],
+        calendar=calendar,
+        forecasts=[("600002.SH", date(2026, 6, 30), date(2026, 8, 21), "预增", 45.0, 80.0)],
+    )
+    payload = eg.compute_earnings_gap(
+        now=datetime(2026, 9, 18, 18, 25), service=FakeTushare(limits={t1: {}}), connection=connection,
+    )
+    by_symbol = {item["symbol"]: item for item in payload["items"]}
+    report_item = by_symbol["600001.SH"]
+    assert report_item["source"] == "report"
+    assert report_item["forecast_type"] is None  # 财报行不该带预告类型
+    assert report_item["name"] is None and report_item["industry"] is None
+    assert by_symbol["600002.SH"]["forecast_type"] == "预增"
+    # 预告行没有环比/营收同比，同样是 NaN 列
+    assert by_symbol["600002.SH"]["or_yoy"] is None
+    # allow_nan=False 等价于 FastAPI 的 JSONResponse
+    json.dumps(payload, allow_nan=False, default=str)
+
+
+def test_json_safe_replaces_non_finite_and_numpy_scalars():
+    import json
+    import numpy as np
+
+    payload = eg.json_safe({
+        "a": float("nan"),
+        "b": float("inf"),
+        "c": [np.float64("nan"), np.float64(1.5), np.int64(3)],
+        "d": {"e": np.bool_(True), "f": "文本", "g": None},
+    })
+    assert payload == {"a": None, "b": None, "c": [None, 1.5, 3], "d": {"e": True, "f": "文本", "g": None}}
+    json.dumps(payload, allow_nan=False)

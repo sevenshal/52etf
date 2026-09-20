@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -308,6 +309,39 @@ def _to_date(value: Any) -> Optional[date]:
 
 def _round(value: Any, digits: int = 2) -> Optional[float]:
     return safe_float(value, digits)
+
+
+def _text(value: Any) -> Optional[str]:
+    """DuckDB 取回来的空文本列是 NaN（float），不能直接塞进 JSON。"""
+    if value is None or value is pd.NaT:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def json_safe(value: Any) -> Any:
+    """递归把 NaN/Inf、numpy 标量换成 JSON 能表示的值。
+
+    payload 直接交给 FastAPI 序列化，任何一列漏了 NaN 都会让整个接口 500
+    （"Out of range float values are not JSON compliant"），所以在出口统一兜一次底。
+    """
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if hasattr(value, "item") and not isinstance(value, (str, bytes, date, datetime)):
+        # numpy/pandas 标量
+        try:
+            return json_safe(value.item())
+        except (AttributeError, ValueError):
+            return value
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +776,7 @@ def compute_earnings_gap(
 
 
 def _payload(now, last_trade_date, config, stats, warnings, items) -> Dict[str, Any]:
-    return {
+    return json_safe({
         "payload_version": PAYLOAD_VERSION,
         "computed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "trade_date": last_trade_date.isoformat(),
@@ -751,7 +785,7 @@ def _payload(now, last_trade_date, config, stats, warnings, items) -> Dict[str, 
         "stats": stats,
         "warnings": list(dict.fromkeys(warnings)),
         "items": items,
-    }
+    })
 
 
 def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
@@ -813,11 +847,11 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
 
         items.append({
             "symbol": code,
-            "name": row.name,
-            "industry": row.industry,
+            "name": _text(row.name),
+            "industry": _text(row.industry),
             "source": row.source,
             "source_label": SOURCE_LABELS.get(row.source, row.source),
-            "forecast_type": getattr(row, "forecast_type", None) or None,
+            "forecast_type": _text(getattr(row, "forecast_type", None)),
             "np_yoy_max": _round(getattr(row, "p_change_max", None)),
             "end_date": row.end_date.isoformat(),
             "ann_date": row.ann_date.isoformat(),
