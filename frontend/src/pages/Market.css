@@ -75,6 +75,69 @@
   font-size: 12px;
 }
 
+.market-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.market-tile {
+  position: relative;
+  padding: 8px 10px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.market-tile__name {
+  color: #61708a;
+  font-size: 12px;
+}
+
+.market-tile__value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.market-tile__value b {
+  color: #172033;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.market-tile__sub {
+  color: #8b97a8;
+  font-size: 12px;
+}
+
+.market-tile .is-up,
+.market-overview .is-up,
+.market-volume .is-up {
+  color: #e5484d;
+}
+
+.market-tile .is-down,
+.market-overview .is-down,
+.market-volume .is-down {
+  color: #2f9e63;
+}
+
+.market-spark {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin-top: 2px;
+}
+
+.market-overview__lower {
+  margin-top: 12px;
+}
+
 .earnings-gap-search {
   width: 220px;
 }
