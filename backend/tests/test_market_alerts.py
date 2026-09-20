@@ -63,7 +63,7 @@ def test_classify_active_and_strong():
 def test_classify_rejects_thin_volume_and_amount():
     structure = _structure(td_up_prev=1)
     common = dict(price=10.5, pre_close=10.0, day_open=10.1, structure=structure)
-    assert classify(cum_amount=1.0e8, volume_ratio=1.2, **common) is None   # 量比不够
+    assert classify(cum_amount=1.0e8, volume_ratio=1.2, **common) is None   # 量比不够（默认门槛 1.3）
     assert classify(cum_amount=0.5e8, volume_ratio=2.0, **common) is None   # 成交额不够
     # 基准缺失（新股/停牌）时不打多头标签，避免把"无基准"当成放量
     assert classify(cum_amount=1.0e8, volume_ratio=None, **common) is None

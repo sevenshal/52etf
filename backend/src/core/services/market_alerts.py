@@ -11,7 +11,7 @@
 标签（一根轴上的四档，方向由九转计数定，强度由量比与位置定）：
 
 - 强势：活跃全部条件 + 九转高计数 3~4（实测这一档命中后表现最好）+ 量比 ≥2
-- 活跃：九转高计数 ≥2 · 当日上涨 · 现价>今开 · 累计成交额 ≥0.8亿 · 量比 ≥1.5
+- 活跃：九转高计数 ≥2 · 当日上涨 · 现价>今开 · 累计成交额 ≥0.8亿 · 量比 ≥1.3
 - 观望：九转低计数 ≥2，或急跌结构（较 3 日前跌 >4% 且跌破 4 日前开盘价）
 - 规避：观望条件 + 九转低计数 ≥4 + 当日下跌
 
@@ -52,7 +52,7 @@ MIN_LISTED_TRADING_DAYS = 60
 class AlertThresholds:
     """全部阈值集中在这里，后续按命中后涨幅回测结果调整。"""
     min_amount_yuan: float = 0.8e8
-    min_volume_ratio: float = 1.5
+    min_volume_ratio: float = 1.3
     strong_volume_ratio: float = 2.0
     active_td_up_min: int = 2
     strong_td_up_min: int = 3

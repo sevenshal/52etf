@@ -609,7 +609,7 @@ def _run_a_stock_base_data_sync(
 
 
 def _run_market_alert_scan(
-    min_volume_ratio: float = 1.5,
+    min_volume_ratio: float = 1.3,
     strong_volume_ratio: float = 2.0,
     min_amount_yi: float = 0.8,
 ):
@@ -1634,7 +1634,7 @@ class ScheduledTaskManager:
                         key="min_volume_ratio",
                         label="活跃量比阈值",
                         value_type="number",
-                        default=1.5,
+                        default=1.3,
                         description="当日累计量 ÷ 前 N 个交易日同一时刻累计量均值（N 见盘前基准任务），达到该倍数才算放量。",
                         min_value=1.0,
                         max_value=10.0,
