@@ -100,7 +100,7 @@ const getActiveTabKey = (pathname, state) => {
 const AppLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { accountId, isAdmin, canViewAiStock } = useAccount();
+  const { accountId, isAdmin, canViewAiStock, canViewMarket } = useAccount();
 
   const renderTabLabel = (icon, text) => (
     <span className="app-shell__tab-label">
@@ -110,8 +110,8 @@ const AppLayout = () => {
   );
 
   const items = [
-    // 市场：仅管理员可见，放在 ETF 前面
-    ...(accountId && isAdmin ? [
+    // 市场：管理员或已被授权的账户可见，放在 ETF 前面
+    ...(accountId && (isAdmin || canViewMarket) ? [
       {
         key: '/market',
         label: renderTabLabel(<FundOutlined />, '市场'),

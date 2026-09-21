@@ -5,6 +5,7 @@ import {
 } from 'antd';
 import { FilterFilled, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import request from '../utils/request';
+import { useAccount } from '../contexts/AccountContext';
 import StockDetailLink from '../components/StockDetailLink';
 
 const { Text } = Typography;
@@ -196,6 +197,8 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
 };
 
 const MarketEarningsGap = () => {
+  // 改阈值、全市场重算只有管理员能做（后端同样只放行管理员）
+  const { isAdmin } = useAccount();
   const [data, setData] = useState(null);
   const [config, setConfig] = useState(null);
   const [defaults, setDefaults] = useState(null);
@@ -394,8 +397,8 @@ const MarketEarningsGap = () => {
             className="earnings-gap-search"
             onChange={event => setKeyword(event.target.value)}
           />
-          <Button icon={<SettingOutlined />} onClick={() => setConfigOpen(true)} disabled={!config}>参数</Button>
-          <Button icon={<ReloadOutlined />} onClick={() => load(true)} loading={loading}>重新计算</Button>
+          {isAdmin && <Button icon={<SettingOutlined />} onClick={() => setConfigOpen(true)} disabled={!config}>参数</Button>}
+          <Button icon={<ReloadOutlined />} onClick={() => load(isAdmin)} loading={loading}>{isAdmin ? '重新计算' : '刷新'}</Button>
         </Space>
         {data && (
           <Space wrap size={[12, 4]} className="market-summary">

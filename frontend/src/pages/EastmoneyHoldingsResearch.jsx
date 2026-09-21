@@ -33,6 +33,7 @@ import ReactECharts from 'echarts-for-react';
 import { EastmoneyPortfolioLink } from '../components/EastmoneyStockLink';
 import StockDetailLink from '../components/StockDetailLink';
 import request from '../utils/request';
+import { useAccount } from '../contexts/AccountContext';
 import './EastmoneyHoldingsResearch.css';
 
 const { Text } = Typography;
@@ -482,6 +483,8 @@ const getBoardHistoryChartOption = (historyRows = []) => {
 
 
 const EastmoneyHoldingsResearch = () => {
+  // 凭据配置只有管理员能看/改（后端同样只放行管理员）
+  const { isAdmin } = useAccount();
   const [activeOnly, setActiveOnly] = useState(true);
   const [snapshotDate, setSnapshotDate] = useState('');
   const [searchText, setSearchText] = useState('');
@@ -1289,9 +1292,11 @@ const EastmoneyHoldingsResearch = () => {
                   onChange={event => setSearchText(event.target.value)}
                 />
                 <Button icon={<ReloadOutlined />} onClick={fetchLatest} loading={latestLoading} />
-                <Button icon={<SettingOutlined />} onClick={openCredentialModal}>
-                  凭据配置
-                </Button>
+                {isAdmin && (
+                  <Button icon={<SettingOutlined />} onClick={openCredentialModal}>
+                    凭据配置
+                  </Button>
+                )}
               </Space>
             )}
           >

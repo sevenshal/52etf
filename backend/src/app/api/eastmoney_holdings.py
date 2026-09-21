@@ -36,7 +36,7 @@ from ...core.services.factor_backtest_engine import (
     normalize_a_stock_symbol,
 )
 from ...robot.a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
-from .account import valid_admin_account
+from .account import valid_admin_account, valid_market_viewer
 
 
 logger = logging.getLogger(__name__)
@@ -1754,7 +1754,7 @@ def get_eastmoney_top_holdings_latest(
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     limit: int = Query(300, ge=1, le=2000),
     snapshot_date: Optional[date] = Query(None, description="指定持仓快照日期；为空时取最新日期"),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_top_holdings_latest(
         active_only=active_only,
@@ -1768,7 +1768,7 @@ def get_eastmoney_board_holding_symbols(
     ths_code: str = Query(..., min_length=1, max_length=24),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     snapshot_date: Optional[date] = Query(None, description="指定持仓快照日期；为空时取最新日期"),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_board_holding_symbols(
         ths_code=ths_code,
@@ -1782,7 +1782,7 @@ def get_eastmoney_board_history(
     ths_code: str = Query(..., min_length=1, max_length=24),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     limit: int = Query(500, ge=1, le=2000),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_board_history(
         ths_code=ths_code,
@@ -1796,7 +1796,7 @@ def get_eastmoney_top_holdings_history(
     symbol: str = Query(..., min_length=1),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     limit: int = Query(500, ge=1, le=2000),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_top_holdings_history(
         symbol=symbol,
@@ -1811,7 +1811,7 @@ def get_eastmoney_top_holding_details(
     snapshot_date: date = Query(...),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     limit: int = Query(1000, ge=1, le=5000),
-    _: str = Depends(valid_admin_account),
+    _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_top_holding_details(
         symbol=symbol,

@@ -35,6 +35,7 @@ import ReactECharts from 'echarts-for-react';
 import { XueqiuPortfolioLink } from '../components/XueqiuStockLink';
 import StockDetailLink from '../components/StockDetailLink';
 import request from '../utils/request';
+import { useAccount } from '../contexts/AccountContext';
 import './XueqiuTopHoldingsResearch.css';
 
 const { Text } = Typography;
@@ -533,6 +534,8 @@ const XINGLAN_STRATEGY_OPTIONS = [
 ];
 
 const XueqiuTopHoldingsResearch = () => {
+  // 策略配置只有管理员能改（后端同样只放行管理员）
+  const { isAdmin } = useAccount();
   const [activeOnly, setActiveOnly] = useState(true);
   const [snapshotDate, setSnapshotDate] = useState('');
   const [searchText, setSearchText] = useState('');
@@ -1649,9 +1652,11 @@ const XueqiuTopHoldingsResearch = () => {
                   onChange={event => setSearchText(event.target.value)}
                 />
                 <Button icon={<ReloadOutlined />} onClick={fetchLatest} loading={latestLoading} />
-                <Button icon={<SettingOutlined />} onClick={openConfigModal}>
-                  策略配置
-                </Button>
+                {isAdmin && (
+                  <Button icon={<SettingOutlined />} onClick={openConfigModal}>
+                    策略配置
+                  </Button>
+                )}
               </Space>
             )}
           >
