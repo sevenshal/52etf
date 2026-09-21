@@ -187,7 +187,7 @@ const dailyColumns = [
 
 const rankTableProps = {
   size: 'small',
-  pagination: { pageSize: 10, size: 'small' },
+  pagination: { defaultPageSize: 10, size: 'small' },
   scroll: { x: 720 },
 };
 
@@ -603,7 +603,7 @@ const AStockFundFlow = ({ embedded = false }) => {
                     columns={dailyColumns}
                     dataSource={stockDaily.slice().reverse()}
                     rowKey={record => record.date}
-                    pagination={{ pageSize: 10, size: 'small' }}
+                    pagination={{ defaultPageSize: 10, size: 'small' }}
                     scroll={{ x: 760 }}
                   />
                 </Card>

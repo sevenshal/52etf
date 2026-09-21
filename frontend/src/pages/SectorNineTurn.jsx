@@ -190,7 +190,7 @@ const DailyTab = ({ refreshToken }) => {
             size="small"
             columns={signalColumns}
             dataSource={[...buys, ...sells, ...holdings]}
-            pagination={{ pageSize: 20, hideOnSinglePage: true }}
+            pagination={{ defaultPageSize: 20, hideOnSinglePage: true }}
             locale={{ emptyText: '当天没有个股信号' }}
           />
 
@@ -200,7 +200,7 @@ const DailyTab = ({ refreshToken }) => {
             size="small"
             columns={sectorColumns}
             dataSource={sectors}
-            pagination={{ pageSize: 20, hideOnSinglePage: true }}
+            pagination={{ defaultPageSize: 20, hideOnSinglePage: true }}
           />
         </>
       )}
@@ -318,7 +318,7 @@ const PaperTab = ({ refreshToken }) => {
 
           <Title level={5} style={{ marginTop: 24 }}>订单</Title>
           <Table rowKey="id" size="small" columns={orderColumns} dataSource={data.orders || []}
-                 pagination={{ pageSize: 20, hideOnSinglePage: true }} />
+                 pagination={{ defaultPageSize: 20, hideOnSinglePage: true }} />
         </>
       )}
     </Spin>
@@ -511,7 +511,7 @@ const BacktestTab = () => {
               <Title level={5} style={{ marginTop: 24 }}>完整规则的成交明细</Title>
               <Table rowKey={(row, index) => `${row.ts_code}-${row.entry_date}-${index}`} size="small"
                      columns={tradeColumns} dataSource={detail.trades?.strategy || []}
-                     pagination={{ pageSize: 20, hideOnSinglePage: true }} />
+                     pagination={{ defaultPageSize: 20, hideOnSinglePage: true }} />
             </>
           ) : null}
         </>

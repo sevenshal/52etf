@@ -1394,7 +1394,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             columns={netAssetHistoryColumns}
             dataSource={netAssetHistoryRows}
             loading={netAssetHistoryLoading}
-            pagination={{ pageSize: 8 }}
+            pagination={{ defaultPageSize: 8 }}
             size="small"
             scroll={{ x: 1200 }}
           />
@@ -1454,7 +1454,7 @@ const ExternalTradingAccountManager = ({ embedded = false }) => {
             columns={brokerPositionColumns}
             dataSource={brokerPositionRows}
             loading={brokerPositionsLoading}
-            pagination={{ pageSize: 10 }}
+            pagination={{ defaultPageSize: 10 }}
             size="small"
             scroll={{ x: 1860 }}
             onRow={record => ({
