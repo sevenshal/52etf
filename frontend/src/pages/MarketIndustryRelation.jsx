@@ -335,7 +335,13 @@ const MarketIndustryRelation = () => {
       width: 96,
       render: (value, record) => (
         <Space size={2}>
-          {value && <Tag color={LABEL_COLORS[value]}>{value}</Tag>}
+          {value && (
+            <Tooltip title={record.hit_time
+              ? `${record.hit_time} 命中（与提示看板同一条记录）${record.live_label && record.live_label !== value ? ` · 此刻实时状态：${record.live_label}` : ''}`
+              : '按此刻快照实时判定'}>
+              <Tag color={LABEL_COLORS[value]}>{value}</Tag>
+            </Tooltip>
+          )}
           {record.limit_up && <Tag color="red">{record.boards > 1 ? `${record.boards}板` : '涨停'}</Tag>}
           {record.limit_down && <Tag color="green">跌停</Tag>}
         </Space>
@@ -440,6 +446,9 @@ const MarketIndustryRelation = () => {
       )}
 
       {error && <Alert className="market-alert" type="warning" showIcon message={error} />}
+      {(data?.warnings || []).map(item => (
+        <Alert key={item} className="market-alert" type="warning" showIcon message={item} />
+      ))}
 
       <Spin spinning={loading && !data}>
         {data?.picked ? (

@@ -190,11 +190,29 @@ def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_
 
 
 def baseline_at(baseline: pd.DataFrame, minute_label: str) -> Dict[str, float]:
-    """取出某一分钟那一列：{ts_code: 基准累计量}，缺失的股票不会出现在结果里。"""
-    if baseline is None or baseline.empty or minute_label not in baseline.columns:
+    """取出某一分钟那一列：{ts_code: 基准累计量}。
+
+    分钟列只有真实交易分钟（09:30~11:30、13:01~15:00），所以午休、收盘后或任何
+    非交易分钟直接按 minute_label 取会整列取空，进而让所有多头标签消失。
+    这里退到「不晚于该时刻的最近一个分钟列」；早于开盘才返回空。
+    """
+    if baseline is None or baseline.empty:
         return {}
-    column = baseline[minute_label].dropna()
-    return {str(code): float(value) for code, value in column.items() if value > 0}
+    column = _nearest_minute_column(baseline.columns, minute_label)
+    if column is None:
+        return {}
+    values = baseline[column].dropna()
+    return {str(code): float(value) for code, value in values.items() if value > 0}
+
+
+def _nearest_minute_column(columns: Any, minute_label: str) -> Optional[str]:
+    candidates = sorted(str(column) for column in columns)
+    if not candidates:
+        return None
+    if minute_label in candidates:
+        return minute_label
+    earlier = [column for column in candidates if column <= minute_label]
+    return earlier[-1] if earlier else None
 
 
 def classify(
@@ -334,7 +352,16 @@ class AlertScanner:
         try:
             self._structures = build_structures(connection, today)
             self._baseline = build_volume_baseline(connection, today, days=baseline_days)
-            self._baseline_date = today
+            # 分钟库还没同步好或分析库被占用时会拿到空基准，这时不要标记成已准备，
+            # 否则这一整天的多头标签都会因为没有量比而消失
+            if self._structures and not self._baseline.empty:
+                self._baseline_date = today
+            else:
+                self._baseline_date = None
+                logger.warning(
+                    "提示看板基准未就绪：结构 %s 只、基准 %s 个点，下次调用会重试",
+                    len(self._structures), int(self._baseline.size),
+                )
             self._baseline_days = baseline_days
         finally:
             if own:
@@ -352,11 +379,16 @@ class AlertScanner:
             return self._limits
         try:
             frame = TushareService.get_instance().get_a_stock_stk_limit_frame(today)
-            self._limits = {
-                str(row.ts_code).strip().upper(): (safe_float(row.up_limit), safe_float(row.down_limit))
-                for row in frame.itertuples(index=False)
-            } if frame is not None and not frame.empty else {}
-            self._limits_date = today
+            if frame is not None and not frame.empty:
+                self._limits = {
+                    str(row.ts_code).strip().upper(): (safe_float(row.up_limit), safe_float(row.down_limit))
+                    for row in frame.itertuples(index=False)
+                }
+                self._limits_date = today
+            else:
+                # 盘前 stk_limit 还没发布时会取到空；不要把空结果缓存一整天
+                logger.warning("tushare stk_limit 返回空（%s），下次调用会重试", today)
+                self._limits = {}
         except Exception as exc:  # noqa: BLE001  取不到只影响涨停/连板统计
             logger.warning("tushare stk_limit 获取 %s 失败: %s", today, exc)
             self._limits = {}

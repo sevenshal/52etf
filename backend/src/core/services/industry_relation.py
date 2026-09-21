@@ -489,19 +489,31 @@ def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, fo
     finally:
         connection.close()
 
+    warnings: List[str] = []
+    baseline = state.get("baseline")
+    limits = state.get("limits") or {}
+    if baseline is None or getattr(baseline, "empty", True):
+        warnings.append("量能基准未就绪（分析库分钟线缺失或盘前任务未跑），强势/活跃暂不可用")
+    if not limits:
+        warnings.append("涨跌停价(stk_limit)未取到，涨停/跌停与连板统计暂不可用")
+
     minute_label = now.strftime("%H:%M")
     stocks = build_stock_rows(
         quotes, members, state.get("structures") or {},
-        baseline_at(state.get("baseline"), minute_label),
-        state.get("limits") or {}, boards, thresholds,
+        baseline_at(baseline, minute_label), limits, boards, thresholds,
     )
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")
 
-    hit_times = _load_hit_times(today)
+    hits = _load_today_hits(today)
     for stock in stocks:
         stock["labels_3d"] = recent_labels.get(stock["ts_code"], [])
-        stock["hit_time"] = hit_times.get(stock["ts_code"])
+        hit = hits.get(stock["ts_code"])
+        stock["hit_time"] = hit["hit_time"] if hit else None
+        if hit and hit.get("label"):
+            # 命中记录优先：与提示看板保持同一口径
+            stock["live_label"] = stock.get("label")
+            stock["label"] = hit["label"]
 
     if universe_codes is not None:
         stocks = [stock for stock in stocks if stock["ts_code"] in universe_codes]
@@ -527,6 +539,7 @@ def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, fo
         "focus": focus or "",
         "picked": len(stocks),
         "min_rank_count": MIN_RANK_COUNT,
+        "warnings": warnings,
         "universe_options": [
             {"key": item["key"], "name": item["name"]} for item in UNIVERSE_OPTIONS
         ],
@@ -538,18 +551,23 @@ def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, fo
     }
 
 
-def _load_hit_times(today: date) -> Dict[str, str]:
-    """今日提示看板的首次命中时刻，作为成分股表的「命中时间」列。"""
+def _load_today_hits(today: date) -> Dict[str, Dict[str, Any]]:
+    """今日提示看板记录的首次命中（标签 + 时刻）。
+
+    行业关联的「今日标签」以命中记录为准：提示看板记的是当天第一次满足条件的时刻，
+    是一个"今天发生过"的事实；而实时重算只反映此刻状态，10:05 命中的股票到 14:30
+    可能已经不满足条件。两边口径不一致会让同一个行业在两个页面显示不同的家数。
+    """
     try:
         from ..database import MarketAlertHit, get_db_ctx
 
         with get_db_ctx() as db:
-            rows = db.query(MarketAlertHit.ts_code, MarketAlertHit.hit_time).filter(
-                MarketAlertHit.trade_date == today
-            ).all()
-        return {str(row[0]): str(row[1]) for row in rows}
-    except Exception as exc:  # noqa: BLE001  命中时间只是附加信息
-        logger.warning("读取当日命中时刻失败: %s", exc)
+            rows = db.query(
+                MarketAlertHit.ts_code, MarketAlertHit.hit_time, MarketAlertHit.label
+            ).filter(MarketAlertHit.trade_date == today).all()
+        return {str(row[0]): {"hit_time": str(row[1]), "label": str(row[2])} for row in rows}
+    except Exception as exc:  # noqa: BLE001  命中记录只是附加信息
+        logger.warning("读取当日命中记录失败: %s", exc)
         return {}
 
 

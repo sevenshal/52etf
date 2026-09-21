@@ -155,5 +155,67 @@ def test_build_volume_baseline_averages_requested_trading_days():
 
     four_days = build_volume_baseline(connection, date(2026, 9, 18), days=4)
     assert baseline_at(four_days, "09:31")["000001.SZ"] == 250    # (100+200+300+400)/4
-    assert baseline_at(four_days, "14:00") == {}                  # 没有数据的时刻返回空
+    # 晚于最后一根的时刻退到最后一根（收盘后看当天基准），早于第一根才返回空
+    assert baseline_at(four_days, "14:00")["000001.SZ"] == 500.0
+    assert baseline_at(four_days, "09:00") == {}
     connection.close()
+
+
+def test_baseline_at_falls_back_to_nearest_earlier_minute():
+    """午休、收盘后或任何非交易分钟都要退到最近一个有基准的分钟，否则多头标签会整片消失。"""
+    import pandas as pd
+
+    from src.core.services.market_alerts import baseline_at
+
+    baseline = pd.DataFrame(
+        [[100.0, 200.0, 300.0]],
+        index=["000001.SZ"],
+        columns=["09:30", "11:30", "13:01"],
+    )
+
+    assert baseline_at(baseline, "11:30")["000001.SZ"] == 200.0    # 命中当分钟
+    assert baseline_at(baseline, "12:57")["000001.SZ"] == 200.0    # 午休 → 退到 11:30
+    assert baseline_at(baseline, "15:20")["000001.SZ"] == 300.0    # 收盘后 → 退到最后一根
+    assert baseline_at(baseline, "09:20") == {}                    # 开盘前没有基准
+    assert baseline_at(pd.DataFrame(), "10:00") == {}
+
+
+def test_limits_does_not_cache_empty_result(monkeypatch):
+    """盘前 stk_limit 还没发布时会返回空，不能把空结果缓存一整天。"""
+    from datetime import date as date_cls
+
+    from src.core.services import market_alerts as module
+
+    calls = {"n": 0}
+
+    class FakeService:
+        def get_a_stock_stk_limit_frame(self, trade_date):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return pd.DataFrame()      # 盘前：空
+            return pd.DataFrame([{"ts_code": "000001.SZ", "up_limit": 11.0, "down_limit": 9.0}])
+
+    monkeypatch.setattr(module.TushareService, "get_instance", classmethod(lambda cls: FakeService()))
+    scanner = module.AlertScanner()
+    today = date_cls(2026, 9, 21)
+
+    assert scanner.limits(today) == {}
+    assert scanner.limits(today)["000001.SZ"] == (11.0, 9.0)   # 第二次重试拿到了
+    assert calls["n"] == 2
+    assert scanner.limits(today)["000001.SZ"] == (11.0, 9.0)   # 拿到之后才缓存
+    assert calls["n"] == 2
+
+
+def test_prepare_does_not_mark_ready_when_baseline_missing(monkeypatch):
+    """分钟库没同步好时基准为空，不能标记成已准备，否则一整天都没有多头标签。"""
+    from datetime import date as date_cls
+
+    from src.core.services import market_alerts as module
+
+    monkeypatch.setattr(module, "build_structures", lambda connection, today: {"000001.SZ": object()})
+    monkeypatch.setattr(module, "build_volume_baseline", lambda connection, today, days=20: pd.DataFrame())
+
+    scanner = module.AlertScanner()
+    scanner.prepare(date_cls(2026, 9, 21), connection=object())
+
+    assert scanner._baseline_date is None      # 下次调用还会重试
