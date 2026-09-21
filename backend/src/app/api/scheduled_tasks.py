@@ -98,6 +98,9 @@ def run_scheduled_task_now(
             # Manual execution is the explicit 128-trading-day repair action;
             # the scheduled runner keeps its default incremental behavior.
             runner_kwargs.update(full=True, trading_days=128)
+        if task_key == "sw_minute_sync":
+            # 手动执行 = 全量回补，交易日数取任务参数；定时执行不带 full，走增量
+            runner_kwargs["full"] = True
         if task_key in SYMBOLS_RUN_TASK_KEYS and payload and payload.symbols:
             runner_kwargs["symbols"] = payload.symbols
         scheduled_task_manager.trigger_task(
