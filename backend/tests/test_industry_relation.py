@@ -65,11 +65,12 @@ def test_build_stock_rows_joins_industry_label_and_boards():
     members = pd.DataFrame([{"ts_code": "000001.SZ", "l1_name": "银行", "l2_name": "国有大型银行", "l3_name": "国有大型银行Ⅲ"}])
     structures = {"000001.SZ": StockStructure(
         ts_code="000001.SZ", name="平安银行", td_up_prev=2,
-        close_ref=[9.0, 9.2, 9.4, 9.6, 10.0], open_ref4=9.3, listed_days=300)}
+        close_ref=[9.6, 9.8, 10.0, 9.9, 10.0], open_ref4=9.7, open_ref1=9.8,
+        vol_max_prev=1_500_000.0, listed_days=300)}
 
     rows = build_stock_rows(
         quotes, members, structures,
-        baseline_minute={"000001.SZ": 800_000.0},       # 量比 2.5
+        baseline_minute={"000001.SZ": 800_000.0},       # 量比 2.5；累计量 200 万 ≥ 前 8 日最大 150 万 → 强势
         limits={"000001.SZ": (11.0, 9.0)},              # 现价 11.0 = 涨停价
         boards={"000001.SZ": 1},                        # 昨日已有 1 个板
     )
@@ -197,6 +198,8 @@ def test_load_recent_labels_returns_last_days_with_boards():
         status = 2 if i >= 28 else 1            # 最后两天涨停
         rows.append(("000001.SZ", day, prev, price, prev, 1_000_000, 200_000, status))
     con.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR)")
+    con.execute("INSERT INTO a_stock_basic VALUES ('000001.SZ', '平安银行')")
 
     history = load_recent_labels(con, date(2026, 9, 1), days=3)["000001.SZ"]
 

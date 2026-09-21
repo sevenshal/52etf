@@ -70,13 +70,17 @@ MIN_LISTED_TRADING_DAYS = 60
 
 @dataclass(frozen=True)
 class AlertThresholds:
-    """全部阈值集中在这里，后续按命中后涨幅回测结果调整。"""
-    min_amount_yuan: float = 0.8e8
-    min_volume_ratio: float = 1.3
-    strong_volume_ratio: float = 2.0
-    active_td_up_min: int = 2
-    strong_td_up_min: int = 3
-    strong_td_up_max: int = 4
+    """全部阈值集中在这里。
+
+    活跃/强势的结构与 3 日涨幅区间、观望公式，是用参考站点（kpan）全市场 4 天共 2.2 万个
+    收盘口径标签逐条验证过的（见 research/kpan_label_regression.py），不要随意改；
+    量比与成交额门槛是我们自己的量能口径，可按命中后收益调。
+    """
+    min_amount_yuan: float = 0.8e8        # 成交额下限（参考站点实测硬边界正好 0.8 亿）
+    min_volume_ratio: float = 1.3         # 同时段量比下限（我们的量能口径）
+    gain3_min_pct: float = 5.0            # 3 日涨幅下限（参考站点所有活跃样本都 > 5%）
+    gain3_max_pct: float = 15.0           # 3 日涨幅上限（超过 15% 的不再算活跃，避免追高）
+    strong_volume_days: int = 8           # 强势：当日累计量 ≥ 前 N 个交易日的最大日成交量（=通达信 V≥HHV(V,9)）
     watch_td_down_min: int = 2
     avoid_td_down_min: int = 4
     drop_pct_vs_3d: float = 4.0
@@ -98,6 +102,8 @@ class StockStructure:
     td_down_prev: int = 0      # 截至昨日的连续 C<REF(C,4) 天数
     close_ref: List[float] = field(default_factory=list)   # 最近 5 日收盘，close_ref[-1] 为昨收
     open_ref4: Optional[float] = None                      # 4 日前开盘价
+    open_ref1: Optional[float] = None                      # 昨日开盘价（活跃 COND1 要求昨日收阳）
+    vol_max_prev: Optional[float] = None                   # 前 N 个交易日最大日成交量（股，与实时快照同单位）
     listed_days: int = 0
     is_st: bool = False
     days_since_low9: Optional[int] = None                  # 距上次「低9」的交易日数（仅记录，不参与判定）
@@ -142,7 +148,7 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
     """从 DuckDB 日线算出每只股票的九转计数基数与参考价（不含当日）。"""
     frame = connection.execute(
         """
-        SELECT d.ts_code, d.trade_date, d.close, d.open, b.name, b.list_date,
+        SELECT d.ts_code, d.trade_date, d.close, d.open, d.vol, b.name, b.list_date,
                m.l1_name, m.l2_name, m.l3_name
         FROM a_stock_market_daily d
         LEFT JOIN a_stock_basic b ON b.ts_code = d.ts_code
@@ -175,10 +181,24 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
             td_down_prev=down,
             close_ref=closes[-5:],
             open_ref4=safe_float(group["open"].iloc[-4]) if len(group) >= 4 else None,
+            open_ref1=safe_float(group["open"].iloc[-1]),
+            vol_max_prev=_max_prev_volume(group["vol"], STOCK_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
         )
     return structures
+
+
+# 日线成交量单位 → 实时快照/分钟线的"股"（均用真实数据核对过）
+STOCK_DAILY_VOL_TO_SHARES = 100        # a_stock_market_daily.vol 是手
+SW_DAILY_VOL_TO_SHARES = 10_000        # a_stock_sw_daily.vol 是万股
+
+
+def _max_prev_volume(volumes: pd.Series, to_shares: float,
+                     days: int = AlertThresholds.strong_volume_days) -> Optional[float]:
+    """前 days 个交易日（不含当日）的最大日成交量，换算成股。"""
+    values = [float(v) for v in volumes.tail(days).tolist() if v is not None and not pd.isna(v)]
+    return max(values) * to_shares if values else None
 
 
 BASELINE_TABLES = ("a_stock_minute_bar", "a_stock_sw_minute_bar")
@@ -203,7 +223,7 @@ def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dic
     }
     frame = connection.execute(
         """
-        SELECT ts_code, trade_date, close, open FROM a_stock_sw_daily
+        SELECT ts_code, trade_date, close, open, vol FROM a_stock_sw_daily
         WHERE trade_date >= ? AND trade_date < ?
         ORDER BY ts_code, trade_date
         """,
@@ -229,6 +249,8 @@ def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dic
             td_down_prev=down,
             close_ref=closes[-5:],
             open_ref4=safe_float(group["open"].iloc[-4]) if len(group) >= 4 else None,
+            open_ref1=safe_float(group["open"].iloc[-1]),
+            vol_max_prev=_max_prev_volume(group["vol"], SW_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
         )
@@ -319,9 +341,25 @@ def classify(
     cum_amount: float,
     volume_ratio: Optional[float],
     structure: StockStructure,
+    cum_volume: Optional[float] = None,
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
 ) -> Optional[str]:
-    """按四档标签判定；返回 None 表示当前不打标签。"""
+    """按四档标签判定；返回 None 表示当前不打标签。
+
+    价格结构、3 日涨幅区间、强势的量能条件、观望公式都与参考站点（kpan）一致，
+    是用其全市场收盘口径标签逐条验证过的；只有活跃的量能门槛是我们自己的同时段量比。
+
+    活跃（下列全部满足）：
+      ① 价格结构 COND1 OR COND2（通达信原式）
+         COND1 = 九转高计数≥2 AND C>REF(C,1) AND REF(C,1)>REF(C,2) AND C>O AND REF(C,1)>REF(O,1)
+         COND2 = C>REF(C,1) AND C>O AND (REF(C,1)<REF(C,5) OR 九转高计数≥2) AND C>REF(C,4) AND 3日涨幅>5%
+      ② 5% < 3日涨幅 < 15%            （参考站点所有活跃样本都落在这个区间，含走 COND1 的）
+      ③ 累计成交额 ≥ 0.8 亿
+      ④ 同时段量比 ≥ 1.3             （我们的量能口径；参考站点这一道在日线上无法精确还原）
+    强势：活跃 AND 当日累计量 ≥ 前 8 个交易日最大日成交量（通达信 V≥HHV(V,9)，验证 100%）
+    观望：九转低计数≥2，或急跌结构（参考站点公开公式，验证 100%）
+    规避：观望 AND 九转低计数≥4 AND 当日下跌（我们自己的口径，与参考站点不同）
+    """
     if not price or not pre_close or pre_close <= 0:
         return None
     if structure.is_st or structure.listed_days < MIN_LISTED_TRADING_DAYS:
@@ -329,22 +367,36 @@ def classify(
 
     pct = (price / pre_close - 1) * 100
     refs = structure.close_ref
-    close_ref4 = refs[-4] if len(refs) >= 4 else None
+    close_ref1 = refs[-1] if len(refs) >= 1 else None
+    close_ref2 = refs[-2] if len(refs) >= 2 else None
     close_ref3 = refs[-3] if len(refs) >= 3 else None
+    close_ref4 = refs[-4] if len(refs) >= 4 else None
+    close_ref5 = refs[-5] if len(refs) >= 5 else None
 
     td_up = structure.td_up_prev + 1 if close_ref4 and price > close_ref4 else 0
     td_down = structure.td_down_prev + 1 if close_ref4 and price < close_ref4 else 0
 
-    # 多头侧：九转高计数 + 上涨 + 站上今开 + 成交额门槛 + 同时段放量
-    if (td_up >= thresholds.active_td_up_min and pct > 0 and day_open and price > day_open
-            and cum_amount >= thresholds.min_amount_yuan
-            and volume_ratio is not None and volume_ratio >= thresholds.min_volume_ratio):
-        if (thresholds.strong_td_up_min <= td_up <= thresholds.strong_td_up_max
-                and volume_ratio >= thresholds.strong_volume_ratio):
-            return LABEL_STRONG
-        return LABEL_ACTIVE
+    # ---- 多头侧 ----
+    if close_ref1 and close_ref3 and day_open:
+        gain3 = (price / close_ref3 - 1) * 100
+        rising_today = price > close_ref1 and price > day_open                     # 当日上涨且收阳
+        cond1 = bool(
+            td_up >= 2 and rising_today and close_ref2 and close_ref1 > close_ref2
+            and structure.open_ref1 and close_ref1 > structure.open_ref1
+        )
+        cond2 = bool(
+            rising_today and close_ref4 and price > close_ref4 and gain3 > 5.0
+            and ((close_ref5 and close_ref1 < close_ref5) or td_up >= 2)
+        )
+        if ((cond1 or cond2)
+                and thresholds.gain3_min_pct < gain3 < thresholds.gain3_max_pct
+                and cum_amount >= thresholds.min_amount_yuan
+                and volume_ratio is not None and volume_ratio >= thresholds.min_volume_ratio):
+            if cum_volume and structure.vol_max_prev and cum_volume >= structure.vol_max_prev:
+                return LABEL_STRONG
+            return LABEL_ACTIVE
 
-    # 空头侧：九转低计数，或急跌结构（较 3 日前跌超 4% 且跌破 4 日前开盘）
+    # ---- 空头侧：九转低计数，或急跌结构（较 3 日前跌超 4% 且跌破 4 日前开盘） ----
     sharp_drop = bool(
         close_ref4 and close_ref3 and structure.open_ref4
         and price < close_ref4 and price < structure.open_ref4 and price < close_ref3
@@ -397,7 +449,7 @@ def evaluate_snapshot(
         label = classify(
             price=price, pre_close=pre_close, day_open=day_open or 0.0,
             cum_amount=cum_amount, volume_ratio=volume_ratio,
-            structure=structure, thresholds=thresholds,
+            structure=structure, cum_volume=cum_vol, thresholds=thresholds,
         )
         if not label:
             continue
@@ -1020,7 +1072,8 @@ def fetch_alerts(
         "thresholds": {
             "min_amount_yi": DEFAULT_THRESHOLDS.min_amount_yuan / 1e8,
             "min_volume_ratio": DEFAULT_THRESHOLDS.min_volume_ratio,
-            "strong_volume_ratio": DEFAULT_THRESHOLDS.strong_volume_ratio,
-            "active_td_up_min": DEFAULT_THRESHOLDS.active_td_up_min,
+            "gain3_min_pct": DEFAULT_THRESHOLDS.gain3_min_pct,
+            "gain3_max_pct": DEFAULT_THRESHOLDS.gain3_max_pct,
+            "strong_volume_days": DEFAULT_THRESHOLDS.strong_volume_days,
         },
     }

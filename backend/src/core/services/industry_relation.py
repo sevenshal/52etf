@@ -21,6 +21,7 @@ import pandas as pd
 
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .market_alerts import (
+    STOCK_DAILY_VOL_TO_SHARES,
     LABEL_ACTIVE,
     LABEL_AVOID,
     LABEL_STRONG,
@@ -208,38 +209,36 @@ def load_universe_codes(connection, universe: str, today: date) -> Optional[set]
 def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -> Dict[str, List[Dict[str, Any]]]:
     """前 N 个交易日的收盘口径标签与连板数：{ts_code: [{d, label, boards}, ...]}（按日期升序）。
 
-    用日线还原，所以历史上线第一天就有数据，不必等盘中扫描攒。
-    量比分母用该日前 20 日均量，与盘中同时段量比口径一致（只是粒度到日）。
+    用日线还原，所以上线第一天就有历史。判定直接调盘中用的同一个 classify()，
+    只是把"当时"换成那一天的收盘：结构取那天之前的日线，量比分母换成前 20 日均量
+    （历史日期拿不到盘中同时段数据）。不要在这里另写一份判定——以前复制过一份，
+    结果急跌结构漏了「跌破 4 日前开盘」，前3标签的观望一直比盘中宽。
     """
     frame = connection.execute(
         """
-        SELECT ts_code, trade_date, open, close, pre_close, vol, amount, limit_status
-        FROM a_stock_market_daily
-        WHERE trade_date >= ?
-        ORDER BY ts_code, trade_date
+        SELECT d.ts_code, d.trade_date, d.open, d.close, d.pre_close, d.vol, d.amount, d.limit_status, b.name
+        FROM a_stock_market_daily d
+        LEFT JOIN a_stock_basic b ON b.ts_code = d.ts_code
+        WHERE d.trade_date >= ?
+        ORDER BY d.ts_code, d.trade_date
         """,
-        [today - timedelta(days=90)],
+        # 窗口要够长：classify 要求上市满 60 个交易日，太短会把所有股票都判成"新股"
+        [today - timedelta(days=200)],
     ).fetchdf()
     if frame.empty:
         return {}
 
-    frame = frame.sort_values(["ts_code", "trade_date"])
-    grouped = frame.groupby("ts_code", sort=False)
-    # 前 20 日均量（不含当日）与九转计数所需的 4 日前收盘
-    frame["avg_vol20"] = grouped["vol"].transform(lambda x: x.shift(1).rolling(20, min_periods=5).mean())
-    frame["close_ref4"] = grouped["close"].transform(lambda x: x.shift(4))
-    frame["close_ref3"] = grouped["close"].transform(lambda x: x.shift(3))
-    frame["td_up"] = 0
-    frame["td_down"] = 0
-
     results: Dict[str, List[Dict[str, Any]]] = {}
-    for ts_code, group in grouped:
-        closes = group["close"].tolist()
+    for ts_code, group in frame.groupby("ts_code", sort=False):
+        closes = [safe_float(v) for v in group["close"].tolist()]
+        opens = [safe_float(v) for v in group["open"].tolist()]
+        vols = [safe_float(v) or 0.0 for v in group["vol"].tolist()]
+        statuses = group["limit_status"].tolist()
         up_runs, down_runs = [], []
         up = down = 0
         for index in range(len(closes)):
             ref = closes[index - 4] if index >= 4 else None
-            if ref is None or pd.isna(ref):
+            if ref is None or closes[index] is None:
                 up = down = 0
             elif closes[index] > ref:
                 up, down = up + 1, 0
@@ -250,59 +249,50 @@ def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -
             up_runs.append(up)
             down_runs.append(down)
 
-        tail = group.tail(days)
+        name = str(group["name"].iloc[-1] or "")
         history: List[Dict[str, Any]] = []
-        offset = len(group) - len(tail)
-        for position, row in enumerate(tail.itertuples(index=False)):
-            index = offset + position
-            label = _daily_label(row, up_runs[index], down_runs[index])
+        for index in range(max(0, len(group) - days), len(group)):
+            row = group.iloc[index]
+            label = None
+            if index >= 5 and closes[index]:
+                structure = StockStructure(
+                    ts_code=str(ts_code),
+                    name=name,
+                    td_up_prev=up_runs[index - 1],
+                    td_down_prev=down_runs[index - 1],
+                    close_ref=[value for value in closes[index - 5:index] if value is not None],
+                    open_ref4=opens[index - 4],
+                    open_ref1=opens[index - 1],
+                    vol_max_prev=max(vols[max(0, index - DEFAULT_THRESHOLDS.strong_volume_days):index]) * STOCK_DAILY_VOL_TO_SHARES,
+                    listed_days=index,
+                    is_st="ST" in name.upper(),
+                )
+                prior = [value for value in vols[max(0, index - 20):index] if value]
+                label = classify(
+                    price=closes[index],
+                    pre_close=safe_float(row["pre_close"]) or closes[index - 1],
+                    day_open=opens[index] or 0.0,
+                    cum_amount=(safe_float(row["amount"]) or 0.0) * 1000,      # 日线 amount 单位千元
+                    volume_ratio=(vols[index] / (sum(prior) / len(prior))) if prior else None,
+                    structure=structure,
+                    cum_volume=vols[index] * STOCK_DAILY_VOL_TO_SHARES,
+                )
             boards = 0
-            if row.limit_status in LIMIT_UP_STATUS:
+            if statuses[index] in LIMIT_UP_STATUS:
                 boards = 1
                 back = index - 1
-                while back >= 0 and group["limit_status"].iloc[back] in LIMIT_UP_STATUS:
+                while back >= 0 and statuses[back] in LIMIT_UP_STATUS:
                     boards += 1
                     back -= 1
+            trade_date = row["trade_date"]
             history.append({
-                "d": row.trade_date.strftime("%Y-%m-%d") if hasattr(row.trade_date, "strftime") else str(row.trade_date)[:10],
+                "d": trade_date.strftime("%Y-%m-%d") if hasattr(trade_date, "strftime") else str(trade_date)[:10],
                 "label": label,
                 "boards": boards,
-                "limit_down": bool(row.limit_status in LIMIT_DOWN_STATUS),
+                "limit_down": bool(statuses[index] in LIMIT_DOWN_STATUS),
             })
         results[str(ts_code)] = history
     return results
-
-
-def _daily_label(row: Any, td_up: int, td_down: int) -> Optional[str]:
-    """按收盘口径给某一天打标签，阈值与盘中一致（量比分母换成 20 日均量）。"""
-    close = safe_float(row.close)
-    pre_close = safe_float(row.pre_close)
-    day_open = safe_float(row.open)
-    if not close or not pre_close or not day_open:
-        return None
-    pct = (close / pre_close - 1) * 100
-    amount_yuan = (safe_float(row.amount) or 0.0) * 1000     # 日线 amount 单位千元
-    avg_vol = safe_float(getattr(row, "avg_vol20", None))
-    volume_ratio = (safe_float(row.vol) or 0.0) / avg_vol if avg_vol else None
-    close_ref4 = safe_float(getattr(row, "close_ref4", None))
-    close_ref3 = safe_float(getattr(row, "close_ref3", None))
-
-    if (td_up >= DEFAULT_THRESHOLDS.active_td_up_min and pct > 0 and close > day_open
-            and amount_yuan >= DEFAULT_THRESHOLDS.min_amount_yuan
-            and volume_ratio is not None and volume_ratio >= DEFAULT_THRESHOLDS.min_volume_ratio):
-        if (DEFAULT_THRESHOLDS.strong_td_up_min <= td_up <= DEFAULT_THRESHOLDS.strong_td_up_max
-                and volume_ratio >= DEFAULT_THRESHOLDS.strong_volume_ratio):
-            return LABEL_STRONG
-        return LABEL_ACTIVE
-    sharp_drop = bool(
-        close_ref4 and close_ref3 and close < close_ref4 and close < close_ref3
-        and (close_ref3 - close) / close * 100 > DEFAULT_THRESHOLDS.drop_pct_vs_3d
-    )
-    if td_down >= DEFAULT_THRESHOLDS.watch_td_down_min or sharp_drop:
-        if td_down >= DEFAULT_THRESHOLDS.avoid_td_down_min and pct < 0:
-            return LABEL_AVOID
-        return LABEL_WATCH
-    return None
 
 
 def focus_matches(stock: Dict[str, Any], focus: str) -> bool:
@@ -451,7 +441,9 @@ def build_stock_rows(
                     (safe_float(getattr(quote, "vol", None)) or 0.0) / baseline_minute[ts_code]
                     if baseline_minute.get(ts_code) else None
                 ),
-                structure=structure, thresholds=thresholds,
+                structure=structure,
+                cum_volume=safe_float(getattr(quote, "vol", None)),
+                thresholds=thresholds,
             )
         prior_boards = boards.get(ts_code, 0)
         limit_up = bool(up_limit and price >= up_limit - 1e-4)

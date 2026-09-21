@@ -59,16 +59,18 @@ def synthetic_market():
 
     同时段量比 = 当日累计 ÷ 前 20 日同分钟累计均值：
     10:00 时 (3000+1000)/3100 = 1.29 < 1.3，10:01 时 5000/3200 = 1.56 ≥ 1.3 → 首次命中应为 10:01 活跃。
-    九转高计数在长期上涨里远大于 4，所以只会到活跃、不会到强势。
+    日线每天涨 2%、收阳，回放日再高开 2% 走高：3 日涨幅 (1.02³−1) ≈ 6.1%，落在 5%~15%，满足 COND1。
+    日线每天 1 万手（100 万股），回放日全天累计不到 25 万股，所以只会到活跃、不会到强势。
     """
     con = duckdb.connect()
     days = [date(2001, 1, 1) + timedelta(days=i) for i in range(100)]
     days = [d for d in days if d.weekday() < 5][:75]
     target = days[-1]
 
-    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, open DOUBLE, close DOUBLE, pre_close DOUBLE)")
-    con.executemany("INSERT INTO a_stock_market_daily VALUES ('000001.SZ', ?, ?, ?, ?)", [
-        (d, 5.0 + 0.05 * i, 5.0 + 0.05 * i + 0.02, 5.0 + 0.05 * (i - 1) + 0.02) for i, d in enumerate(days)
+    closes = [round(5.0 * 1.02 ** i, 4) for i in range(len(days))]
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, open DOUBLE, close DOUBLE, pre_close DOUBLE, vol DOUBLE)")
+    con.executemany("INSERT INTO a_stock_market_daily VALUES ('000001.SZ', ?, ?, ?, ?, ?)", [
+        (d, closes[i] / 1.01, closes[i], closes[i - 1] if i else closes[0], 10000.0) for i, d in enumerate(days)
     ])
     con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR, list_date DATE)")
     con.execute("INSERT INTO a_stock_basic VALUES ('000001.SZ', '测试股份', DATE '1999-01-01')")
@@ -84,7 +86,7 @@ def synthetic_market():
     labels = _minute_labels()
     for d in days[-21:]:
         is_target = d == target
-        day_open = 5.0 + 0.05 * (len(days) - 1) if is_target else 5.0
+        day_open = closes[-2] * 1.02 if is_target else 5.0
         for index, label in enumerate(labels):
             ts = datetime.combine(d, datetime.strptime(label, "%H:%M").time())
             vol = 1000.0 if (is_target and label >= "10:00") else 100.0
