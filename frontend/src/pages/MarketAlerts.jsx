@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
-import { CloseOutlined } from '@ant-design/icons';
+import { Alert, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
-import StockKlineChart from '../components/StockKlineChart';
+import StockInlinePanel from '../components/StockInlinePanel';
 import './Market.css';
 
 const { Text } = Typography;
@@ -319,20 +318,20 @@ const MarketAlerts = () => {
             </Row>
 
             {klineStock && (
-              <Card
-                size="small"
+              <StockInlinePanel
+                stock={klineStock}
+                onClose={() => setKlineStock(null)}
+                highlightTime={klineStock.hit_time}
                 className="market-alerts__kline"
-                title={(
-                  <Space size={8}>
-                    <span>{klineStock.name} {klineStock.code}</span>
+                extraMeta={(
+                  <>
                     <Tag color={LABEL_META[klineStock.label]?.color}>{klineStock.label}</Tag>
-                    <Text type="secondary">命中 {klineStock.hit_time} · {fmtPct(klineStock.pct)} · 命中后 {fmtPct(klineStock.cum_pct)}</Text>
-                  </Space>
+                    <Text type="secondary">
+                      命中 {klineStock.hit_time} · {fmtPct(klineStock.pct)} · 命中后 {fmtPct(klineStock.cum_pct)}
+                    </Text>
+                  </>
                 )}
-                extra={<Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setKlineStock(null)} />}
-              >
-                <StockKlineChart symbol={klineStock.ts_code} height={420} />
-              </Card>
+              />
             )}
 
             <Card

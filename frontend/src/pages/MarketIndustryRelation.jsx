@@ -3,6 +3,7 @@ import { Alert, Card, Col, Empty, Row, Segmented, Space, Spin, Table, Tag, Toolt
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
+import StockInlinePanel from '../components/StockInlinePanel';
 import './Market.css';
 
 const { Text } = Typography;
@@ -195,6 +196,7 @@ const MarketIndustryRelation = () => {
   const [selected, setSelected] = useState({ l1: null, l2: null, l3: null });
   const [history, setHistory] = useState(null);
   const [columnMode, setColumnMode] = useState('full');   // full=完整列 / compact=精简列
+  const [panelStock, setPanelStock] = useState(null);     // 点成分股名称打开的行情面板
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -290,7 +292,12 @@ const MarketIndustryRelation = () => {
       dataIndex: 'name',
       width: 100,
       fixed: 'left',
-      render: (value, record) => <StockDetailLink symbol={record.ts_code}>{value}</StockDetailLink>,
+      render: (value, record) => (
+        <Space size={4}>
+          <Text className="industry-link" onClick={() => setPanelStock(record)}>{value}</Text>
+          <StockDetailLink symbol={record.ts_code} className="stock-external-link">↗</StockDetailLink>
+        </Space>
+      ),
     },
     { title: '代码', dataIndex: 'code', width: 80, render: value => <Text type="secondary">{value}</Text> },
     {
@@ -473,6 +480,23 @@ const MarketIndustryRelation = () => {
                   ? <ReactECharts option={historyOption} style={{ height: 190 }} notMerge lazyUpdate />
                   : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击左侧任意行业，这里显示它的行业指数走势与成交额" />}
               </Card>
+
+              {panelStock && (
+                <StockInlinePanel
+                  stock={panelStock}
+                  onClose={() => setPanelStock(null)}
+                  highlightTime={panelStock.hit_time}
+                  className="market-industry__panel"
+                  extraMeta={(
+                    <>
+                      {panelStock.label && <Tag color={LABEL_COLORS[panelStock.label]}>{panelStock.label}</Tag>}
+                      <Text type="secondary">
+                        {panelStock.l1_name} · {panelStock.l3_name} · {fmtPct(panelStock.pct)}
+                      </Text>
+                    </>
+                  )}
+                />
+              )}
 
               <Card
                 size="small"

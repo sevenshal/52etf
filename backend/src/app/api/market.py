@@ -18,6 +18,7 @@ from ...core.services.industry_relation import (
     fetch_industry_history,
     fetch_industry_relation,
 )
+from ...core.services.intraday_minutes import fetch_intraday_minutes
 from ...core.services.market_alerts import fetch_alerts, run_alert_scan
 from ...core.services.market_overview import (
     MarketOverviewDataError,
@@ -170,4 +171,19 @@ async def update_earnings_gap_config(
     try:
         return {"config": config, "signals": await run_in_threadpool(refresh_earnings_gap)}
     except (EarningsGapDataError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/intraday-minutes")
+async def get_intraday_minutes(
+    ts_code: str = Query(..., min_length=6, max_length=16),
+    days: int = Query(5, ge=1, le=10),
+    account_id: str = Depends(valid_admin_account),
+):
+    """个股分时小图：库里分钟历史 + 当日实时补齐，点开个股时按需调用。"""
+    try:
+        return await run_in_threadpool(fetch_intraday_minutes, ts_code, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
