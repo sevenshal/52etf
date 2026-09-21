@@ -14,30 +14,6 @@ import { lazy } from 'react';
  */
 export const adminRouteDescriptors = [
   {
-    path: '/market',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
-  },
-  {
-    path: '/market/alerts',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
-    props: { initialTab: 'alerts' },
-  },
-  {
-    path: '/market/industry',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
-    props: { initialTab: 'industry' },
-  },
-  {
-    path: '/market/fund-flow',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
-    props: { initialTab: 'fund-flow' },
-  },
-  {
-    path: '/market/earnings-gap',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/Market')),
-    props: { initialTab: 'earnings-gap' },
-  },
-  {
     path: '/chan-analysis',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/ChanAnalysis')),
   },
@@ -49,11 +25,6 @@ export const adminRouteDescriptors = [
   {
     path: '/factor-lab',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
-  },
-  {
-    path: '/factor-lab/xueqiu-holdings',
-    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/FactorLab')),
-    props: { initialTab: 'xueqiu-holdings' },
   },
   {
     path: '/factor-lab/sector-nine-turn',

@@ -7,6 +7,7 @@ const AccountContext = createContext({
   accountId: null,
   isAdmin: false,
   canViewAiStock: false,
+  canViewMarket: false,
   accountReady: false,
   login: () => {},
   logout: () => {}
@@ -17,6 +18,7 @@ export function AccountProvider({ children }) {
   const [accountId, setAccountId] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [canViewAiStock, setCanViewAiStock] = useState(false);
+  const [canViewMarket, setCanViewMarket] = useState(false);
   const [accountReady, setAccountReady] = useState(false);
   const navigate = useNavigate();
 
@@ -34,6 +36,7 @@ export function AccountProvider({ children }) {
         if (data.valid) {
           setIsAdmin(Boolean(data.is_admin));
           setCanViewAiStock(Boolean(data.can_view_ai_stock));
+          setCanViewMarket(Boolean(data.can_view_market));
         } else {
           localStorage.removeItem('accountId');
           setAccountId(null);
@@ -43,15 +46,17 @@ export function AccountProvider({ children }) {
       .catch(() => {
         setIsAdmin(false);
         setCanViewAiStock(false);
+        setCanViewMarket(false);
       })
       .finally(() => setAccountReady(true));
   }, [navigate]);
 
-  const login = (id, admin = false, aiStockViewer = false) => {
+  const login = (id, admin = false, aiStockViewer = false, marketViewer = false) => {
     localStorage.setItem('accountId', id);
     setAccountId(id);
     setIsAdmin(Boolean(admin));
     setCanViewAiStock(Boolean(aiStockViewer));
+    setCanViewMarket(Boolean(marketViewer));
     setAccountReady(true);
   };
 
@@ -60,6 +65,7 @@ export function AccountProvider({ children }) {
     setAccountId(null);
     setIsAdmin(false);
     setCanViewAiStock(false);
+    setCanViewMarket(false);
     setAccountReady(true);
     navigate('/profile');
   };
@@ -68,6 +74,7 @@ export function AccountProvider({ children }) {
     accountId,
     isAdmin,
     canViewAiStock,
+    canViewMarket,
     accountReady,
     login,
     logout

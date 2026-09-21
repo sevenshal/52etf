@@ -7,6 +7,8 @@ import MarketOverview from './MarketOverview';
 import MarketAlerts from './MarketAlerts';
 import MarketIndustryRelation from './MarketIndustryRelation';
 import MarketEarningsGap from './MarketEarningsGap';
+import XueqiuTopHoldingsResearch from './XueqiuTopHoldingsResearch';
+import EastmoneyHoldingsResearch from './EastmoneyHoldingsResearch';
 import './Market.css';
 
 const { Text } = Typography;
@@ -17,6 +19,8 @@ const MARKET_TAB_ITEMS = [
   { key: 'industry', label: '行业关联', path: '/market/industry' },
   { key: 'fund-flow', label: '资金流向', path: '/market/fund-flow' },
   { key: 'earnings-gap', label: '净利润断层', path: '/market/earnings-gap' },
+  { key: 'xueqiu-holdings', label: '雪球持仓', path: '/market/xueqiu-holdings' },
+  { key: 'eastmoney-holdings', label: '东方财富', path: '/market/eastmoney-holdings' },
 ];
 
 const STATS_REFRESH_MS = 60 * 1000;
@@ -105,6 +109,8 @@ const Market = ({ initialTab = 'overview' }) => {
       {activeTab === 'industry' && <MarketIndustryRelation />}
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
       {activeTab === 'earnings-gap' && <MarketEarningsGap />}
+      {activeTab === 'xueqiu-holdings' && <XueqiuTopHoldingsResearch />}
+      {activeTab === 'eastmoney-holdings' && <EastmoneyHoldingsResearch />}
     </div>
   );
 };
