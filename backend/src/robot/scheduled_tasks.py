@@ -695,8 +695,23 @@ def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
     logging.getLogger("ScheduledTaskManager").info("Minute data synced: %s", state)
     return (
         f"{state.get('status')} 个股分钟 {state.get('saved_rows', 0)} 行 · "
-        f"申万分钟 {state.get('sw_saved_rows', 0)} 行（{state.get('sw_mode') or '-'}，"
-        f"{state.get('sw_requests', 0)} 次请求） · 错误 {len(state.get('errors') or [])} 条"
+        f"错误 {len(state.get('errors') or [])} 条"
+    )
+
+
+def _run_sw_minute_sync(full: bool = False, trading_days: int = 128):
+    """申万一/二级分钟线：定时按缺口增量（窗口与个股分钟线一致）；手动执行时回补 trading_days 个交易日。"""
+    from ..core.services.chan_minute_data import ROLLING_TRADING_DAYS
+    from ..core.services.sw_minute_data import sync_sw_minute_bars
+
+    result = sync_sw_minute_bars(int(trading_days) if full else ROLLING_TRADING_DAYS, full=full)
+    errors = result.get("errors") or []
+    if errors and not result.get("saved_rows"):
+        raise RuntimeError(f"申万分钟线同步失败: {errors[:5]}")
+    return (
+        f"{'全量' if result.get('mode') == 'full' else '增量'} · 指数 {result.get('codes', 0)} 个 · "
+        f"{result.get('days', 0)} 个交易日 · {result.get('requests', 0)} 次请求 · "
+        f"写入 {result.get('saved_rows', 0)} 行 · 清理 {result.get('pruned_rows', 0)} 行 · 错误 {len(errors)} 条"
     )
 
 
@@ -1747,7 +1762,7 @@ class ScheduledTaskManager:
                 task_key="chan_minute_sync",
                 name="分钟行情同步",
                 description=(
-                    "同时同步全市场个股与申万一/二级行业指数的 1 分钟线（缠论、分时小图、提示看板量能基准共用）。"
+                    "同步全市场个股 1 分钟线（缠论、分时小图、提示看板量能基准共用）；申万行业分钟线见「申万分钟行情同步」。"
                     "日常盘后按实际缺口增量同步并额外重叠1个交易日；点击手动执行时回补最近128个交易日。"
                 ),
                 default_time="21:30",
@@ -1755,6 +1770,31 @@ class ScheduledTaskManager:
                 sort_order=75,
                 runner=_run_chan_minute_sync,
                 parameter_schema=(),
+            ),
+            "sw_minute_sync": TaskDefinition(
+                task_key="sw_minute_sync",
+                name="申万分钟行情同步",
+                description=(
+                    "同步申万一/二级行业指数 1 分钟线（sw_mins），供行业分时小图与提示看板行业量能基准、历史回放使用。"
+                    "日常盘后按缺口增量同步（与个股分钟线同一滚动窗口）；点击手动执行时回补最近 N 个交易日。"
+                    "与个股分钟行情同步拆开，手动回补行业分钟线不会连带重拉个股、挤占 stk_mins 频次。"
+                ),
+                default_time="21:40",
+                default_enabled=True,
+                sort_order=76,
+                runner=_run_sw_minute_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="trading_days",
+                        label="手动回补交易日数",
+                        value_type="integer",
+                        default=128,
+                        description="只在点击手动执行时生效；定时执行始终按缺口增量同步。",
+                        min_value=1,
+                        max_value=250,
+                        step=1,
+                    ),
+                ),
             ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",
