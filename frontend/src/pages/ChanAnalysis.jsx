@@ -508,7 +508,7 @@ const ChanAnalysis = () => {
             <Text>候选 {scan.candidate_count ?? 0}</Text><Text>已扫描 {scan.processed_count ?? 0}</Text>
             <Text>买点 {scan.signal_count ?? 0}</Text><Text type={scan.error_count ? 'danger' : 'secondary'}>失败 {scan.error_count ?? 0}</Text></Space>
           {['PENDING', 'RUNNING'].includes(scan.status) && <Progress percent={scan.candidate_count ? Math.round((scan.processed_count || 0) / scan.candidate_count * 100) : 0} />}
-          <Table size="small" rowKey="id" pagination={{ pageSize: 20 }} dataSource={scan.signals || []}
+          <Table size="small" rowKey="id" pagination={{ defaultPageSize: 20 }} dataSource={scan.signals || []}
             onRow={row => ({ onDoubleClick: () => {
               setSymbolOptions(previous => [
                 { label: `${row.name || row.ts_code} · ${row.ts_code}`, value: row.ts_code },

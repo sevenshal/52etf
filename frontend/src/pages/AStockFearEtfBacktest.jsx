@@ -369,7 +369,7 @@ const AStockFearEtfBacktest = () => {
 
       {searchResults.length > 0 && (
         <Card className="a-fear-etf-card" title={`搜索排名 · ${searchMeta?.total_combinations || searchResults.length}组`}>
-          <Table rowKey={record => JSON.stringify(record.params)} columns={searchColumns} dataSource={searchResults} size="small" scroll={{ x: 2200 }} pagination={{ pageSize: 20 }} />
+          <Table rowKey={record => JSON.stringify(record.params)} columns={searchColumns} dataSource={searchResults} size="small" scroll={{ x: 2200 }} pagination={{ defaultPageSize: 20 }} />
         </Card>
       )}
 
@@ -415,7 +415,7 @@ const AStockFearEtfBacktest = () => {
             <Card className="a-fear-etf-card" title="资金曲线"><ReactECharts option={equityOption} style={{ height: 390 }} /></Card>
             <Row gutter={16}>
               <Col xs={24} lg={7}><Card className="a-fear-etf-card" title="年度收益"><Table rowKey="year" size="small" pagination={false} dataSource={result.yearly_returns || []} columns={[{ title: '年度', dataIndex: 'year' }, { title: '收益', dataIndex: 'return_pct', render: pct }]} /></Card></Col>
-              <Col xs={24} lg={17}><Card className="a-fear-etf-card" title="交易流水"><Table rowKey={(row, index) => `${row.date}-${row.action}-${row.etf_symbol}-${index}`} size="small" dataSource={result.trades || []} columns={tradeColumns} scroll={{ x: 1350 }} pagination={{ pageSize: 12 }} /></Card></Col>
+              <Col xs={24} lg={17}><Card className="a-fear-etf-card" title="交易流水"><Table rowKey={(row, index) => `${row.date}-${row.action}-${row.etf_symbol}-${index}`} size="small" dataSource={result.trades || []} columns={tradeColumns} scroll={{ x: 1350 }} pagination={{ defaultPageSize: 12 }} /></Card></Col>
             </Row>
           </>
         )}

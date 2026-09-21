@@ -104,6 +104,13 @@ const StockSystemAllocation = ({ refreshToken, busy, onRunAllocation }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [statusFilter, setStatusFilter] = useState('target');
+  // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+  const [tablePage, setTablePage] = useState({ current: 1, pageSize: 50 });
+
+  // 状态筛选变了回到第 1 页，否则停在后几页时切筛选会看到空表
+  useEffect(() => {
+    setTablePage(prev => ({ ...prev, current: 1 }));
+  }, [statusFilter]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -234,7 +241,16 @@ const StockSystemAllocation = ({ refreshToken, busy, onRunAllocation }) => {
               dataSource={visibleRows}
               columns={allocationColumns}
               scroll={{ x: 900 }}
-              pagination={{ pageSize: 50, showSizeChanger: true }}
+              pagination={{
+                current: tablePage.current,
+                pageSize: tablePage.pageSize,
+                showSizeChanger: true,
+                // 改每页条数时回到第 1 页，避免当前页码超出新的总页数
+                onChange: (current, pageSize) => setTablePage(prev => ({
+                  current: pageSize !== prev.pageSize ? 1 : current,
+                  pageSize,
+                })),
+              }}
             />
 
             <Table
