@@ -30,6 +30,8 @@ DEPRECATED_TASK_KEYS = [
     "external_trading_fee_reconcile_retry",
     "a_stock_fund_flow_sync",
     "snowball_ptrade_heartbeat_check",
+    # 申万行业分类/成分/日线已并入「A股基础数据同步」（sync_sw_industry_data），独立任务作废
+    "sw_industry_sync",
 ]
 XUEQIU_RANK_DEFAULT_LIMIT = 1000
 XUEQIU_RANK_MIN_LIMIT = 100
