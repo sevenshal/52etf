@@ -103,7 +103,7 @@ const buildIndustryColumns = (level, compact) => {
 
   const tail = [
     {
-      title: <Tooltip title="情绪分 = 涨停×10 + 首板×6 + 二板×9 + 多板×12 − 跌停×10 + 上涨占比×30 + 涨幅×2">情绪</Tooltip>,
+      title: <Tooltip title="行业情绪分，0~100">情绪</Tooltip>,
       dataIndex: 'sentiment',
       width: 56,
       align: 'right',
@@ -111,7 +111,7 @@ const buildIndustryColumns = (level, compact) => {
       render: value => <Text>{value}</Text>,
     },
     {
-      title: <Tooltip title="综合分 = 涨幅分×45% + 量能分×25% + 情绪分×30%，按它排名">综合</Tooltip>,
+      title: <Tooltip title="行业综合分，按它排名">综合</Tooltip>,
       dataIndex: 'composite',
       width: 60,
       align: 'right',
