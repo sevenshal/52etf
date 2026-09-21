@@ -13,10 +13,10 @@ const UP_COLOR = '#e5484d';
 const DOWN_COLOR = '#2f9e63';
 
 const LABEL_META = {
-  强势: { color: 'red', desc: '九转高计数 3~4 且同时段量比 ≥2' },
-  活跃: { color: 'volcano', desc: '九转高计数 ≥2 · 上涨 · 成交额 ≥0.8亿 · 量比 ≥1.5' },
+  强势: { color: 'red', desc: '活跃 且 当日累计量 ≥ 前 8 日最大日成交量' },
+  活跃: { color: 'volcano', desc: '连阳结构（九转高2 连涨收阳 或 3日涨幅>5%的突破）· 3日涨幅 5%~15% · 成交额 ≥0.8亿 · 同时段量比 ≥1.3' },
   观望: { color: 'green', desc: '九转低计数 ≥2 或急跌结构' },
-  规避: { color: 'success', desc: '九转低计数 ≥4 且当日下跌' },
+  规避: { color: 'success', desc: '观望 且 较最近一根九转高计数≥1 的收盘回撤 >7%' },
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
@@ -256,9 +256,17 @@ const MarketAlerts = () => {
       render: (_, record) => (record.td_up ? `高${record.td_up}` : record.td_down ? `低${record.td_down}` : '-'),
     },
     { title: '命中价', dataIndex: 'price', width: 84, align: 'right' },
-    { title: '现价', dataIndex: 'last_price', width: 84, align: 'right' },
     {
-      title: '命中后涨幅',
+      title: <Tooltip title="全市场快照的最新价（盘后/休市为最近交易日收盘），30 秒刷新">最新价</Tooltip>,
+      dataIndex: 'last_price',
+      width: 84,
+      align: 'right',
+      render: (value, record) => (value === null || value === undefined ? '-' : (
+        <Tooltip title={`行情日期 ${record.price_date}`}>{value}</Tooltip>
+      )),
+    },
+    {
+      title: <Tooltip title="命中价 → 最新价；命中日与最新价不在同一天时按复权因子换算，送转分红不会被算成涨跌">命中后涨幅</Tooltip>,
       dataIndex: 'cum_pct',
       width: 106,
       align: 'right',
@@ -307,8 +315,8 @@ const MarketAlerts = () => {
         </Space>
         {data?.thresholds && (
           <Text type="secondary">
-            口径：九转高计数 ≥{data.thresholds.active_td_up_min} · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
-            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势 ≥{data.thresholds.strong_volume_ratio}）
+            口径：3日涨幅 {data.thresholds.gain3_min_pct}%~{data.thresholds.gain3_max_pct}% · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
+            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势：累计量 ≥ 前 {data.thresholds.strong_volume_days} 日最大量）
             · 当日标签只往更强的方向覆盖（强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过）· 命中价以首次命中为准
           </Text>
         )}

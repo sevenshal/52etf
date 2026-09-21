@@ -10,11 +10,12 @@
 
 标签（一根轴上的四档，方向由九转计数定，强度由量比与位置定）：
 
-- 强势：活跃全部条件 + 九转高计数 3~4（实测这一档命中后表现最好）+ 量比 ≥2
-- 活跃：九转高计数 ≥2 · 当日上涨 · 现价>今开 · 累计成交额 ≥0.8亿 · 量比 ≥1.3
+- 强势：活跃 + 当日累计量 ≥ 前 8 日最大日成交量
+- 活跃：价格结构 COND1|COND2 · 3日涨幅 5%~15% · 累计成交额 ≥0.8亿 · 同时段量比 ≥1.3
 - 观望：九转低计数 ≥2，或急跌结构（较 3 日前跌 >4% 且跌破 4 日前开盘价）
-- 规避：观望条件 + 九转低计数 ≥4 + 当日下跌
+- 规避：观望 + 较最近一根高计数≥1 的收盘回撤 >7%
 
+判定细节见 classify()。
 每只个股每个交易日只记第一次命中；命中后每轮只更新现价与命中后涨幅，用于事后打分。
 """
 from __future__ import annotations
@@ -70,15 +71,19 @@ MIN_LISTED_TRADING_DAYS = 60
 
 @dataclass(frozen=True)
 class AlertThresholds:
-    """全部阈值集中在这里，后续按命中后涨幅回测结果调整。"""
-    min_amount_yuan: float = 0.8e8
-    min_volume_ratio: float = 1.3
-    strong_volume_ratio: float = 2.0
-    active_td_up_min: int = 2
-    strong_td_up_min: int = 3
-    strong_td_up_max: int = 4
+    """全部阈值集中在这里。
+
+    活跃/强势的结构与 3 日涨幅区间、观望公式，是用参考站点（kpan）全市场 4 天共 2.2 万个
+    收盘口径标签逐条验证过的（见 research/kpan_label_regression.py），不要随意改；
+    量比与成交额门槛是我们自己的量能口径，可按命中后收益调。
+    """
+    min_amount_yuan: float = 0.8e8        # 成交额下限（参考站点实测硬边界正好 0.8 亿）
+    min_volume_ratio: float = 1.3         # 同时段量比下限（我们的量能口径）
+    gain3_min_pct: float = 5.0            # 3 日涨幅下限（参考站点所有活跃样本都 > 5%）
+    gain3_max_pct: float = 15.0           # 3 日涨幅上限（超过 15% 的不再算活跃，避免追高）
+    strong_volume_days: int = 8           # 强势：当日累计量 ≥ 前 N 个交易日的最大日成交量（=通达信 V≥HHV(V,9)）
     watch_td_down_min: int = 2
-    avoid_td_down_min: int = 4
+    avoid_drawdown_pct: float = 7.0   # 规避：较最近一根高计数≥1 的收盘回撤超过该比例
     drop_pct_vs_3d: float = 4.0
 
 
@@ -98,9 +103,12 @@ class StockStructure:
     td_down_prev: int = 0      # 截至昨日的连续 C<REF(C,4) 天数
     close_ref: List[float] = field(default_factory=list)   # 最近 5 日收盘，close_ref[-1] 为昨收
     open_ref4: Optional[float] = None                      # 4 日前开盘价
+    open_ref1: Optional[float] = None                      # 昨日开盘价（活跃 COND1 要求昨日收阳）
+    vol_max_prev: Optional[float] = None                   # 前 N 个交易日最大日成交量（股，与实时快照同单位）
     listed_days: int = 0
     is_st: bool = False
     days_since_low9: Optional[int] = None                  # 距上次「低9」的交易日数（仅记录，不参与判定）
+    last_up_close: Optional[float] = None                  # 最近一根高计数≥1（C>REF(C,4)）的收盘，规避的回撤参照
     entity_type: str = "stock"                              # stock / sw_l1 / sw_l2
 
     def __post_init__(self) -> None:
@@ -134,6 +142,14 @@ def td_counts(closes: List[float]) -> Tuple[int, int, Optional[int]]:
     return up, down, last_low9
 
 
+def last_up_close(closes: List[float]) -> Optional[float]:
+    """最近一根满足 C>REF(C,4)（九转高计数≥1）的 K 线收盘价；窗口内没有则 None。"""
+    for i in range(len(closes) - 1, 3, -1):
+        if closes[i] > closes[i - 4]:
+            return closes[i]
+    return None
+
+
 def _text(value: Any) -> str:
     return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
 
@@ -142,7 +158,7 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
     """从 DuckDB 日线算出每只股票的九转计数基数与参考价（不含当日）。"""
     frame = connection.execute(
         """
-        SELECT d.ts_code, d.trade_date, d.close, d.open, b.name, b.list_date,
+        SELECT d.ts_code, d.trade_date, d.close, d.open, d.vol, b.name, b.list_date,
                m.l1_name, m.l2_name, m.l3_name
         FROM a_stock_market_daily d
         LEFT JOIN a_stock_basic b ON b.ts_code = d.ts_code
@@ -175,10 +191,25 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
             td_down_prev=down,
             close_ref=closes[-5:],
             open_ref4=safe_float(group["open"].iloc[-4]) if len(group) >= 4 else None,
+            open_ref1=safe_float(group["open"].iloc[-1]),
+            vol_max_prev=_max_prev_volume(group["vol"], STOCK_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
+            last_up_close=last_up_close(closes),
         )
     return structures
+
+
+# 日线成交量单位 → 实时快照/分钟线的"股"（均用真实数据核对过）
+STOCK_DAILY_VOL_TO_SHARES = 100        # a_stock_market_daily.vol 是手
+SW_DAILY_VOL_TO_SHARES = 10_000        # a_stock_sw_daily.vol 是万股
+
+
+def _max_prev_volume(volumes: pd.Series, to_shares: float,
+                     days: int = AlertThresholds.strong_volume_days) -> Optional[float]:
+    """前 days 个交易日（不含当日）的最大日成交量，换算成股。"""
+    values = [float(v) for v in volumes.tail(days).tolist() if v is not None and not pd.isna(v)]
+    return max(values) * to_shares if values else None
 
 
 BASELINE_TABLES = ("a_stock_minute_bar", "a_stock_sw_minute_bar")
@@ -203,7 +234,7 @@ def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dic
     }
     frame = connection.execute(
         """
-        SELECT ts_code, trade_date, close, open FROM a_stock_sw_daily
+        SELECT ts_code, trade_date, close, open, vol FROM a_stock_sw_daily
         WHERE trade_date >= ? AND trade_date < ?
         ORDER BY ts_code, trade_date
         """,
@@ -229,8 +260,11 @@ def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dic
             td_down_prev=down,
             close_ref=closes[-5:],
             open_ref4=safe_float(group["open"].iloc[-4]) if len(group) >= 4 else None,
+            open_ref1=safe_float(group["open"].iloc[-1]),
+            vol_max_prev=_max_prev_volume(group["vol"], SW_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
+            last_up_close=last_up_close(closes),
         )
         structures[code].entity_type = SW_ENTITY_BY_LEVEL[level]
     return structures
@@ -319,39 +353,69 @@ def classify(
     cum_amount: float,
     volume_ratio: Optional[float],
     structure: StockStructure,
+    cum_volume: Optional[float] = None,
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
 ) -> Optional[str]:
-    """按四档标签判定；返回 None 表示当前不打标签。"""
+    """按四档标签判定；返回 None 表示当前不打标签。
+
+    价格结构、3 日涨幅区间、强势的量能条件、观望公式都与参考站点（kpan）一致，
+    是用其全市场收盘口径标签逐条验证过的；只有活跃的量能门槛是我们自己的同时段量比。
+
+    活跃（下列全部满足）：
+      ① 价格结构 COND1 OR COND2（通达信原式）
+         COND1 = 九转高计数≥2 AND C>REF(C,1) AND REF(C,1)>REF(C,2) AND C>O AND REF(C,1)>REF(O,1)
+         COND2 = C>REF(C,1) AND C>O AND (REF(C,1)<REF(C,5) OR 九转高计数≥2) AND C>REF(C,4) AND 3日涨幅>5%
+      ② 5% < 3日涨幅 < 15%            （参考站点所有活跃样本都落在这个区间，含走 COND1 的）
+      ③ 累计成交额 ≥ 0.8 亿
+      ④ 同时段量比 ≥ 1.3             （我们的量能口径；参考站点这一道在日线上无法精确还原）
+    强势：活跃 AND 当日累计量 ≥ 前 8 个交易日最大日成交量（通达信 V≥HHV(V,9)，验证 100%）
+    观望：九转低计数≥2，或急跌结构（参考站点公开公式，验证 100%）
+    规避：观望 AND 现价较最近一根高计数≥1（C>REF(C,4)）的收盘回撤 >7%（参考站点口径）
+    """
     if not price or not pre_close or pre_close <= 0:
         return None
     if structure.is_st or structure.listed_days < MIN_LISTED_TRADING_DAYS:
         return None
 
-    pct = (price / pre_close - 1) * 100
     refs = structure.close_ref
-    close_ref4 = refs[-4] if len(refs) >= 4 else None
+    close_ref1 = refs[-1] if len(refs) >= 1 else None
+    close_ref2 = refs[-2] if len(refs) >= 2 else None
     close_ref3 = refs[-3] if len(refs) >= 3 else None
+    close_ref4 = refs[-4] if len(refs) >= 4 else None
+    close_ref5 = refs[-5] if len(refs) >= 5 else None
 
     td_up = structure.td_up_prev + 1 if close_ref4 and price > close_ref4 else 0
     td_down = structure.td_down_prev + 1 if close_ref4 and price < close_ref4 else 0
 
-    # 多头侧：九转高计数 + 上涨 + 站上今开 + 成交额门槛 + 同时段放量
-    if (td_up >= thresholds.active_td_up_min and pct > 0 and day_open and price > day_open
-            and cum_amount >= thresholds.min_amount_yuan
-            and volume_ratio is not None and volume_ratio >= thresholds.min_volume_ratio):
-        if (thresholds.strong_td_up_min <= td_up <= thresholds.strong_td_up_max
-                and volume_ratio >= thresholds.strong_volume_ratio):
-            return LABEL_STRONG
-        return LABEL_ACTIVE
+    # ---- 多头侧 ----
+    if close_ref1 and close_ref3 and day_open:
+        gain3 = (price / close_ref3 - 1) * 100
+        rising_today = price > close_ref1 and price > day_open                     # 当日上涨且收阳
+        cond1 = bool(
+            td_up >= 2 and rising_today and close_ref2 and close_ref1 > close_ref2
+            and structure.open_ref1 and close_ref1 > structure.open_ref1
+        )
+        cond2 = bool(
+            rising_today and close_ref4 and price > close_ref4 and gain3 > 5.0
+            and ((close_ref5 and close_ref1 < close_ref5) or td_up >= 2)
+        )
+        if ((cond1 or cond2)
+                and thresholds.gain3_min_pct < gain3 < thresholds.gain3_max_pct
+                and cum_amount >= thresholds.min_amount_yuan
+                and volume_ratio is not None and volume_ratio >= thresholds.min_volume_ratio):
+            if cum_volume and structure.vol_max_prev and cum_volume >= structure.vol_max_prev:
+                return LABEL_STRONG
+            return LABEL_ACTIVE
 
-    # 空头侧：九转低计数，或急跌结构（较 3 日前跌超 4% 且跌破 4 日前开盘）
+    # ---- 空头侧：九转低计数，或急跌结构（较 3 日前跌超 4% 且跌破 4 日前开盘） ----
     sharp_drop = bool(
         close_ref4 and close_ref3 and structure.open_ref4
         and price < close_ref4 and price < structure.open_ref4 and price < close_ref3
         and (close_ref3 - price) / price * 100 > thresholds.drop_pct_vs_3d
     )
     if td_down >= thresholds.watch_td_down_min or sharp_drop:
-        if td_down >= thresholds.avoid_td_down_min and pct < 0:
+        if (structure.last_up_close
+                and price < structure.last_up_close * (1 - thresholds.avoid_drawdown_pct / 100)):
             return LABEL_AVOID
         return LABEL_WATCH
     return None
@@ -397,7 +461,7 @@ def evaluate_snapshot(
         label = classify(
             price=price, pre_close=pre_close, day_open=day_open or 0.0,
             cum_amount=cum_amount, volume_ratio=volume_ratio,
-            structure=structure, thresholds=thresholds,
+            structure=structure, cum_volume=cum_vol, thresholds=thresholds,
         )
         if not label:
             continue
@@ -547,7 +611,7 @@ class AlertScanner:
         sw_hits: List[Dict[str, Any]] = []
         if self._sw_structures:
             try:
-                sw_quotes = TushareService.get_instance().get_sw_realtime_frame()
+                sw_quotes = get_sw_snapshot()
                 if sw_quotes is not None and not sw_quotes.empty:
                     if "trade_time" in sw_quotes.columns:
                         sw_quotes = sw_quotes[
@@ -566,7 +630,7 @@ class AlertScanner:
         if len(self._pct_history) > SPEED_LOOKBACK_ROUNDS:
             self._pct_history.pop(0)
 
-        written = self._write_hits(today, minute_label, hits + sw_hits, current_pct)
+        written = self._write_hits(today, minute_label, hits + sw_hits)
         return {
             "minute": minute_label,
             "scanned": int(len(quotes)),
@@ -580,14 +644,14 @@ class AlertScanner:
         today: date,
         minute_label: str,
         hits: List[Dict[str, Any]],
-        current_pct: Dict[str, float],
     ) -> Dict[str, int]:
         """写入当日状态：新出现的插入；标签只按优先级往更强的方向覆盖，每次覆盖在流水表记一条。
 
         覆盖规则见 can_override：强势 > 活跃 > 规避 > 观望，只有更强的能覆盖更弱的。
         往弱的方向变（如 活跃→观望、规避→观望、强势→活跃）一律忽略，不改标签、不记流水。
         覆盖只在当天内判断，隔日各自独立。
-        命中价/首次命中时刻/命中后涨幅始终以首次命中为准（用于事后打分）。
+        命中价/首次命中时刻始终以首次命中为准。现价与命中后涨幅不落库，读取时用最新快照现算
+        （见 attach_latest_returns），省掉每分钟对当天全部命中行的写库，读到的也总是最新价。
         """
         recorded = self._recorded_today(today)
         inserted = changed = 0
@@ -622,8 +686,6 @@ class AlertScanner:
                         td_up=hit["td_up"],
                         td_down=hit["td_down"],
                         days_since_low9=hit["days_since_low9"],
-                        last_price=hit["price"],
-                        cum_pct=0.0,
                     )
                     db.add(row)
                     rows_by_code[code] = row
@@ -641,14 +703,6 @@ class AlertScanner:
                     changed += 1
                 recorded[code] = row.label
 
-            # 每轮刷新现价与命中后涨幅（个股与行业一样），供事后打分
-            for row in rows_by_code.values():
-                pct_now = current_pct.get(row.ts_code)
-                if pct_now is None or not row.price:
-                    continue
-                quote_price = row.price * (1 + (pct_now - (row.pct or 0)) / 100)
-                row.last_price = round(quote_price, 3)
-                row.cum_pct = round((quote_price / row.price - 1) * 100, 2)
         return {"recorded": inserted, "changed": changed}
 
 
@@ -694,6 +748,131 @@ def get_market_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
     frame = TushareService.get_instance().get_a_stock_realtime_market_frame()
     _snapshot_cache = (time.time(), frame)
     return frame
+
+
+_sw_snapshot_cache: Tuple[float, Optional[pd.DataFrame]] = (0.0, None)
+
+
+def get_sw_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
+    """申万一/二级实时行情（rt_sw_k），30 秒内复用；扫描与读取命中后涨幅共用。"""
+    global _sw_snapshot_cache
+    cached_at, cached = _sw_snapshot_cache
+    if not force and cached is not None and time.time() - cached_at < SNAPSHOT_TTL_SECONDS:
+        return cached
+    frame = TushareService.get_instance().get_sw_realtime_frame()
+    _sw_snapshot_cache = (time.time(), frame)
+    return frame
+
+
+def latest_price_map() -> Dict[str, Tuple[float, date]]:
+    """{代码: (最新价, 行情日期)}，个股取 rt_k 快照、申万取 rt_sw_k 快照，都走 30 秒缓存。
+
+    盘后/休市时快照返回的是最近一个交易日的收盘，这正是"最新价"该有的含义。
+    """
+    prices: Dict[str, Tuple[float, date]] = {}
+    for loader in (get_market_snapshot, get_sw_snapshot):
+        try:
+            frame = loader()
+        except Exception as exc:  # noqa: BLE001  取不到最新价时命中后涨幅留空，不影响列表
+            logger.warning("读取最新价失败: %s", exc)
+            continue
+        if frame is None or frame.empty:
+            continue
+        quote_dates = (
+            pd.to_datetime(frame["trade_time"], errors="coerce").dt.date
+            if "trade_time" in frame.columns else pd.Series([date.today()] * len(frame), index=frame.index)
+        )
+        for code, close, quote_date in zip(frame["ts_code"], frame["close"], quote_dates):
+            price = safe_float(close)
+            if price and quote_date is not None and not pd.isna(quote_date):
+                prices[str(code).strip().upper()] = (price, quote_date)
+    return prices
+
+
+_today_adj_cache: Dict[date, Dict[str, float]] = {}
+
+
+def _today_adj_factors(day: date) -> Dict[str, float]:
+    """当天的复权因子：分析库每晚才同步，盘中遇到除权日要向 tushare 取一次当天全市场因子，按天缓存。"""
+    if day in _today_adj_cache:
+        return _today_adj_cache[day]
+    try:
+        frame = TushareService.get_instance().get_a_stock_adj_factor_range_frame(day, day)
+        factors = {
+            str(row.ts_code).strip().upper(): float(row.adj_factor)
+            for row in frame.itertuples(index=False) if row.adj_factor
+        } if frame is not None and not frame.empty else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tushare 当日复权因子获取失败: %s", exc)
+        factors = {}
+    if factors:                    # 取到才缓存，盘前还没发布时下次重试
+        _today_adj_cache[day] = factors
+    return factors
+
+
+def load_adj_ratios(codes: List[str], hit_date: date, quote_date: date) -> Dict[str, float]:
+    """命中价换算到最新价复权基准的系数：因子(命中日) ÷ 因子(行情日)。
+
+    跨日若中间发生过送转、分红等除权，原始价格不可直接相除（十送十会被当成 −50%）。
+    缺因子的股票不换算（系数 1），同一天内本来也不需要换算。
+    """
+    if not codes or hit_date == quote_date:
+        return {}
+    connection = connect_analytics_db()
+    try:
+        placeholders = ",".join("?" for _ in codes)
+        rows = connection.execute(
+            f"""
+            SELECT ts_code, trade_date, adj_factor FROM a_stock_adj_factor
+            WHERE ts_code IN ({placeholders}) AND trade_date IN (?, ?)
+            """,
+            [*codes, hit_date, quote_date],
+        ).fetchall()
+    finally:
+        connection.close()
+    at_hit: Dict[str, float] = {}
+    at_quote: Dict[str, float] = {}
+    for code, trade_date, factor in rows:
+        if not factor:
+            continue
+        target = at_hit if trade_date == hit_date else at_quote
+        target[str(code)] = float(factor)
+    missing = [code for code in codes if code in at_hit and code not in at_quote]
+    if missing and quote_date == date.today():
+        today_factors = _today_adj_factors(quote_date)
+        for code in missing:
+            if code in today_factors:
+                at_quote[code] = today_factors[code]
+    return {code: at_hit[code] / at_quote[code] for code in at_hit if code in at_quote and at_quote[code]}
+
+
+def attach_latest_returns(rows: List[Dict[str, Any]], hit_date: date,
+                          prices: Optional[Dict[str, Tuple[float, date]]] = None) -> List[Dict[str, Any]]:
+    """给命中行补上最新价与命中后涨幅（命中价 → 最新价，跨日按复权换算）。"""
+    prices = latest_price_map() if prices is None else prices
+    stock_codes_by_date: Dict[date, List[str]] = {}
+    for row in rows:
+        quote = prices.get(row["ts_code"])
+        if quote and (row.get("entity_type") or ENTITY_STOCK) == ENTITY_STOCK and quote[1] != hit_date:
+            stock_codes_by_date.setdefault(quote[1], []).append(row["ts_code"])
+    ratios: Dict[str, float] = {}
+    for quote_date, codes in stock_codes_by_date.items():
+        try:
+            ratios.update(load_adj_ratios(codes, hit_date, quote_date))
+        except Exception as exc:  # noqa: BLE001  取不到复权因子时按原始价计算
+            logger.warning("读取复权因子失败，命中后涨幅按原始价计算: %s", exc)
+
+    for row in rows:
+        quote = prices.get(row["ts_code"])
+        if not quote or not row.get("price"):
+            row["last_price"], row["cum_pct"], row["price_date"] = None, None, None
+            continue
+        price, quote_date = quote
+        base = row["price"] * ratios.get(row["ts_code"], 1.0)
+        row["last_price"] = round(price, 3)
+        row["cum_pct"] = round((price / base - 1) * 100, 2) if base else None
+        row["price_date"] = quote_date.isoformat()
+    return rows
 
 
 _scanner = AlertScanner()
@@ -743,8 +922,8 @@ def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:
         "td_up": row.td_up,
         "td_down": row.td_down,
         "days_since_low9": row.days_since_low9,
-        "last_price": row.last_price,
-        "cum_pct": row.cum_pct,
+        "last_price": None,          # 读取时由 attach_latest_returns 用最新快照现算
+        "cum_pct": None,
     }
 
 
@@ -891,6 +1070,9 @@ def fetch_alerts(
                 if not industry_label_matches(item["l2_label"], l2_label):
                     continue
                 rows.append(item)
+    if target:
+        # 命中后涨幅不落库，读取时用最新价现算（统计也基于它）
+        attach_latest_returns(rows + sw_rows, target)
     return {
         "date": target.isoformat() if target else None,
         "dates": [d.isoformat() for d in dates],
@@ -902,7 +1084,8 @@ def fetch_alerts(
         "thresholds": {
             "min_amount_yi": DEFAULT_THRESHOLDS.min_amount_yuan / 1e8,
             "min_volume_ratio": DEFAULT_THRESHOLDS.min_volume_ratio,
-            "strong_volume_ratio": DEFAULT_THRESHOLDS.strong_volume_ratio,
-            "active_td_up_min": DEFAULT_THRESHOLDS.active_td_up_min,
+            "gain3_min_pct": DEFAULT_THRESHOLDS.gain3_min_pct,
+            "gain3_max_pct": DEFAULT_THRESHOLDS.gain3_max_pct,
+            "strong_volume_days": DEFAULT_THRESHOLDS.strong_volume_days,
         },
     }

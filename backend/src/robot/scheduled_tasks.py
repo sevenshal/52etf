@@ -619,22 +619,53 @@ def _run_a_stock_base_data_sync(
 
 def _run_market_alert_scan(
     min_volume_ratio: float = 1.3,
-    strong_volume_ratio: float = 2.0,
     min_amount_yi: float = 0.8,
+    **_legacy,
 ):
-    """提示看板：盘中一轮全市场扫描（每分钟一次，非交易时段自动跳过）。"""
+    """提示看板：盘中一轮全市场扫描（每分钟一次，非交易时段自动跳过）。
+
+    _legacy 吞掉已下线的参数（strong_volume_ratio：强势改成「累计量 ≥ 前 8 日最大量」后不再需要）。
+    """
     from ..core.services.market_alerts import AlertThresholds, run_alert_scan
 
     thresholds = AlertThresholds(
         min_amount_yuan=float(min_amount_yi) * 1e8,
         min_volume_ratio=float(min_volume_ratio),
-        strong_volume_ratio=float(strong_volume_ratio),
     )
     result = run_alert_scan(thresholds=thresholds)
     if result.get("skipped"):
         return f"跳过：{result['skipped']}"
     return (f"{result.get('minute')} 扫描 {result.get('scanned')} 只 · "
             f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}")
+
+
+def _run_market_alert_replay(
+    start_date: str = "",
+    end_date: str = "",
+    overwrite: bool = True,
+    baseline_days: int = 20,
+):
+    """提示看板历史回放：用分钟线逐分钟重跑指定日期区间的信号（手动触发）。"""
+    from datetime import date as date_cls, timedelta as timedelta_cls
+
+    from ..core.services.market_alerts_replay import replay_alerts
+
+    end = date_cls.fromisoformat(end_date) if end_date else date_cls.today() - timedelta_cls(days=1)
+    start = date_cls.fromisoformat(start_date) if start_date else end - timedelta_cls(days=30)
+    logger = logging.getLogger("ScheduledTaskManager")
+
+    def progress(index, total, result):
+        logger.info("提示看板回放 %s/%s %s %s", index, total, result.get("date"), result.get("status"))
+
+    result = replay_alerts(start, end, baseline_days=int(baseline_days), overwrite=bool(overwrite), progress=progress)
+    skipped = [f"{item['date']}（{item.get('reason')}）" for item in result["days"] if item["status"] != "done"]
+    summary = (
+        f"{result['start']}~{result['end']} 共 {result['trade_days']} 个交易日："
+        f"完成 {result['done']} · 跳过 {result['skipped']} · 失败 {result['failed']}"
+    )
+    if skipped:
+        summary += "；未回放：" + "、".join(skipped[:8]) + ("…" if len(skipped) > 8 else "")
+    return summary
 
 
 def _run_market_alert_baseline(baseline_days: int = 20):
@@ -1635,6 +1666,51 @@ class ScheduledTaskManager:
                     ),
                 ),
             ),
+            "market_alert_replay": TaskDefinition(
+                task_key="market_alert_replay",
+                name="提示看板历史回放",
+                description=(
+                    "用分钟线逐分钟重跑指定日期区间的提示看板信号，判定与写库和盘中扫描同一套逻辑（个股 + 申万一二级）。"
+                    "不调 tushare。某天要有当天及之前 N 个交易日的分钟线才能回放，不满足的会跳过并说明原因。手动触发。"
+                ),
+                default_time="03:00",
+                default_enabled=False,
+                sort_order=28,
+                runner=_run_market_alert_replay,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="YYYY-MM-DD；为空时取结束日期往前 30 天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="YYYY-MM-DD；为空时取昨天。今天不回放（由盘中扫描负责）。",
+                    ),
+                    TaskParameterDefinition(
+                        key="overwrite",
+                        label="覆盖已有记录",
+                        value_type="boolean",
+                        default=True,
+                        description="开启时先删掉该日已有的信号与流水再重跑；关闭时已有记录的日期直接跳过。",
+                    ),
+                    TaskParameterDefinition(
+                        key="baseline_days",
+                        label="量能基准交易日数",
+                        value_type="integer",
+                        default=20,
+                        description="与盘前基准任务保持一致；回放日期之前要有这么多天的分钟线。",
+                        min_value=3,
+                        max_value=60,
+                        step=1,
+                    ),
+                ),
+            ),
             "market_alert_scan": TaskDefinition(
                 task_key="market_alert_scan",
                 name="提示看板盘中扫描",
@@ -1651,16 +1727,6 @@ class ScheduledTaskManager:
                         value_type="number",
                         default=1.3,
                         description="当日累计量 ÷ 前 N 个交易日同一时刻累计量均值（N 见盘前基准任务），达到该倍数才算放量。",
-                        min_value=1.0,
-                        max_value=10.0,
-                        step=0.1,
-                    ),
-                    TaskParameterDefinition(
-                        key="strong_volume_ratio",
-                        label="强势量比阈值",
-                        value_type="number",
-                        default=2.0,
-                        description="在活跃基础上再叠加的量比要求，配合九转高计数 3~4 才打强势。",
                         min_value=1.0,
                         max_value=10.0,
                         step=0.1,

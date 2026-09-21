@@ -65,3 +65,36 @@ def test_fetch_batch_single_batch_when_under_limit():
     service = _FakeService()
     frame = fetch_batch(service, ["801080.SI"], date(2026, 9, 14), date(2026, 9, 18))
     assert len(frame) == 5 * BARS_PER_DAY and len(service.calls) == 1
+
+
+def test_incremental_sync_does_not_prune_long_history(monkeypatch):
+    """增量同步不清理：手动全量回补的长历史要保留，与个股分钟线策略一致。"""
+    from src.core.services import sw_minute_data as module
+
+    class FakeConnection:
+        def execute(self, sql, params=None):
+            class Result:
+                def __init__(self, rows):
+                    self.rows = rows
+                def fetchall(self):
+                    return self.rows
+                def fetchone(self):
+                    return self.rows[0]
+            if "a_stock_sw_industry" in sql:
+                return Result([("801080.SI",)])
+            if "a_stock_market_daily" in sql:
+                return Result([(date(2026, 9, 17),), (date(2026, 9, 18),)])
+            return Result([(date(2026, 9, 17),)])          # 库里最新一天
+        def close(self):
+            pass
+
+    pruned = []
+    monkeypatch.setattr(module, "connect_duckdb", lambda *args, **kwargs: FakeConnection())
+    monkeypatch.setattr(module, "fetch_batch", lambda service, codes, start, end: pd.DataFrame())
+    monkeypatch.setattr(module, "prune_sw_minutes", lambda keep_from: pruned.append(keep_from) or 0)
+
+    module.sync_sw_minute_bars(32, full=False, service=object())
+    assert pruned == []                                   # 增量：不清理
+
+    module.sync_sw_minute_bars(32, full=True, service=object())
+    assert pruned == [date(2026, 9, 17)]                  # 全量：清理到窗口起点
