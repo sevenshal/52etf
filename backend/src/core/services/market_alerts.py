@@ -646,7 +646,9 @@ class AlertScanner:
                 pct_now = current_pct.get(row.ts_code)
                 if pct_now is None or not row.price:
                     continue
-                quote_price = row.price * (1 + (pct_now - (row.pct or 0)) / 100)
+                # 命中价与现价同一个昨收：现价 = 命中价 × (1+现涨幅) ÷ (1+命中时涨幅)。
+                # 旧写法 命中价×(1+涨幅差) 是近似，命中时+5%、现在+10% 会把命中后涨幅高估 0.24 个点
+                quote_price = row.price * (1 + pct_now / 100) / (1 + (row.pct or 0) / 100)
                 row.last_price = round(quote_price, 3)
                 row.cum_pct = round((quote_price / row.price - 1) * 100, 2)
         return {"recorded": inserted, "changed": changed}
