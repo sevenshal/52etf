@@ -197,6 +197,13 @@ const MarketIndustryRelation = () => {
   const [history, setHistory] = useState(null);
   const [columnMode, setColumnMode] = useState('full');   // full=完整列 / compact=精简列
   const [panelStock, setPanelStock] = useState(null);     // 点成分股名称打开的行情面板
+  // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+  const [memberPage, setMemberPage] = useState({ current: 1, pageSize: 30 });
+
+  // 行业选择或过滤条件变了回到第 1 页
+  useEffect(() => {
+    setMemberPage(prev => ({ ...prev, current: 1 }));
+  }, [selected, universe, focus]);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -518,7 +525,18 @@ const MarketIndustryRelation = () => {
                   rowKey="ts_code"
                   columns={memberColumns}
                   dataSource={memberRows}
-                  pagination={{ pageSize: 30, showSizeChanger: true, size: 'small' }}
+                  pagination={{
+                    current: memberPage.current,
+                    pageSize: memberPage.pageSize,
+                    showSizeChanger: true,
+                    pageSizeOptions: [30, 50, 100, 200],
+                    size: 'small',
+                    showTotal: total => `共 ${total} 只`,
+                    onChange: (current, pageSize) => setMemberPage(prev => ({
+                      current: pageSize !== prev.pageSize ? 1 : current,
+                      pageSize,
+                    })),
+                  }}
                   scroll={{ x: 900, y: 460 }}
                 />
               </Card>

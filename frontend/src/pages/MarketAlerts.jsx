@@ -41,7 +41,14 @@ const MarketAlerts = () => {
   const [tradeDate, setTradeDate] = useState(null);
   const [label, setLabel] = useState('');
   const [industry, setIndustry] = useState(null);     // 点击行业柱筛选
+  // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+  const [tablePage, setTablePage] = useState({ current: 1, pageSize: 50 });
   const [klineStock, setKlineStock] = useState(null); // 内嵌K线面板（点名称打开，不弹窗）
+
+  // 筛选条件变了回到第 1 页，否则停在第 5 页时切个行业会看到空表
+  useEffect(() => {
+    setTablePage(prev => ({ ...prev, current: 1 }));
+  }, [industry, label, tradeDate]);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -350,7 +357,18 @@ const MarketAlerts = () => {
                 rowKey="ts_code"
                 columns={columns}
                 dataSource={visibleRows}
-                pagination={{ pageSize: 50, showSizeChanger: true }}
+                pagination={{
+                  current: tablePage.current,
+                  pageSize: tablePage.pageSize,
+                  showSizeChanger: true,
+                  pageSizeOptions: [20, 50, 100, 200],
+                  showTotal: total => `共 ${total} 只`,
+                  // 改每页条数时回到第 1 页，避免当前页码超出新的总页数
+                  onChange: (current, pageSize) => setTablePage(prev => ({
+                    current: pageSize !== prev.pageSize ? 1 : current,
+                    pageSize,
+                  })),
+                }}
                 scroll={{ x: 1100, y: 480 }}
               />
             </Card>
