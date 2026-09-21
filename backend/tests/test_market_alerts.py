@@ -34,8 +34,8 @@ def _structure(**kwargs):
     base = dict(
         ts_code="000001.SZ", name="平安银行", industry="银行",
         td_up_prev=2, td_down_prev=0,
-        close_ref=[9.0, 9.2, 9.4, 9.6, 10.0], open_ref4=9.3,
-        listed_days=300, is_st=False,
+        close_ref=[9.0, 9.2, 9.4, 9.6, 10.0], open_ref4=9.3, open_ref1=9.7,
+        vol_max_prev=3_000_000.0, listed_days=300, is_st=False,
     )
     base.update(kwargs)
     return StockStructure(**base)
@@ -58,14 +58,32 @@ def test_td_counts_tracks_up_down_runs_and_last_low9():
 
 
 def test_classify_active_and_strong():
-    structure = _structure(td_up_prev=1)          # 加上当日 → 高计数 2
+    # 昨日收阳且连涨、今日收阳上涨、3 日涨幅 (10.5-9.4)/9.4≈11.7% 落在 5%~15%
+    structure = _structure(td_up_prev=1)          # 加上当日 → 高计数 2，满足 COND1
     common = dict(price=10.5, pre_close=10.0, day_open=10.1, cum_amount=1.0e8, structure=structure)
-    assert classify(volume_ratio=1.6, **common) == LABEL_ACTIVE
-    assert classify(volume_ratio=2.5, **common) == LABEL_ACTIVE        # 高计数 2 不够强势
+    assert classify(volume_ratio=1.6, cum_volume=1_000_000, **common) == LABEL_ACTIVE
+    # 强势：累计量 ≥ 前 8 日最大日量（与量比无关）
+    assert classify(volume_ratio=1.6, cum_volume=3_000_000, **common) == LABEL_STRONG
+    assert classify(volume_ratio=5.0, cum_volume=2_999_999, **common) == LABEL_ACTIVE
+    # 没有前期最大量（新数据）时不判强势
+    no_max = _structure(td_up_prev=1, vol_max_prev=None)
+    assert classify(volume_ratio=1.6, cum_volume=9e9, price=10.5, pre_close=10.0, day_open=10.1,
+                    cum_amount=1.0e8, structure=no_max) == LABEL_ACTIVE
 
-    strong_structure = _structure(td_up_prev=2)   # 高计数 3，落在甜点区
-    assert classify(volume_ratio=2.5, price=10.5, pre_close=10.0, day_open=10.1,
-                    cum_amount=1.0e8, structure=strong_structure) == LABEL_STRONG
+
+def test_classify_active_needs_structure_and_gain_band():
+    common = dict(pre_close=10.0, cum_amount=1.0e8, volume_ratio=2.0)
+    # 当日收阴（价 < 开盘）→ COND1/COND2 都不成立
+    assert classify(price=10.5, day_open=10.6, structure=_structure(), **common) is None
+    # 3 日涨幅超过 15% → 不追
+    assert classify(price=10.9, day_open=10.1, structure=_structure(close_ref=[9.0, 9.2, 9.4 * 0.9, 9.6, 10.0]),
+                    **common) is None
+    # 3 日涨幅不到 5% → 不算
+    flat = _structure(close_ref=[10.2, 10.3, 10.2, 9.9, 10.0], open_ref4=10.0)
+    assert classify(price=10.1, day_open=10.05, structure=flat, **common) is None
+    # COND1 需要昨日收阳：昨日开盘高于昨收时，高计数 2 也不行；此时 COND2 也不满足（昨收高于 5 日前且高计数<2）
+    yesterday_down = _structure(td_up_prev=0, open_ref1=10.2)
+    assert classify(price=10.5, day_open=10.1, structure=yesterday_down, **common) is None
 
 
 def test_classify_rejects_thin_volume_and_amount():
@@ -78,13 +96,28 @@ def test_classify_rejects_thin_volume_and_amount():
 
 
 def test_classify_watch_and_avoid():
-    watch = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0])
+    # 九转低计数 2 → 观望；最近一根高计数≥1 的收盘 10.5，现价 9.8 回撤 6.7% 不到 7%
+    watch = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=10.5)
     assert classify(price=9.8, pre_close=10.0, day_open=10.0, cum_amount=1e8,
                     volume_ratio=1.0, structure=watch) == LABEL_WATCH
 
-    avoid = _structure(td_up_prev=0, td_down_prev=3, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0])
+    # 参照收盘 10.6：9.8 < 10.6×0.93=9.858，回撤超过 7% → 规避（与低计数多少、当日涨跌无关）
+    avoid = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=10.6)
     assert classify(price=9.8, pre_close=10.0, day_open=10.0, cum_amount=1e8,
                     volume_ratio=1.0, structure=avoid) == LABEL_AVOID
+
+    # 找不到参照（窗口内没有高计数）时只到观望
+    no_ref = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=None)
+    assert classify(price=9.0, pre_close=10.0, day_open=10.0, cum_amount=1e8,
+                    volume_ratio=1.0, structure=no_ref) == LABEL_WATCH
+
+
+def test_last_up_close_picks_most_recent_bar_above_ref4():
+    from src.core.services.market_alerts import last_up_close
+
+    # 第 5 根 12 > 第 1 根 10（高计数≥1），之后一路低于 4 根前
+    assert last_up_close([10, 11, 11.5, 11.8, 12, 11, 10.5, 10, 9]) == 12
+    assert last_up_close([10, 9, 8, 7, 6, 5]) is None
 
 
 def test_classify_skips_st_and_new_listings():
@@ -105,10 +138,10 @@ def test_alert_score_peaks_at_sweet_spot_count():
 def test_evaluate_snapshot_uses_same_time_baseline_and_speed():
     quotes = pd.DataFrame([{
         "ts_code": "000001.SZ", "close": 10.5, "pre_close": 10.0,
-        "open": 10.1, "vol": 2_000_000, "amount": 1.2e8,
+        "open": 10.1, "vol": 3_000_000, "amount": 1.2e8,
     }])
     structures = {"000001.SZ": _structure(td_up_prev=2)}
-    baseline = {"000001.SZ": 800_000.0}               # 量比 2.5
+    baseline = {"000001.SZ": 1_200_000.0}             # 量比 2.5；累计量 = 前 8 日最大量 → 强势
 
     rows = evaluate_snapshot(quotes, structures, baseline, "10:00", previous_pct={"000001.SZ": 3.0})
 
@@ -294,12 +327,12 @@ def test_build_structures_takes_industry_from_sw_members():
     from src.core.services.market_alerts import build_structures
 
     con = duckdb.connect()
-    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE)")
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE, vol DOUBLE)")
     con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR, industry VARCHAR, list_date DATE)")
     con.execute("CREATE TABLE a_stock_sw_member (ts_code VARCHAR, l1_name VARCHAR, l2_name VARCHAR, l3_name VARCHAR)")
     start = date_cls(2026, 8, 1)
-    con.executemany("INSERT INTO a_stock_market_daily VALUES ('600519.SH', ?, ?, ?)",
-                    [(start + timedelta(days=i), 10.0 + i, 10.0 + i) for i in range(15)])
+    con.executemany("INSERT INTO a_stock_market_daily VALUES ('600519.SH', ?, ?, ?, ?)",
+                    [(start + timedelta(days=i), 10.0 + i, 9.5 + i, 1000.0 + i) for i in range(15)])
     con.execute("INSERT INTO a_stock_basic VALUES ('600519.SH', '贵州茅台', '白酒', DATE '2001-08-27')")
     con.execute("INSERT INTO a_stock_sw_member VALUES ('600519.SH', '食品饮料', '白酒Ⅱ', '白酒Ⅲ')")
 
@@ -307,6 +340,8 @@ def test_build_structures_takes_industry_from_sw_members():
 
     assert (structure.industry_l1, structure.industry_l2, structure.industry_l3) == ("食品饮料", "白酒Ⅱ", "白酒Ⅲ")
     assert structure.industry == "食品饮料"      # 兼容字段 = 申万一级，不是 stock_basic 的「白酒」
+    assert structure.open_ref1 == 9.5 + 14
+    assert structure.vol_max_prev == (1000.0 + 14) * 100   # 日线 vol 单位手 → 股
     con.close()
 
 
@@ -404,14 +439,15 @@ def test_build_sw_structures_and_sw_baseline_share_stock_logic():
         ("801081.SI", "半导体", "270100", "L2", "270000"),
         ("850812.SI", "数字芯片设计", "270101", "L3", "270100"),      # 三级不参与
     ])
-    con.execute("CREATE TABLE a_stock_sw_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE)")
+    con.execute("CREATE TABLE a_stock_sw_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE, vol DOUBLE)")
     start = date_cls(2026, 8, 1)
     for code in ("801080.SI", "801081.SI", "850812.SI"):
-        con.executemany("INSERT INTO a_stock_sw_daily VALUES (?, ?, ?, ?)",
-                        [(code, start + timedelta(days=i), 100.0 + i, 100.0 + i) for i in range(20)])
+        con.executemany("INSERT INTO a_stock_sw_daily VALUES (?, ?, ?, ?, ?)",
+                        [(code, start + timedelta(days=i), 100.0 + i, 100.0 + i, 50.0) for i in range(20)])
 
     structures = build_sw_structures(con, date_cls(2026, 9, 1))
     assert set(structures) == {"801080.SI", "801081.SI"}
+    assert structures["801080.SI"].vol_max_prev == 50.0 * 10_000       # 申万日线 vol 单位万股 → 股
     assert structures["801080.SI"].entity_type == "sw_l1" and structures["801080.SI"].industry_l1 == "电子"
     semi = structures["801081.SI"]
     assert semi.entity_type == "sw_l2" and (semi.industry_l1, semi.industry_l2) == ("电子", "半导体")
