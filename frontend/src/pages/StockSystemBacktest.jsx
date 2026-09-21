@@ -303,7 +303,7 @@ const StockSystemBacktest = () => {
         </div>
       ) : null}
 
-      <Table rowKey="id" size="small" dataSource={runs} columns={runColumns} pagination={{ pageSize: 5, hideOnSinglePage: true }} />
+      <Table rowKey="id" size="small" dataSource={runs} columns={runColumns} pagination={{ defaultPageSize: 5, hideOnSinglePage: true }} />
 
       <Spin spinning={loading}>
         {!detail ? <Empty description="还没有回测结果" /> : null}
@@ -372,7 +372,7 @@ const StockSystemBacktest = () => {
               rowKey={(row, index) => `${row.ts_code}-${row.exit_date}-${index}`}
               size="small"
               dataSource={(detail.trades || {})[tradeVariant] || []}
-              pagination={{ pageSize: 20, hideOnSinglePage: true }}
+              pagination={{ defaultPageSize: 20, hideOnSinglePage: true }}
               scroll={{ x: 900 }}
               columns={[
                 {

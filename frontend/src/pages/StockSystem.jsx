@@ -476,6 +476,13 @@ const StockSystem = () => {
   const [activeTab, setActiveTab] = useState('pool');
   const [view, setView] = useState('pool');
   const [snapshot, setSnapshot] = useState({ run: null, rows: [] });
+  // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+  const [tablePage, setTablePage] = useState({ current: 1, pageSize: 50 });
+
+  // 切换视图（入池/剔除等）数据整批换掉，回到第 1 页
+  useEffect(() => {
+    setTablePage(prev => ({ ...prev, current: 1 }));
+  }, [view]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [configState, setConfigState] = useState(null);
@@ -723,7 +730,17 @@ const StockSystem = () => {
             dataSource={snapshot.rows}
             columns={view === 'excluded' ? excludedColumns : scoredColumns}
             scroll={{ x: 1400 }}
-            pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [50, 100, 200, 500] }}
+            pagination={{
+              current: tablePage.current,
+              pageSize: tablePage.pageSize,
+              showSizeChanger: true,
+              pageSizeOptions: [50, 100, 200, 500],
+              // 改每页条数时回到第 1 页，避免当前页码超出新的总页数
+              onChange: (current, pageSize) => setTablePage(prev => ({
+                current: pageSize !== prev.pageSize ? 1 : current,
+                pageSize,
+              })),
+            }}
             expandable={view === 'excluded' ? undefined : {
               expandedRowRender: row => (
                 <FactorBreakdown row={row} definitions={definitions} runConfig={run?.config} />

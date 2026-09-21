@@ -764,7 +764,7 @@ const AIStock = () => {
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <HitRateCard hitRate={hitRate} />
       <Card className="ai-stock-card" title="历史推荐批次">
-        <Table className="ai-stock-table" columns={historyColumns} dataSource={history} rowKey="id" size="small" pagination={{ pageSize: 12 }} scroll={{ x: 720 }} />
+        <Table className="ai-stock-table" columns={historyColumns} dataSource={history} rowKey="id" size="small" pagination={{ defaultPageSize: 12 }} scroll={{ x: 720 }} />
       </Card>
       {selectedRun ? (
         <Card className="ai-stock-card" title={`${selectedRun.run_type} · ${dateTime(selectedRun.run_at)}`} extra={<Text type="secondary">候选池 {selectedRun.candidate_count} 只</Text>}>
@@ -811,7 +811,7 @@ const AIStock = () => {
       ) : null}
       <Card className="ai-stock-card" title="模拟盘净值"><div className="ai-stock-chart">{curveOption ? <ReactECharts option={curveOption} style={{ height: 260 }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚无净值记录" />}</div></Card>
       <Card className="ai-stock-card" title="当前持仓"><Table className="ai-stock-table" columns={positionColumns} dataSource={positions} rowKey="ts_code" size="small" pagination={false} scroll={{ x: 860 }} /></Card>
-      <Card className="ai-stock-card" title="成交流水"><Table className="ai-stock-table" columns={tradeColumns} dataSource={trades} rowKey="id" size="small" pagination={{ pageSize: 10 }} scroll={{ x: 960 }} /></Card>
+      <Card className="ai-stock-card" title="成交流水"><Table className="ai-stock-table" columns={tradeColumns} dataSource={trades} rowKey="id" size="small" pagination={{ defaultPageSize: 10 }} scroll={{ x: 960 }} /></Card>
     </Space>
   );
 
@@ -835,7 +835,7 @@ const AIStock = () => {
       />
       <Alert type="warning" showIcon message="AI 根据最新新闻与雪球活跃组合方向直接给出卖/持建议；建议「卖出」的持仓待缠论 1m/5m 卖点确认后离场，超过宽限交易日仍无信号则市价离场。" />
       <Card className="ai-stock-card" title="AI 持仓建议（最近一轮）">
-        <Table className="ai-stock-table" columns={holdAdviceColumns} dataSource={holdEvals} rowKey="id" size="small" pagination={{ pageSize: 20 }} scroll={{ x: 820 }} />
+        <Table className="ai-stock-table" columns={holdAdviceColumns} dataSource={holdEvals} rowKey="id" size="small" pagination={{ defaultPageSize: 20 }} scroll={{ x: 820 }} />
       </Card>
     </Space>
   );

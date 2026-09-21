@@ -18,6 +18,13 @@ const WebAccountManager = () => {
   const [usageRows, setUsageRows] = useState([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageRange, setUsageRange] = useState([dayjs().subtract(29, 'day'), dayjs()]);
+  // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+  const [usagePage, setUsagePage] = useState({ current: 1, pageSize: 31 });
+
+  // 换账户或日期区间时回到第 1 页
+  useEffect(() => {
+    setUsagePage(prev => ({ ...prev, current: 1 }));
+  }, [usageAccount, usageRange]);
   const [form] = Form.useForm();
 
   const loadAccounts = useCallback(async () => {
@@ -164,7 +171,16 @@ const WebAccountManager = () => {
           rowKey="usage_date"
           loading={usageLoading}
           dataSource={usageRows}
-          pagination={{ pageSize: 31, showSizeChanger: true }}
+          pagination={{
+            current: usagePage.current,
+            pageSize: usagePage.pageSize,
+            showSizeChanger: true,
+            // 改每页条数时回到第 1 页，避免当前页码超出新的总页数
+            onChange: (current, pageSize) => setUsagePage(prev => ({
+              current: pageSize !== prev.pageSize ? 1 : current,
+              pageSize,
+            })),
+          }}
           columns={[
             { title: '日期（上海时间）', dataIndex: 'usage_date' },
             { title: '请求数', dataIndex: 'request_count', align: 'right', render: (value) => Number(value || 0).toLocaleString() },

@@ -319,7 +319,7 @@ const StockSystemTrading = ({ refreshToken }) => {
           dataSource={visibleRows}
           columns={view === 'holding' ? holdingColumns : candidateColumns}
           scroll={{ x: 1100 }}
-          pagination={{ pageSize: 50, hideOnSinglePage: true }}
+          pagination={{ defaultPageSize: 50, hideOnSinglePage: true }}
         />
 
         <Table
@@ -338,7 +338,7 @@ const StockSystemTrading = ({ refreshToken }) => {
           dataSource={paperData?.orders || []}
           columns={orderColumns}
           scroll={{ x: 1100 }}
-          pagination={{ pageSize: 20, hideOnSinglePage: true }}
+          pagination={{ defaultPageSize: 20, hideOnSinglePage: true }}
         />
       </div>
     </Spin>

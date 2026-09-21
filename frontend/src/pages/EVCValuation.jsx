@@ -33,6 +33,8 @@ const EVCValuation = () => {
     const isMobile = !screens.md;
     const [stocks, setStocks] = useState([]);
     const [aStocks, setAStocks] = useState([]);
+    // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
+    const [aStockPage, setAStockPage] = useState({ current: 1, pageSize: 50 });
     const [favoriteStocks, setFavoriteStocks] = useState([]);
     const [activeTab, setActiveTab] = useState('all');
     const [favorites, setFavorites] = useState([]);
@@ -138,6 +140,8 @@ const EVCValuation = () => {
 
             const { data } = await request.post('/api/evc/a-stock-consensus-search', payload);
             setAStocks(data || []);
+            // 新的筛选结果从第 1 页看起
+            setAStockPage(prev => ({ ...prev, current: 1 }));
             setFilterOpen(false);
         } catch (error) {
             message.error({ content: 'A股一致预期查询失败', key: 'a-stock-consensus-search' });
@@ -736,7 +740,15 @@ const EVCValuation = () => {
                 scroll={{ x: 'max-content' }}
                 size="small"
                 loading={aStockSearching}
-                pagination={{ pageSize: 50 }}
+                pagination={{
+                    current: aStockPage.current,
+                    pageSize: aStockPage.pageSize,
+                    // 改每页条数时回到第 1 页，避免当前页码超出新的总页数
+                    onChange: (current, pageSize) => setAStockPage(prev => ({
+                        current: pageSize !== prev.pageSize ? 1 : current,
+                        pageSize,
+                    })),
+                }}
             />
         )
     );
