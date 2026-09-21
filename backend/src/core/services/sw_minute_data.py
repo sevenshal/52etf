@@ -156,8 +156,10 @@ def sync_sw_minute_bars(trading_days: int, full: bool = False, service: Optional
                 errors.append(f"{','.join(batch_codes)} {start}~{end}: {exc}")
             logger.warning("申万分钟线同步失败 %s %s~%s: %s", batch_codes, start, end, exc)
 
+    # 与个股分钟线同一策略：只在全量同步时清理窗口之外的数据。增量同步不清理，
+    # 否则手动全量回补的长历史会在当晚增量时被砍回 32 天，历史回放就走不远了
     pruned = 0
-    if window:
+    if window and (full or latest is None):
         try:
             pruned = prune_sw_minutes(window[0])
         except Exception as exc:  # noqa: BLE001
