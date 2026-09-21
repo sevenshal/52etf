@@ -241,7 +241,9 @@ def test_limits_does_not_cache_empty_result(monkeypatch):
     today = date_cls(2026, 9, 21)
 
     assert scanner.limits(today) == {}
-    assert scanner.limits(today)["000001.SZ"] == (11.0, 9.0)   # 第二次重试拿到了
+    assert scanner.limits(today) == {} and calls["n"] == 1     # 重试间隔内不再打接口
+    scanner._limits_retry_at = 0                               # 模拟过了重试间隔
+    assert scanner.limits(today)["000001.SZ"] == (11.0, 9.0)   # 重试拿到了
     assert calls["n"] == 2
     assert scanner.limits(today)["000001.SZ"] == (11.0, 9.0)   # 拿到之后才缓存
     assert calls["n"] == 2

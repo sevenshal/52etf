@@ -8,6 +8,7 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import os  # 导入工具函数
 from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_micro400, a_stock_fund_flow, ai_stock, chan_analysis, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest, tushare_account, realtime, a_stock_fear_strategy, system_info, fear_greed_signal_config, xueqiu_holdings, eastmoney_holdings, sector_nine_turn, value_investing, stock_system, market
 from ..robot.main import robot
@@ -74,6 +75,10 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# 响应压缩：生产流量经 frp 隧道，大 JSON（如行业关联 3MB+）不压缩时传输要好几秒；
+# JSON 压缩比约 10 倍，level 5 压 3MB 只要十几毫秒。WebSocket 不经过它，SSE 会被自动跳过。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 # 注册路由
 app.include_router(evc.router)

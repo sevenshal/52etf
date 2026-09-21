@@ -393,6 +393,10 @@
   background: #eef6ff !important;
 }
 
+.market-industry__loading {
+  min-height: 320px;
+}
+
 .market-industry__members {
   margin-top: 12px;
 }

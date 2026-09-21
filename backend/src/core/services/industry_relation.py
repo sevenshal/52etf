@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 SW_SOURCE = "SW2021"
 MEMBER_PAGE_SIZE = 3000
 LEVELS = ("l1", "l2", "l3")
-CACHE_TTL_SECONDS = 30
+CACHE_TTL_SECONDS = 30              # 盘中：跟快照一起每 30s 刷新
+OFF_HOURS_CACHE_TTL_SECONDS = 300   # 盘外：快照不再变化，没必要每 30s 重算、重打 tushare
 LIMIT_UP_STATUS = (2, 3)
 LIMIT_DOWN_STATUS = (5, 6)
 MIN_RANK_COUNT = 5
@@ -606,6 +607,15 @@ def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, A
     return value
 
 
+def cache_ttl_seconds(now: datetime) -> int:
+    """交易时段（含集合竞价与收盘前后几分钟余量）用短缓存，其余时间用长缓存。"""
+    if now.weekday() >= 5:
+        return OFF_HOURS_CACHE_TTL_SECONDS
+    minute = now.strftime("%H:%M")
+    in_session = "09:15" <= minute <= "11:35" or "12:55" <= minute <= "15:05"
+    return CACHE_TTL_SECONDS if in_session else OFF_HOURS_CACHE_TTL_SECONDS
+
+
 def fetch_industry_relation(
     universe: str = "all",
     focus: str = "",
@@ -617,7 +627,7 @@ def fetch_industry_relation(
     now = now or datetime.now()
     key = f"relation:{universe}:{focus}:{l1_label}:{l2_label}"
     hit = _cache.get(key)
-    if hit and time.time() - hit[0] < CACHE_TTL_SECONDS:
+    if hit and time.time() - hit[0] < cache_ttl_seconds(now):
         return hit[1]
     value = _load_relation(now, thresholds, universe or "all", focus or "", l1_label or "", l2_label or "")
     _cache[key] = (time.time(), value)

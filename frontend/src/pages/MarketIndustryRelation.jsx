@@ -498,7 +498,10 @@ const MarketIndustryRelation = () => {
         <Alert key={item} className="market-alert" type="warning" showIcon message={item} />
       ))}
 
-      <Spin spinning={loading && !data}>
+      {/* 首次加载时里面没有内容，Spin 会塌成 0 高度、看起来像"点了没反应"，所以给个占位；
+          切换过滤条件时也要转圈（盖在旧数据上），否则几秒内没有任何反馈 */}
+      <Spin spinning={loading} tip="加载行业关联…">
+        {!data && loading && <div className="market-industry__loading" />}
         {data?.picked ? (
           <Row gutter={[12, 12]} className="market-industry__body">
             <Col xs={24} xl={10}>
