@@ -655,7 +655,8 @@ def _run_market_alert_replay(
     logger = logging.getLogger("ScheduledTaskManager")
 
     def progress(index, total, result):
-        logger.info("提示看板回放 %s/%s %s %s", index, total, result.get("date"), result.get("status"))
+        logger.info("提示看板回放 %s/%s %s %s%s", index, total, result.get("date"), result.get("status"),
+                    f" · 行业信号未回放：{result['sw_reason']}" if result.get("sw_reason") else "")
 
     result = replay_alerts(start, end, baseline_days=int(baseline_days), overwrite=bool(overwrite), progress=progress)
     skipped = [f"{item['date']}（{item.get('reason')}）" for item in result["days"] if item["status"] != "done"]
@@ -665,6 +666,10 @@ def _run_market_alert_replay(
     )
     if skipped:
         summary += "；未回放：" + "、".join(skipped[:8]) + ("…" if len(skipped) > 8 else "")
+    sw_off = [item for item in result["days"] if item["status"] == "done" and item.get("sw") == "off"]
+    if sw_off:
+        summary += (f"；其中 {len(sw_off)} 天只回放了个股、没有申万一二级信号"
+                    f"（如 {sw_off[0]['date']}：{sw_off[0].get('sw_reason')}），先跑「分钟行情同步」补齐申万分钟线")
     return summary
 
 

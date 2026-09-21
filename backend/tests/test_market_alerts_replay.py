@@ -112,6 +112,7 @@ def test_replay_day_reproduces_first_hit_minute(synthetic_market):
     result = replay_day(con, target, baseline_days=20)
 
     assert result["status"] == "done" and result["sw"] == "off"
+    assert result["sw_reason"] == "没有申万一/二级日线"          # 申万部分留空：只关行业信号，原因要带出来
     with get_db_ctx() as db:
         row = db.query(MarketAlertHit).filter_by(trade_date=target, ts_code="000001.SZ").one()
         assert row.label == LABEL_ACTIVE
