@@ -547,7 +547,7 @@ class AlertScanner:
         sw_hits: List[Dict[str, Any]] = []
         if self._sw_structures:
             try:
-                sw_quotes = TushareService.get_instance().get_sw_realtime_frame()
+                sw_quotes = get_sw_snapshot()
                 if sw_quotes is not None and not sw_quotes.empty:
                     if "trade_time" in sw_quotes.columns:
                         sw_quotes = sw_quotes[
@@ -566,7 +566,7 @@ class AlertScanner:
         if len(self._pct_history) > SPEED_LOOKBACK_ROUNDS:
             self._pct_history.pop(0)
 
-        written = self._write_hits(today, minute_label, hits + sw_hits, current_pct)
+        written = self._write_hits(today, minute_label, hits + sw_hits)
         return {
             "minute": minute_label,
             "scanned": int(len(quotes)),
@@ -580,14 +580,14 @@ class AlertScanner:
         today: date,
         minute_label: str,
         hits: List[Dict[str, Any]],
-        current_pct: Dict[str, float],
     ) -> Dict[str, int]:
         """写入当日状态：新出现的插入；标签只按优先级往更强的方向覆盖，每次覆盖在流水表记一条。
 
         覆盖规则见 can_override：强势 > 活跃 > 规避 > 观望，只有更强的能覆盖更弱的。
         往弱的方向变（如 活跃→观望、规避→观望、强势→活跃）一律忽略，不改标签、不记流水。
         覆盖只在当天内判断，隔日各自独立。
-        命中价/首次命中时刻/命中后涨幅始终以首次命中为准（用于事后打分）。
+        命中价/首次命中时刻始终以首次命中为准。现价与命中后涨幅不落库，读取时用最新快照现算
+        （见 attach_latest_returns），省掉每分钟对当天全部命中行的写库，读到的也总是最新价。
         """
         recorded = self._recorded_today(today)
         inserted = changed = 0
@@ -622,8 +622,6 @@ class AlertScanner:
                         td_up=hit["td_up"],
                         td_down=hit["td_down"],
                         days_since_low9=hit["days_since_low9"],
-                        last_price=hit["price"],
-                        cum_pct=0.0,
                     )
                     db.add(row)
                     rows_by_code[code] = row
@@ -641,16 +639,6 @@ class AlertScanner:
                     changed += 1
                 recorded[code] = row.label
 
-            # 每轮刷新现价与命中后涨幅（个股与行业一样），供事后打分
-            for row in rows_by_code.values():
-                pct_now = current_pct.get(row.ts_code)
-                if pct_now is None or not row.price:
-                    continue
-                # 命中价与现价同一个昨收：现价 = 命中价 × (1+现涨幅) ÷ (1+命中时涨幅)。
-                # 旧写法 命中价×(1+涨幅差) 是近似，命中时+5%、现在+10% 会把命中后涨幅高估 0.24 个点
-                quote_price = row.price * (1 + pct_now / 100) / (1 + (row.pct or 0) / 100)
-                row.last_price = round(quote_price, 3)
-                row.cum_pct = round((quote_price / row.price - 1) * 100, 2)
         return {"recorded": inserted, "changed": changed}
 
 
@@ -696,6 +684,131 @@ def get_market_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
     frame = TushareService.get_instance().get_a_stock_realtime_market_frame()
     _snapshot_cache = (time.time(), frame)
     return frame
+
+
+_sw_snapshot_cache: Tuple[float, Optional[pd.DataFrame]] = (0.0, None)
+
+
+def get_sw_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
+    """申万一/二级实时行情（rt_sw_k），30 秒内复用；扫描与读取命中后涨幅共用。"""
+    global _sw_snapshot_cache
+    cached_at, cached = _sw_snapshot_cache
+    if not force and cached is not None and time.time() - cached_at < SNAPSHOT_TTL_SECONDS:
+        return cached
+    frame = TushareService.get_instance().get_sw_realtime_frame()
+    _sw_snapshot_cache = (time.time(), frame)
+    return frame
+
+
+def latest_price_map() -> Dict[str, Tuple[float, date]]:
+    """{代码: (最新价, 行情日期)}，个股取 rt_k 快照、申万取 rt_sw_k 快照，都走 30 秒缓存。
+
+    盘后/休市时快照返回的是最近一个交易日的收盘，这正是"最新价"该有的含义。
+    """
+    prices: Dict[str, Tuple[float, date]] = {}
+    for loader in (get_market_snapshot, get_sw_snapshot):
+        try:
+            frame = loader()
+        except Exception as exc:  # noqa: BLE001  取不到最新价时命中后涨幅留空，不影响列表
+            logger.warning("读取最新价失败: %s", exc)
+            continue
+        if frame is None or frame.empty:
+            continue
+        quote_dates = (
+            pd.to_datetime(frame["trade_time"], errors="coerce").dt.date
+            if "trade_time" in frame.columns else pd.Series([date.today()] * len(frame), index=frame.index)
+        )
+        for code, close, quote_date in zip(frame["ts_code"], frame["close"], quote_dates):
+            price = safe_float(close)
+            if price and quote_date is not None and not pd.isna(quote_date):
+                prices[str(code).strip().upper()] = (price, quote_date)
+    return prices
+
+
+_today_adj_cache: Dict[date, Dict[str, float]] = {}
+
+
+def _today_adj_factors(day: date) -> Dict[str, float]:
+    """当天的复权因子：分析库每晚才同步，盘中遇到除权日要向 tushare 取一次当天全市场因子，按天缓存。"""
+    if day in _today_adj_cache:
+        return _today_adj_cache[day]
+    try:
+        frame = TushareService.get_instance().get_a_stock_adj_factor_range_frame(day, day)
+        factors = {
+            str(row.ts_code).strip().upper(): float(row.adj_factor)
+            for row in frame.itertuples(index=False) if row.adj_factor
+        } if frame is not None and not frame.empty else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tushare 当日复权因子获取失败: %s", exc)
+        factors = {}
+    if factors:                    # 取到才缓存，盘前还没发布时下次重试
+        _today_adj_cache[day] = factors
+    return factors
+
+
+def load_adj_ratios(codes: List[str], hit_date: date, quote_date: date) -> Dict[str, float]:
+    """命中价换算到最新价复权基准的系数：因子(命中日) ÷ 因子(行情日)。
+
+    跨日若中间发生过送转、分红等除权，原始价格不可直接相除（十送十会被当成 −50%）。
+    缺因子的股票不换算（系数 1），同一天内本来也不需要换算。
+    """
+    if not codes or hit_date == quote_date:
+        return {}
+    connection = connect_analytics_db()
+    try:
+        placeholders = ",".join("?" for _ in codes)
+        rows = connection.execute(
+            f"""
+            SELECT ts_code, trade_date, adj_factor FROM a_stock_adj_factor
+            WHERE ts_code IN ({placeholders}) AND trade_date IN (?, ?)
+            """,
+            [*codes, hit_date, quote_date],
+        ).fetchall()
+    finally:
+        connection.close()
+    at_hit: Dict[str, float] = {}
+    at_quote: Dict[str, float] = {}
+    for code, trade_date, factor in rows:
+        if not factor:
+            continue
+        target = at_hit if trade_date == hit_date else at_quote
+        target[str(code)] = float(factor)
+    missing = [code for code in codes if code in at_hit and code not in at_quote]
+    if missing and quote_date == date.today():
+        today_factors = _today_adj_factors(quote_date)
+        for code in missing:
+            if code in today_factors:
+                at_quote[code] = today_factors[code]
+    return {code: at_hit[code] / at_quote[code] for code in at_hit if code in at_quote and at_quote[code]}
+
+
+def attach_latest_returns(rows: List[Dict[str, Any]], hit_date: date,
+                          prices: Optional[Dict[str, Tuple[float, date]]] = None) -> List[Dict[str, Any]]:
+    """给命中行补上最新价与命中后涨幅（命中价 → 最新价，跨日按复权换算）。"""
+    prices = latest_price_map() if prices is None else prices
+    stock_codes_by_date: Dict[date, List[str]] = {}
+    for row in rows:
+        quote = prices.get(row["ts_code"])
+        if quote and (row.get("entity_type") or ENTITY_STOCK) == ENTITY_STOCK and quote[1] != hit_date:
+            stock_codes_by_date.setdefault(quote[1], []).append(row["ts_code"])
+    ratios: Dict[str, float] = {}
+    for quote_date, codes in stock_codes_by_date.items():
+        try:
+            ratios.update(load_adj_ratios(codes, hit_date, quote_date))
+        except Exception as exc:  # noqa: BLE001  取不到复权因子时按原始价计算
+            logger.warning("读取复权因子失败，命中后涨幅按原始价计算: %s", exc)
+
+    for row in rows:
+        quote = prices.get(row["ts_code"])
+        if not quote or not row.get("price"):
+            row["last_price"], row["cum_pct"], row["price_date"] = None, None, None
+            continue
+        price, quote_date = quote
+        base = row["price"] * ratios.get(row["ts_code"], 1.0)
+        row["last_price"] = round(price, 3)
+        row["cum_pct"] = round((price / base - 1) * 100, 2) if base else None
+        row["price_date"] = quote_date.isoformat()
+    return rows
 
 
 _scanner = AlertScanner()
@@ -745,8 +858,8 @@ def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:
         "td_up": row.td_up,
         "td_down": row.td_down,
         "days_since_low9": row.days_since_low9,
-        "last_price": row.last_price,
-        "cum_pct": row.cum_pct,
+        "last_price": None,          # 读取时由 attach_latest_returns 用最新快照现算
+        "cum_pct": None,
     }
 
 
@@ -893,6 +1006,9 @@ def fetch_alerts(
                 if not industry_label_matches(item["l2_label"], l2_label):
                     continue
                 rows.append(item)
+    if target:
+        # 命中后涨幅不落库，读取时用最新价现算（统计也基于它）
+        attach_latest_returns(rows + sw_rows, target)
     return {
         "date": target.isoformat() if target else None,
         "dates": [d.isoformat() for d in dates],

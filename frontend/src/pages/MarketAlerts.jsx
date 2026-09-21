@@ -256,9 +256,17 @@ const MarketAlerts = () => {
       render: (_, record) => (record.td_up ? `高${record.td_up}` : record.td_down ? `低${record.td_down}` : '-'),
     },
     { title: '命中价', dataIndex: 'price', width: 84, align: 'right' },
-    { title: '现价', dataIndex: 'last_price', width: 84, align: 'right' },
     {
-      title: '命中后涨幅',
+      title: <Tooltip title="全市场快照的最新价（盘后/休市为最近交易日收盘），30 秒刷新">最新价</Tooltip>,
+      dataIndex: 'last_price',
+      width: 84,
+      align: 'right',
+      render: (value, record) => (value === null || value === undefined ? '-' : (
+        <Tooltip title={`行情日期 ${record.price_date}`}>{value}</Tooltip>
+      )),
+    },
+    {
+      title: <Tooltip title="命中价 → 最新价；命中日与最新价不在同一天时按复权因子换算，送转分红不会被算成涨跌">命中后涨幅</Tooltip>,
       dataIndex: 'cum_pct',
       width: 106,
       align: 'right',

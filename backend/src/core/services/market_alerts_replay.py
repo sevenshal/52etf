@@ -196,7 +196,6 @@ def replay_day(
     minutes = replay_minutes(list(stock_panels["close"].columns))
     pct_history: List[Dict[str, float]] = []
     total_hits = total_sw_hits = 0
-    last_pct: Dict[str, float] = {}
     for minute in minutes:
         quotes = snapshot_at(stock_panels, stock_pre, minute)
         previous = pct_history[0] if len(pct_history) >= SPEED_LOOKBACK_ROUNDS else None
@@ -216,14 +215,9 @@ def replay_day(
         if len(pct_history) > SPEED_LOOKBACK_ROUNDS:
             pct_history.pop(0)
         if hits or sw_hits:
-            # 中间分钟不刷新现价（省掉每分钟全表更新），收盘后统一刷一次，结果与盘中逐轮刷新一致
-            writer._write_hits(day, minute, hits + sw_hits, {})
+            writer._write_hits(day, minute, hits + sw_hits)
         total_hits += len(hits)
         total_sw_hits += len(sw_hits)
-        last_pct = current_pct
-
-    # 收盘：现价与命中后涨幅按当天最后一分钟（即收盘）刷新
-    writer._write_hits(day, minutes[-1] if minutes else "15:00", [], last_pct)
 
     with get_db_ctx() as db:
         rows = db.query(MarketAlertHit.entity_type, MarketAlertHit.label).filter(MarketAlertHit.trade_date == day).all()

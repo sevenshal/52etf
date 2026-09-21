@@ -5,6 +5,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _no_live_prices(monkeypatch):
+    """读取命中列表时会取最新价（真实环境调 tushare），测试里默认桩成"没有行情"。"""
+    from src.core.services import market_alerts as module
+
+    monkeypatch.setattr(module, "latest_price_map", lambda: {})
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.services.market_alerts import (
@@ -324,10 +332,10 @@ def test_write_hits_overwrites_latest_label_and_logs_every_change():
         db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
 
     scanner = AlertScanner()
-    scanner._write_hits(today, "09:40", [_hit("000001.SZ", LABEL_WATCH, price=10.0, pct=-1.0)], {})
-    scanner._write_hits(today, "09:41", [_hit("000001.SZ", LABEL_WATCH, price=10.1)], {})      # 没变：不记
-    scanner._write_hits(today, "10:05", [_hit("000001.SZ", LABEL_ACTIVE, price=10.5)], {})     # 观望→活跃
-    scanner._write_hits(today, "10:30", [], {})                                                 # 此刻无信号：不清空
+    scanner._write_hits(today, "09:40", [_hit("000001.SZ", LABEL_WATCH, price=10.0, pct=-1.0)])
+    scanner._write_hits(today, "09:41", [_hit("000001.SZ", LABEL_WATCH, price=10.1)])      # 没变：不记
+    scanner._write_hits(today, "10:05", [_hit("000001.SZ", LABEL_ACTIVE, price=10.5)])     # 观望→活跃
+    scanner._write_hits(today, "10:30", [])                                                 # 此刻无信号：不清空
 
     with get_db_ctx() as db:
         row = db.query(MarketAlertHit).filter_by(trade_date=today, ts_code="000001.SZ").one()
@@ -361,7 +369,7 @@ def test_fetch_alerts_attaches_and_filters_by_industry_labels():
         _hit("600519.SH", LABEL_ACTIVE, name="贵州茅台", l1="食品饮料", l2="白酒Ⅱ"),
         _hit("801780.SI", LABEL_STRONG, entity="sw_l1", name="银行", l1="银行", l2=""),
         _hit("801783.SI", LABEL_WATCH, entity="sw_l2", name="股份制银行Ⅱ", l1="银行", l2="股份制银行Ⅱ"),
-    ], {})
+    ])
 
     result = fetch_alerts(today)
     by_code = {row["ts_code"]: row for row in result["rows"]}
@@ -472,10 +480,10 @@ def test_write_hits_ignores_downgrades_and_resets_each_day():
         ("10:30", LABEL_STRONG),    # 强势覆盖活跃 ✓
         ("10:40", LABEL_ACTIVE),    # 活跃不能覆盖强势 ✗
     ):
-        scanner._write_hits(day1, minute, [_hit(code, label)], {})
+        scanner._write_hits(day1, minute, [_hit(code, label)])
 
     # 次日重新开始：前一天是强势，今天出观望照样记录，不和前一天比较
-    scanner._write_hits(day2, "09:40", [_hit(code, LABEL_WATCH)], {})
+    scanner._write_hits(day2, "09:40", [_hit(code, LABEL_WATCH)])
 
     with get_db_ctx() as db:
         row1 = db.query(MarketAlertHit).filter_by(trade_date=day1, ts_code=code).one()
@@ -495,3 +503,84 @@ def test_write_hits_ignores_downgrades_and_resets_each_day():
 
         db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([day1, day2])).delete(synchronize_session=False)
         db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+
+
+def test_attach_latest_returns_same_day_uses_raw_prices():
+    from datetime import date as date_cls
+
+    from src.core.services.market_alerts import attach_latest_returns
+
+    day = date_cls(2026, 9, 21)
+    rows = [
+        {"ts_code": "000001.SZ", "entity_type": "stock", "price": 10.0},
+        {"ts_code": "801080.SI", "entity_type": "sw_l1", "price": 9000.0},
+        {"ts_code": "600000.SH", "entity_type": "stock", "price": 8.0},     # 没有最新价
+    ]
+    prices = {"000001.SZ": (11.0, day), "801080.SI": (8910.0, day)}
+
+    attach_latest_returns(rows, day, prices=prices)
+
+    assert rows[0]["cum_pct"] == 10.0 and rows[0]["last_price"] == 11.0 and rows[0]["price_date"] == "2026-09-21"
+    assert rows[1]["cum_pct"] == -1.0
+    assert rows[2]["cum_pct"] is None and rows[2]["last_price"] is None
+
+
+def test_attach_latest_returns_adjusts_across_ex_rights(monkeypatch):
+    """命中后发生十送十：原始价从 20 变成 10.5，直接相除是 −47.5%，按复权换算才是 +5%。"""
+    import duckdb
+    from datetime import date as date_cls
+
+    from src.core.services import market_alerts as module
+
+    hit_day, quote_day = date_cls(2026, 9, 1), date_cls(2026, 9, 18)
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_adj_factor (ts_code VARCHAR, trade_date DATE, adj_factor DOUBLE)")
+    con.executemany("INSERT INTO a_stock_adj_factor VALUES (?, ?, ?)", [
+        ("000001.SZ", hit_day, 1.0), ("000001.SZ", quote_day, 2.0),     # 除权后因子翻倍
+        ("600000.SH", hit_day, 3.0), ("600000.SH", quote_day, 3.0),     # 期间没除权
+    ])
+    class _KeepOpen:
+        """被测代码用完会 close；测试里要复用同一个内存库，所以包一层让 close 什么也不做。"""
+        def execute(self, *args, **kwargs):
+            return con.execute(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "connect_analytics_db", lambda: _KeepOpen())
+
+    rows = [
+        {"ts_code": "000001.SZ", "entity_type": "stock", "price": 20.0},
+        {"ts_code": "600000.SH", "entity_type": "stock", "price": 10.0},
+        {"ts_code": "801080.SI", "entity_type": "sw_l1", "price": 9000.0},   # 指数没有除权，不换算
+    ]
+    prices = {
+        "000001.SZ": (10.5, quote_day),
+        "600000.SH": (11.0, quote_day),
+        "801080.SI": (9450.0, quote_day),
+    }
+
+    module.attach_latest_returns(rows, hit_day, prices=prices)
+
+    assert rows[0]["cum_pct"] == 5.0          # 20 × 1/2 = 10 → 10.5
+    assert rows[1]["cum_pct"] == 10.0
+    assert rows[2]["cum_pct"] == 5.0
+
+
+def test_write_hits_no_longer_persists_returns():
+    """现价与命中后涨幅不再每轮写库。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services.market_alerts import AlertScanner
+
+    day = date_cls(2000, 1, 10)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == day).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == day).delete()
+    AlertScanner()._write_hits(day, "09:40", [_hit("000001.SZ", LABEL_ACTIVE, price=10.0)])
+    with get_db_ctx() as db:
+        row = db.query(MarketAlertHit).filter_by(trade_date=day, ts_code="000001.SZ").one()
+        assert row.last_price is None and row.cum_pct is None and row.price == 10.0
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == day).delete()
+        db.delete(row)

@@ -116,7 +116,7 @@ def test_replay_day_reproduces_first_hit_minute(synthetic_market):
         assert row.hit_time == "10:01"                       # 正好是量比越过 1.3 的那一分钟
         assert row.volume_ratio == pytest.approx(1.56, abs=0.01)
         assert row.industry_l1 == "银行"
-        assert row.cum_pct is not None and row.cum_pct > 0    # 收盘后刷新了命中后涨幅（价格一路走高）
+        assert row.cum_pct is None                            # 命中后涨幅不再落库，读取时现算
         events = db.query(MarketAlertEvent).filter_by(trade_date=target, ts_code="000001.SZ").all()
         assert [(e.event_time, e.label) for e in events] == [("10:01", LABEL_ACTIVE)]
 
