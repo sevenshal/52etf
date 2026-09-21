@@ -203,6 +203,36 @@
   font-size: 11px;
 }
 
+.minute-mini {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 180px;
+}
+
+.minute-mini__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 2px 4px;
+  color: #61708a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.minute-mini__title .ant-typography {
+  font-weight: 400;
+}
+
+.market-industry__panel {
+  margin-bottom: 12px;
+}
+
+.stock-external-link {
+  color: #98a5b8;
+  font-size: 11px;
+}
+
 .market-alerts__kline {
   margin-top: 12px;
 }
