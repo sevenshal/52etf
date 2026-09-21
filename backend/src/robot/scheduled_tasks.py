@@ -640,7 +640,8 @@ def _run_market_alert_baseline(baseline_days: int = 20):
     from ..core.services.market_alerts import prepare_alert_baseline
 
     result = prepare_alert_baseline(baseline_days=int(baseline_days))
-    return (f"结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} "
+    return (f"个股结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} "
+            f"· 申万一二级结构 {result.get('sw_structures')} 个 · 基准点 {result.get('sw_baseline_points')} "
             f"· 基准取前 {result.get('baseline_days')} 个交易日")
 
 
@@ -657,8 +658,13 @@ def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
             threading.Event().wait(5)
             state = ChanMinuteSyncManager.snapshot()
     if state.get("status") not in {"SUCCESS", "PARTIAL_SUCCESS"}:
-        raise RuntimeError(f"缠论分钟行情同步失败: {state}")
-    logging.getLogger("ScheduledTaskManager").info("Chan minute data synced: %s", state)
+        raise RuntimeError(f"分钟行情同步失败: {state}")
+    logging.getLogger("ScheduledTaskManager").info("Minute data synced: %s", state)
+    return (
+        f"{state.get('status')} 个股分钟 {state.get('saved_rows', 0)} 行 · "
+        f"申万分钟 {state.get('sw_saved_rows', 0)} 行（{state.get('sw_mode') or '-'}，"
+        f"{state.get('sw_requests', 0)} 次请求） · 错误 {len(state.get('errors') or [])} 条"
+    )
 
 
 def _run_a_stock_innovation100_rebuild(
@@ -1671,8 +1677,11 @@ class ScheduledTaskManager:
             ),
             "chan_minute_sync": TaskDefinition(
                 task_key="chan_minute_sync",
-                name="缠论分钟行情同步",
-                description="日常盘后按实际缺口增量同步并额外重叠1个交易日；点击手动执行时回补最近128个交易日。",
+                name="分钟行情同步",
+                description=(
+                    "同时同步全市场个股与申万一/二级行业指数的 1 分钟线（缠论、分时小图、提示看板量能基准共用）。"
+                    "日常盘后按实际缺口增量同步并额外重叠1个交易日；点击手动执行时回补最近128个交易日。"
+                ),
                 default_time="21:30",
                 default_enabled=True,
                 sort_order=75,

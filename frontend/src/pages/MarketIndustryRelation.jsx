@@ -13,6 +13,20 @@ const UP_COLOR = '#e5484d';
 const LABEL_COLORS = { 强势: 'red', 活跃: 'volcano', 观望: 'green', 规避: 'success' };
 const LABEL_CLASS = { 强势: 'strong', 活跃: 'active', 观望: 'watch', 规避: 'avoid' };
 const LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
+const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
+// 行业自身信号过滤：全部 / 四档标签 / 无信号
+const INDUSTRY_LABEL_OPTIONS = [
+  { label: '全部', value: '' },
+  ...LABEL_ORDER.map(item => ({ label: item, value: item })),
+  { label: '无信号', value: 'none' },
+];
+
+/** 申万一/二级指数自身的当日信号；三级 tushare 没有行情，不显示 */
+const SignalDot = ({ value, prefix = '' }) => (value ? (
+  <Tooltip title={`${prefix}行业指数自身信号：${value}`}>
+    <Tag color={LABEL_COLORS[value]} className="industry-signal-tag">{prefix}{value}</Tag>
+  </Tooltip>
+) : null);
 
 const formatErrorMessage = (error, fallback) => {
   const detail = error?.response?.data?.detail || error?.message;
@@ -69,9 +83,12 @@ const buildIndustryColumns = (level, compact) => {
       fixed: 'left',
       ellipsis: true,
       render: (value, record) => (
-        <Tooltip title={`${record.count} 只成分 · 成交额 ${record.amount_yi} 亿${record.parent ? ` · 属于 ${record.parent}` : ''}`}>
-          <span>{value}</span>
-        </Tooltip>
+        <span className="industry-name-cell">
+          <Tooltip title={`${record.count} 只成分 · 成交额 ${record.amount_yi} 亿${record.parent ? ` · 属于 ${record.parent}` : ''}`}>
+            <span>{value}</span>
+          </Tooltip>
+          {record.label && <span className={`industry-name-dot dot-${LABEL_ORDER.indexOf(record.label)}`} title={`行业信号：${record.label}`} />}
+        </span>
       ),
     },
     {
@@ -193,6 +210,8 @@ const MarketIndustryRelation = () => {
   const [error, setError] = useState('');
   const [universe, setUniverse] = useState('all');
   const [focus, setFocus] = useState('');
+  const [l1Label, setL1Label] = useState('');   // 按所属一级行业的当日信号过滤
+  const [l2Label, setL2Label] = useState('');   // 按所属二级行业的当日信号过滤
   const [selected, setSelected] = useState({ l1: null, l2: null, l3: null });
   const [history, setHistory] = useState(null);
   const [columnMode, setColumnMode] = useState('full');   // full=完整列 / compact=精简列
@@ -203,12 +222,14 @@ const MarketIndustryRelation = () => {
   // 行业选择或过滤条件变了回到第 1 页
   useEffect(() => {
     setMemberPage(prev => ({ ...prev, current: 1 }));
-  }, [selected, universe, focus]);
+  }, [selected, universe, focus, l1Label, l2Label]);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const response = await request.get('/api/market/industry-relation', { params: { universe, focus } });
+      const response = await request.get('/api/market/industry-relation', {
+        params: { universe, focus, l1_label: l1Label, l2_label: l2Label },
+      });
       setData(response.data);
       setError('');
     } catch (err) {
@@ -216,7 +237,7 @@ const MarketIndustryRelation = () => {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [universe, focus]);
+  }, [universe, focus, l1Label, l2Label]);
 
   useEffect(() => {
     load();
@@ -337,6 +358,18 @@ const MarketIndustryRelation = () => {
     },
     { title: '成交额(亿)', dataIndex: 'amount_yi', width: 92, align: 'right', sorter: (a, b) => a.amount_yi - b.amount_yi },
     {
+      title: <Tooltip title="所属申万一级 / 二级行业指数自身的当日最新信号">行业信号</Tooltip>,
+      key: 'industry_signals',
+      width: 96,
+      render: (_, record) => (
+        <Space size={2}>
+          <SignalDot value={record.l1_label} prefix="一" />
+          <SignalDot value={record.l2_label} prefix="二" />
+          {!record.l1_label && !record.l2_label && <Text type="secondary">-</Text>}
+        </Space>
+      ),
+    },
+    {
       title: '今日标签',
       dataIndex: 'label',
       width: 96,
@@ -429,13 +462,21 @@ const MarketIndustryRelation = () => {
           />
         </Space>
         <Space wrap size={[8, 6]}>
-          <Text type="secondary">焦点</Text>
+          <Text type="secondary">个股</Text>
           <Segmented
             size="small"
             value={focus}
             onChange={setFocus}
             options={(data?.focus_options || [{ key: '', name: '全部' }]).map(item => ({ label: item.name, value: item.key }))}
           />
+        </Space>
+        <Space wrap size={[8, 6]}>
+          <Text type="secondary">一级信号</Text>
+          <Segmented size="small" value={l1Label} onChange={setL1Label} options={INDUSTRY_LABEL_OPTIONS} />
+        </Space>
+        <Space wrap size={[8, 6]}>
+          <Text type="secondary">二级信号</Text>
+          <Segmented size="small" value={l2Label} onChange={setL2Label} options={INDUSTRY_LABEL_OPTIONS} />
         </Space>
       </div>
 

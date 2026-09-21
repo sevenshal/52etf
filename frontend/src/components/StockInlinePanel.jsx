@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Col, Row, Space, Tag, Typography } from 'antd';
 import { CloseOutlined } from '@ant-design/icons';
 import request from '../utils/request';
-import MinuteMiniChart from './MinuteMiniChart';
+import MinuteMiniChart, { SIGNAL_COLORS } from './MinuteMiniChart';
 import StockKlineChart from './StockKlineChart';
 
 const { Text } = Typography;
@@ -44,6 +44,12 @@ const StockInlinePanel = ({ stock, onClose, extraMeta = null, highlightTime = nu
     };
   }, [series]);
 
+  const allEvents = useMemo(() => series?.events || [], [series]);
+  const todayEvents = useMemo(
+    () => allEvents.filter(event => event.date === todaySeries?.today),
+    [allEvents, todaySeries],
+  );
+
   if (!stock) return null;
   const today = todaySeries?.days?.[0];
 
@@ -76,12 +82,21 @@ const StockInlinePanel = ({ stock, onClose, extraMeta = null, highlightTime = nu
             height={180}
             singleDay
             highlightTime={highlightTime}
+            events={todayEvents}
           />
           <div className="minute-mini__title">
             5日分时
             {series?.days?.length ? <Text type="secondary">{series.days.length} 个交易日</Text> : null}
           </div>
-          <MinuteMiniChart series={series} loading={loading} height={180} />
+          <MinuteMiniChart series={series} loading={loading} height={180} events={allEvents} />
+          {allEvents.length > 0 && (
+            <div className="signal-legend">
+              {Object.entries(SIGNAL_COLORS).map(([name, color]) => (
+                <span key={name}><i style={{ background: color }} />{name}</span>
+              ))}
+              <Text type="secondary">共 {allEvents.length} 次信号</Text>
+            </div>
+          )}
         </Col>
         <Col xs={24} xl={15}>
           <StockKlineChart symbol={stock.ts_code} height={392} />

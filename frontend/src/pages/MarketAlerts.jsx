@@ -20,6 +20,17 @@ const LABEL_META = {
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
+// 行业自身信号的过滤：全部 / 四档标签 / 无信号
+const INDUSTRY_LABEL_OPTIONS = [
+  { label: '全部', value: '' },
+  ...LABEL_ORDER.map(item => ({ label: item, value: item })),
+  { label: '无信号', value: 'none' },
+];
+
+/** 行业信号小标签：一级/二级申万指数自身的当日最新标签 */
+const IndustrySignal = ({ value }) => (value
+  ? <Tag color={LABEL_META[value]?.color} className="industry-signal-tag">{value}</Tag>
+  : <Text type="secondary">-</Text>);
 
 const formatErrorMessage = (error, fallback) => {
   const detail = error?.response?.data?.detail || error?.message;
@@ -43,6 +54,8 @@ const MarketAlerts = () => {
   const [label, setLabel] = useState('');
   const [industry, setIndustry] = useState(null);     // 点击行业柱筛选
   const [industryLevel, setIndustryLevel] = useState('l1'); // 申万级别，默认一级（与行业关联同一口径）
+  const [l1Label, setL1Label] = useState('');   // 按所属申万一级行业的当日标签过滤
+  const [l2Label, setL2Label] = useState('');   // 按所属申万二级行业的当日标签过滤
   // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
   const [tablePage, setTablePage] = useState({ current: 1, pageSize: 50 });
   const [klineStock, setKlineStock] = useState(null); // 内嵌K线面板（点名称打开，不弹窗）
@@ -50,7 +63,7 @@ const MarketAlerts = () => {
   // 筛选条件变了回到第 1 页，否则停在第 5 页时切个行业会看到空表
   useEffect(() => {
     setTablePage(prev => ({ ...prev, current: 1 }));
-  }, [industry, label, tradeDate, industryLevel]);
+  }, [industry, label, tradeDate, industryLevel, l1Label, l2Label]);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -58,6 +71,8 @@ const MarketAlerts = () => {
       const params = {};
       if (tradeDate) params.date = tradeDate;
       if (label) params.label = label;
+      if (l1Label) params.l1_label = l1Label;
+      if (l2Label) params.l2_label = l2Label;
       params.level = industryLevel;
       const response = await request.get('/api/market/alerts', { params });
       setData(response.data);
@@ -67,7 +82,7 @@ const MarketAlerts = () => {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [tradeDate, label, industryLevel]);
+  }, [tradeDate, label, industryLevel, l1Label, l2Label]);
 
   useEffect(() => {
     load();
@@ -192,13 +207,35 @@ const MarketAlerts = () => {
     {
       title: '标签',
       dataIndex: 'label',
-      width: 80,
-      render: value => (
-        <Tooltip title={LABEL_META[value]?.desc}>
-          <Tag color={LABEL_META[value]?.color}>{value}</Tag>
+      width: 86,
+      render: (value, record) => (
+        <Tooltip title={(
+          <span>
+            {LABEL_META[value]?.desc}
+            <br />
+            首次命中 {record.hit_time}
+            {record.change_count ? ` · 盘中变化 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
+          </span>
+        )}
+        >
+          <Tag color={LABEL_META[value]?.color}>{value}{record.change_count ? '*' : ''}</Tag>
         </Tooltip>
       ),
       sorter: (a, b) => LABEL_ORDER.indexOf(a.label) - LABEL_ORDER.indexOf(b.label),
+    },
+    {
+      title: <Tooltip title="所属申万一级行业指数自身的当日最新信号">一级信号</Tooltip>,
+      dataIndex: 'l1_label',
+      width: 78,
+      render: value => <IndustrySignal value={value} />,
+      sorter: (a, b) => LABEL_ORDER.indexOf(a.l1_label) - LABEL_ORDER.indexOf(b.l1_label),
+    },
+    {
+      title: <Tooltip title="所属申万二级行业指数自身的当日最新信号">二级信号</Tooltip>,
+      dataIndex: 'l2_label',
+      width: 78,
+      render: value => <IndustrySignal value={value} />,
+      sorter: (a, b) => LABEL_ORDER.indexOf(a.l2_label) - LABEL_ORDER.indexOf(b.l2_label),
     },
     { title: '综合分', dataIndex: 'score', width: 84, align: 'right', sorter: (a, b) => (a.score || 0) - (b.score || 0) },
     {
@@ -243,6 +280,7 @@ const MarketAlerts = () => {
             onChange={setTradeDate}
             placeholder="最新交易日"
           />
+          <Text type="secondary">个股</Text>
           <Radio.Group
             size="small"
             value={label}
@@ -250,16 +288,55 @@ const MarketAlerts = () => {
             optionType="button"
             options={[{ label: '全部', value: '' }, ...LABEL_ORDER.map(item => ({ label: item, value: item }))]}
           />
+          <Text type="secondary">一级</Text>
+          <Radio.Group
+            size="small"
+            value={l1Label}
+            onChange={event => setL1Label(event.target.value)}
+            optionType="button"
+            options={INDUSTRY_LABEL_OPTIONS}
+          />
+          <Text type="secondary">二级</Text>
+          <Radio.Group
+            size="small"
+            value={l2Label}
+            onChange={event => setL2Label(event.target.value)}
+            optionType="button"
+            options={INDUSTRY_LABEL_OPTIONS}
+          />
         </Space>
         {data?.thresholds && (
           <Text type="secondary">
             口径：九转高计数 ≥{data.thresholds.active_td_up_min} · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
-            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势 ≥{data.thresholds.strong_volume_ratio}）· 每只每日首次命中
+            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势 ≥{data.thresholds.strong_volume_ratio}）
+            · 标签盘中变化取最新（带 * 表示变过）· 命中价以首次命中为准
           </Text>
         )}
       </div>
 
       {error && <Alert className="market-alert" type="warning" showIcon message={error} />}
+
+      {data?.sw_signals?.length > 0 && (
+        <Card size="small" className="market-alerts__sw" title="行业信号（申万一/二级指数自身）">
+          {[['sw_l1', '一级'], ['sw_l2', '二级']].map(([type, title]) => {
+            const items = data.sw_signals.filter(item => item.entity_type === type);
+            if (!items.length) return null;
+            return (
+              <div className="sw-signal-row" key={type}>
+                <Text type="secondary" className="sw-signal-row__title">{title}</Text>
+                {LABEL_ORDER.map(name => items.filter(item => item.label === name).map(item => (
+                  <Tooltip
+                    key={item.ts_code}
+                    title={`${item.name} · ${fmtPct(item.pct)} · 首次 ${item.hit_time}${item.change_count ? ` · 变化 ${item.change_count} 次` : ''}`}
+                  >
+                    <Tag color={LABEL_META[name]?.color}>{item.name}</Tag>
+                  </Tooltip>
+                )))}
+              </div>
+            );
+          })}
+        </Card>
+      )}
 
       <Spin spinning={loading && !data}>
         {summary?.total ? (

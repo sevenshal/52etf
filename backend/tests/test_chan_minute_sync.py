@@ -2,9 +2,23 @@ import threading
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from src.core.services import chan_minute_sync as sync_module
 from src.core.services.chan_minute_sync import ChanMinuteSyncManager
+
+
+@pytest.fixture(autouse=True)
+def _stub_sw_minute_sync(monkeypatch):
+    """这组用例只测个股分钟同步；申万分钟同步单独覆盖，这里桩成成功，避免真实请求。"""
+    calls = []
+
+    def fake_sync(trading_days, full=False):
+        calls.append((trading_days, full))
+        return {"saved_rows": 0, "requests": 0, "mode": "full" if full else "incremental", "errors": []}
+
+    monkeypatch.setattr(sync_module, "sync_sw_minute_bars", fake_sync)
+    return calls
 
 
 def _running_state(job_id):
@@ -154,3 +168,39 @@ def test_incremental_sync_skips_network_when_no_dates_are_missing(monkeypatch):
     assert state["total"] == 0
     assert state["total_batches"] == 0
     assert state["fetch_workers"] == 0
+
+
+def _run_empty_incremental(monkeypatch):
+    """个股侧没有缺口的增量同步，只为观察申万步骤的行为。"""
+    monkeypatch.setattr(
+        sync_module,
+        "incremental_minute_sync_groups",
+        lambda trading_days: ([], date(2026, 8, 24), date(2026, 8, 24)),
+    )
+    monkeypatch.setattr(sync_module.TushareService, "get_instance", classmethod(lambda cls: object()))
+    ChanMinuteSyncManager._state = _running_state("sw-job")
+    ChanMinuteSyncManager._run("sw-job", trading_days=32, full=False)
+    return ChanMinuteSyncManager.snapshot()
+
+
+def test_minute_sync_also_syncs_sw_minutes_and_records_result(monkeypatch, _stub_sw_minute_sync):
+    monkeypatch.setattr(
+        sync_module, "sync_sw_minute_bars",
+        lambda trading_days, full=False: {"saved_rows": 1234, "requests": 7, "mode": "incremental", "errors": []},
+    )
+    state = _run_empty_incremental(monkeypatch)
+
+    assert state["status"] == "SUCCESS"
+    assert state["sw_saved_rows"] == 1234 and state["sw_requests"] == 7 and state["sw_mode"] == "incremental"
+
+
+def test_sw_minute_failure_only_downgrades_to_partial_success(monkeypatch):
+    def boom(trading_days, full=False):
+        raise RuntimeError("sw_mins 限频")
+
+    monkeypatch.setattr(sync_module, "sync_sw_minute_bars", boom)
+    state = _run_empty_incremental(monkeypatch)
+
+    # 申万失败不应让整个任务失败，个股分钟线照常算成功，只降级为部分成功并记录原因
+    assert state["status"] == "PARTIAL_SUCCESS"
+    assert any("申万分钟线同步失败" in error for error in state["errors"])

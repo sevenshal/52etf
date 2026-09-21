@@ -656,6 +656,45 @@ class TushareService(QuoteProvider):
         )
         return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
+    SW_MINUTE_ROW_LIMIT = 5000   # sw_mins 单次最多 5000 行，超出部分静默截断、不报错
+
+    def get_sw_minute_frame(self, ts_codes: List[str], start_time: datetime, end_time: datetime) -> pd.DataFrame:
+        """申万一/二级指数 1 分钟线（sw_mins）。调用方必须保证 指数数×天数×241 不超过 5000 行。"""
+        codes = [str(code).strip().upper() for code in ts_codes if code]
+        if not codes:
+            return pd.DataFrame()
+        self._sw_rate_limiter.wait()
+        frame = self.pro.sw_mins(
+            ts_code=",".join(codes),
+            freq="1min",
+            start_date=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            end_date=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("open", "close", "high", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["trade_time", "close"])
+
+    def get_sw_realtime_frame(self) -> pd.DataFrame:
+        """申万一/二级指数实时行情（rt_sw_k，一次返回全部约 180 个指数；三级没有）。"""
+        self._sw_rate_limiter.wait()
+        frame = self.pro.rt_sw_k()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        if "trade_time" in result.columns:
+            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in ("open", "close", "high", "low", "pre_close", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"])
+
     def get_ths_index_frame(self, index_type: str) -> pd.DataFrame:
         normalized_type = str(index_type or "").strip().upper()
         if normalized_type not in {"N", "TH", "I"}:

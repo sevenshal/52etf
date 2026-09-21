@@ -471,7 +471,14 @@ def build_stock_rows(
     return rows
 
 
-def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, focus: str) -> Dict[str, Any]:
+def _load_relation(
+    now: datetime,
+    thresholds: AlertThresholds,
+    universe: str,
+    focus: str,
+    l1_label: str = "",
+    l2_label: str = "",
+) -> Dict[str, Any]:
     from .market_alerts import get_market_snapshot, get_scanner_state
 
     today = now.date()
@@ -505,20 +512,30 @@ def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, fo
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")
 
-    hits = _load_today_hits(today)
+    hits, l1_labels, l2_labels = _load_today_hits(today)
     for stock in stocks:
         stock["labels_3d"] = recent_labels.get(stock["ts_code"], [])
         hit = hits.get(stock["ts_code"])
         stock["hit_time"] = hit["hit_time"] if hit else None
+        stock["last_change_time"] = hit["last_change_time"] if hit else None
         if hit and hit.get("label"):
             # 命中记录优先：与提示看板保持同一口径
             stock["live_label"] = stock.get("label")
             stock["label"] = hit["label"]
+        stock["l1_label"] = l1_labels.get(stock["l1_name"])
+        stock["l2_label"] = l2_labels.get(stock["l2_name"])
 
     if universe_codes is not None:
         stocks = [stock for stock in stocks if stock["ts_code"] in universe_codes]
     if focus:
         stocks = [stock for stock in stocks if focus_matches(stock, focus)]
+    # 与个股焦点组合：按所属申万一级/二级行业自身的当日标签过滤
+    from .market_alerts import industry_label_matches
+
+    if l1_label:
+        stocks = [stock for stock in stocks if industry_label_matches(stock.get("l1_label"), l1_label)]
+    if l2_label:
+        stocks = [stock for stock in stocks if industry_label_matches(stock.get("l2_label"), l2_label)]
     if not stocks:
         return {
             "date": today.isoformat(),
@@ -544,31 +561,45 @@ def _load_relation(now: datetime, thresholds: AlertThresholds, universe: str, fo
             {"key": item["key"], "name": item["name"]} for item in UNIVERSE_OPTIONS
         ],
         "focus_options": list(FOCUS_OPTIONS),
-        "l1": aggregate_by_level(stocks, "l1"),
-        "l2": aggregate_by_level(stocks, "l2"),
-        "l3": aggregate_by_level(stocks, "l3"),
+        "l1": _with_industry_labels(aggregate_by_level(stocks, "l1"), l1_labels),
+        "l2": _with_industry_labels(aggregate_by_level(stocks, "l2"), l2_labels),
+        "l3": aggregate_by_level(stocks, "l3"),       # 三级 tushare 没有行情，不打行业自身标签
         "members": stocks,
     }
 
 
-def _load_today_hits(today: date) -> Dict[str, Dict[str, Any]]:
-    """今日提示看板记录的首次命中（标签 + 时刻）。
+def _with_industry_labels(rows: List[Dict[str, Any]], labels: Dict[str, str]) -> List[Dict[str, Any]]:
+    for row in rows:
+        row["label"] = labels.get(row["name"])
+    return rows
 
-    行业关联的「今日标签」以命中记录为准：提示看板记的是当天第一次满足条件的时刻，
-    是一个"今天发生过"的事实；而实时重算只反映此刻状态，10:05 命中的股票到 14:30
-    可能已经不满足条件。两边口径不一致会让同一个行业在两个页面显示不同的家数。
+
+def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str], Dict[str, str]]:
+    """今日提示看板的记录：(个股 {代码: {标签, 首次时刻}}, 一级 {行业名: 标签}, 二级 {行业名: 标签})。
+
+    行业关联的「今日标签」以命中记录为准（最新标签，盘中变化会覆盖），与提示看板同一口径；
+    申万一/二级自己的信号也来自同一张表，用来给行业行打标签、按行业标签过滤成分股。
     """
     try:
         from ..database import MarketAlertHit, get_db_ctx
+        from .market_alerts import ENTITY_STOCK, sw_label_maps
 
         with get_db_ctx() as db:
-            rows = db.query(
-                MarketAlertHit.ts_code, MarketAlertHit.hit_time, MarketAlertHit.label
-            ).filter(MarketAlertHit.trade_date == today).all()
-        return {str(row[0]): {"hit_time": str(row[1]), "label": str(row[2])} for row in rows}
+            rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).all()
+            l1_map, l2_map = sw_label_maps(rows)
+            stocks = {
+                str(row.ts_code): {
+                    "hit_time": str(row.hit_time),
+                    "last_change_time": str(row.last_change_time or row.hit_time),
+                    "label": str(row.label),
+                }
+                for row in rows
+                if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK
+            }
+        return stocks, l1_map, l2_map
     except Exception as exc:  # noqa: BLE001  命中记录只是附加信息
         logger.warning("读取当日命中记录失败: %s", exc)
-        return {}
+        return {}, {}, {}
 
 
 def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, Any]]]:
@@ -585,15 +616,17 @@ def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, A
 def fetch_industry_relation(
     universe: str = "all",
     focus: str = "",
+    l1_label: str = "",
+    l2_label: str = "",
     now: Optional[datetime] = None,
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
 ) -> Dict[str, Any]:
     now = now or datetime.now()
-    key = f"relation:{universe}:{focus}"
+    key = f"relation:{universe}:{focus}:{l1_label}:{l2_label}"
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL_SECONDS:
         return hit[1]
-    value = _load_relation(now, thresholds, universe or "all", focus or "")
+    value = _load_relation(now, thresholds, universe or "all", focus or "", l1_label or "", l2_label or "")
     _cache[key] = (time.time(), value)
     return value
 

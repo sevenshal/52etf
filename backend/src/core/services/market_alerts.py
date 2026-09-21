@@ -27,12 +27,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from ..database import MarketAlertHit, get_db_ctx
+from ..database import MarketAlertEvent, MarketAlertHit, get_db_ctx
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .tushare import TushareService
 
 
 logger = logging.getLogger(__name__)
+
+ENTITY_STOCK = "stock"
+ENTITY_SW_L1 = "sw_l1"
+ENTITY_SW_L2 = "sw_l2"
+SW_ENTITY_BY_LEVEL = {"L1": ENTITY_SW_L1, "L2": ENTITY_SW_L2}
 
 LABEL_STRONG = "强势"
 LABEL_ACTIVE = "活跃"
@@ -82,6 +87,7 @@ class StockStructure:
     listed_days: int = 0
     is_st: bool = False
     days_since_low9: Optional[int] = None                  # 距上次「低9」的交易日数（仅记录，不参与判定）
+    entity_type: str = "stock"                              # stock / sw_l1 / sw_l2
 
     def __post_init__(self) -> None:
         # ST 一律由名称派生，避免调用方漏传标志位导致风险股被当成正常股打标签
@@ -161,18 +167,81 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
     return structures
 
 
-def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_DAYS) -> pd.DataFrame:
+BASELINE_TABLES = ("a_stock_minute_bar", "a_stock_sw_minute_bar")
+
+
+def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dict[str, StockStructure]:
+    """申万一/二级行业指数的结构快照（九转计数、参考价），与个股同一套判定口径。"""
+    industries = connection.execute(
+        "SELECT index_code, industry_name, industry_code, level, parent_code FROM a_stock_sw_industry "
+        "WHERE level IN ('L1', 'L2')"
+    ).fetchdf()
+    if industries.empty:
+        return {}
+    name_by_code = dict(zip(industries["industry_code"], industries["industry_name"]))
+    meta = {
+        str(row.index_code).upper(): (
+            row.level,
+            str(row.industry_name),
+            str(row.industry_name) if row.level == "L1" else str(name_by_code.get(row.parent_code, "")),
+        )
+        for row in industries.itertuples(index=False)
+    }
+    frame = connection.execute(
+        """
+        SELECT ts_code, trade_date, close, open FROM a_stock_sw_daily
+        WHERE trade_date >= ? AND trade_date < ?
+        ORDER BY ts_code, trade_date
+        """,
+        [today - timedelta(days=lookback_days * 2), today],
+    ).fetchdf()
+    structures: Dict[str, StockStructure] = {}
+    for ts_code, group in frame.groupby("ts_code"):
+        code = str(ts_code).upper()
+        if code not in meta:
+            continue
+        level, name, l1_name = meta[code]
+        closes = [float(x) for x in group["close"].tolist() if x is not None and not pd.isna(x)]
+        if len(closes) < 10:
+            continue
+        up, down, since_low9 = td_counts(closes)
+        structures[code] = StockStructure(
+            ts_code=code,
+            name=name,
+            industry=l1_name,
+            industry_l1=l1_name,
+            industry_l2=name if level == "L2" else "",
+            td_up_prev=up,
+            td_down_prev=down,
+            close_ref=closes[-5:],
+            open_ref4=safe_float(group["open"].iloc[-4]) if len(group) >= 4 else None,
+            listed_days=len(closes),
+            days_since_low9=since_low9,
+        )
+        structures[code].entity_type = SW_ENTITY_BY_LEVEL[level]
+    return structures
+
+
+def build_volume_baseline(
+    connection,
+    today: date,
+    days: int = BASELINE_TRADING_DAYS,
+    table: str = "a_stock_minute_bar",
+) -> pd.DataFrame:
     """同时段基准：前 N 个有数据的交易日，每只股票每个时刻的累计成交量均值。
 
     返回 index=ts_code、columns=HH:MM 的 float32 矩阵（约 5500×241）。
+    table 可选个股分钟表或申万分钟表，两者口径完全一致。
     不要摊平成 {(代码, 时刻): 量} 的字典——那样 130 万个元组键要占 200MB 以上内存，
     而矩阵只要几 MB，每轮扫描也只需要取出当前分钟那一列。
     """
+    if table not in BASELINE_TABLES:
+        raise ValueError(f"不支持的分钟表: {table}")
     dates = [
         row[0] for row in connection.execute(
-            """
+            f"""
             SELECT DISTINCT CAST(trade_time AS DATE) AS d
-            FROM a_stock_minute_bar
+            FROM {table}
             WHERE CAST(trade_time AS DATE) < ?
             ORDER BY d DESC LIMIT ?
             """,
@@ -182,13 +251,13 @@ def build_volume_baseline(connection, today: date, days: int = BASELINE_TRADING_
     if not dates:
         return pd.DataFrame()
     frame = connection.execute(
-        """
+        f"""
         WITH cum AS (
             SELECT ts_code,
                    CAST(trade_time AS DATE) AS d,
                    strftime(trade_time, '%H:%M') AS t,
                    SUM(vol) OVER (PARTITION BY ts_code, CAST(trade_time AS DATE) ORDER BY trade_time) AS cum_vol
-            FROM a_stock_minute_bar
+            FROM {table}
             WHERE CAST(trade_time AS DATE) >= ? AND CAST(trade_time AS DATE) <= ?
         )
         SELECT ts_code, t, AVG(cum_vol) AS base_cum_vol
@@ -332,6 +401,7 @@ def evaluate_snapshot(
             "industry_l1": structure.industry_l1,
             "industry_l2": structure.industry_l2,
             "industry_l3": structure.industry_l3,
+            "entity_type": structure.entity_type,
             "label": label,
             "hit_time": minute_label,
             "price": round(price, 3),
@@ -356,9 +426,12 @@ class AlertScanner:
         self._baseline: pd.DataFrame = pd.DataFrame()
         self._structures: Dict[str, StockStructure] = {}
         self._pct_history: List[Dict[str, float]] = []
-        self._recorded: Dict[date, set] = {}
+        self._recorded: Dict[date, Dict[str, str]] = {}   # {交易日: {代码: 当前标签}}
         self._limits: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
         self._limits_date: Optional[date] = None
+        # 申万一/二级：与个股同一口径，只是结构来自行业指数日线、基准来自申万分钟线、行情来自 rt_sw_k
+        self._sw_structures: Dict[str, StockStructure] = {}
+        self._sw_baseline: pd.DataFrame = pd.DataFrame()
 
     def prepare(self, today: date, connection=None,
                 baseline_days: int = BASELINE_TRADING_DAYS) -> Dict[str, Any]:
@@ -368,6 +441,14 @@ class AlertScanner:
         try:
             self._structures = build_structures(connection, today)
             self._baseline = build_volume_baseline(connection, today, days=baseline_days)
+            try:
+                self._sw_structures = build_sw_structures(connection, today)
+                self._sw_baseline = build_volume_baseline(
+                    connection, today, days=baseline_days, table="a_stock_sw_minute_bar",
+                )
+            except Exception as exc:  # noqa: BLE001  申万缺失只影响行业信号，不拖累个股
+                logger.warning("申万一二级基准构建失败: %s", exc)
+                self._sw_structures, self._sw_baseline = {}, pd.DataFrame()
             # 分钟库还没同步好或分析库被占用时会拿到空基准，这时不要标记成已准备，
             # 否则这一整天的多头标签都会因为没有量比而消失
             if self._structures and not self._baseline.empty:
@@ -386,6 +467,8 @@ class AlertScanner:
         return {
             "structures": len(self._structures),
             "baseline_points": int(self._baseline.size),
+            "sw_structures": len(self._sw_structures),
+            "sw_baseline_points": int(self._sw_baseline.size),
             "baseline_days": baseline_days,
         }
 
@@ -410,11 +493,13 @@ class AlertScanner:
             self._limits = {}
         return self._limits
 
-    def _recorded_today(self, today: date) -> set:
+    def _recorded_today(self, today: date) -> Dict[str, str]:
         if today not in self._recorded:
             with get_db_ctx() as db:
-                rows = db.query(MarketAlertHit.ts_code).filter(MarketAlertHit.trade_date == today).all()
-            self._recorded = {today: {row[0] for row in rows}}
+                rows = db.query(MarketAlertHit.ts_code, MarketAlertHit.label).filter(
+                    MarketAlertHit.trade_date == today
+                ).all()
+            self._recorded = {today: {row[0]: row[1] for row in rows}}
         return self._recorded[today]
 
     def scan(self, now: Optional[datetime] = None,
@@ -442,60 +527,139 @@ class AlertScanner:
             quotes, self._structures, baseline_at(self._baseline, minute_label),
             minute_label, previous, thresholds,
         )
+        current_pct = _pct_map(quotes)
 
-        current_pct: Dict[str, float] = {}
-        for quote in quotes.itertuples(index=False):
-            price = safe_float(getattr(quote, "close", None))
-            pre_close = safe_float(getattr(quote, "pre_close", None))
-            if price and pre_close:
-                current_pct[str(quote.ts_code).strip().upper()] = (price / pre_close - 1) * 100
+        # 申万一/二级：rt_sw_k 一次拿全部，口径与个股一致（每轮多 1 次调用）
+        sw_hits: List[Dict[str, Any]] = []
+        if self._sw_structures:
+            try:
+                sw_quotes = TushareService.get_instance().get_sw_realtime_frame()
+                if sw_quotes is not None and not sw_quotes.empty:
+                    if "trade_time" in sw_quotes.columns:
+                        sw_quotes = sw_quotes[
+                            pd.to_datetime(sw_quotes["trade_time"], errors="coerce").dt.date == today
+                        ]
+                    sw_quotes = sw_quotes[sw_quotes["ts_code"].isin(self._sw_structures)]
+                    sw_hits = evaluate_snapshot(
+                        sw_quotes, self._sw_structures, baseline_at(self._sw_baseline, minute_label),
+                        minute_label, previous, thresholds,
+                    )
+                    current_pct.update(_pct_map(sw_quotes))
+            except Exception as exc:  # noqa: BLE001  行业信号失败不影响个股
+                logger.warning("申万实时行情获取失败: %s", exc)
+
         self._pct_history.append(current_pct)
         if len(self._pct_history) > SPEED_LOOKBACK_ROUNDS:
             self._pct_history.pop(0)
 
-        recorded = self._recorded_today(today)
-        new_rows = [hit for hit in hits if hit["ts_code"] not in recorded]
-        price_map = {code: pct for code, pct in current_pct.items()}
-        with get_db_ctx() as db:
-            for hit in new_rows:
-                db.add(MarketAlertHit(
-                    trade_date=today,
-                    ts_code=hit["ts_code"],
-                    hit_time=hit["hit_time"],
-                    name=hit["name"],
-                    industry=hit["industry"],
-                    industry_l1=hit["industry_l1"],
-                    industry_l2=hit["industry_l2"],
-                    industry_l3=hit["industry_l3"],
-                    label=hit["label"],
-                    score=hit["score"],
-                    price=hit["price"],
-                    pct=hit["pct"],
-                    amount_yi=hit["amount_yi"],
-                    volume_ratio=hit["volume_ratio"],
-                    speed5=hit["speed5"],
-                    td_up=hit["td_up"],
-                    td_down=hit["td_down"],
-                    days_since_low9=hit["days_since_low9"],
-                    last_price=hit["price"],
-                    cum_pct=0.0,
-                ))
-                recorded.add(hit["ts_code"])
-            # 已记录的行每轮刷新现价与命中后涨幅，供事后打分
-            for row in db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).all():
-                pct_now = price_map.get(row.ts_code)
-                quote_price = None
-                if pct_now is not None and row.price:
-                    quote_price = row.price * (1 + (pct_now - (row.pct or 0)) / 100)
-                if quote_price:
-                    row.last_price = round(quote_price, 3)
-                    row.cum_pct = round((quote_price / row.price - 1) * 100, 2)
+        written = self._write_hits(today, minute_label, hits + sw_hits, current_pct)
         return {
             "minute": minute_label,
             "scanned": int(len(quotes)),
             "hits": len(hits),
-            "recorded": len(new_rows),
+            "sw_hits": len(sw_hits),
+            **written,
         }
+
+    def _write_hits(
+        self,
+        today: date,
+        minute_label: str,
+        hits: List[Dict[str, Any]],
+        current_pct: Dict[str, float],
+    ) -> Dict[str, int]:
+        """写入当日状态：新出现的插入；标签变了就覆盖成最新，并在流水表记一条。
+
+        命中价/首次命中时刻/命中后涨幅始终以首次命中为准（用于事后打分），只有标签跟随最新。
+        某只股票此刻不满足任何条件时不清空标签——"今天出现过的信号"不会因为盘中回落而消失。
+        """
+        recorded = self._recorded_today(today)
+        inserted = changed = 0
+        with get_db_ctx() as db:
+            rows_by_code = {
+                row.ts_code: row
+                for row in db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).all()
+            }
+            for hit in hits:
+                code = hit["ts_code"]
+                row = rows_by_code.get(code)
+                if row is None:
+                    row = MarketAlertHit(
+                        trade_date=today,
+                        ts_code=code,
+                        entity_type=hit.get("entity_type") or ENTITY_STOCK,
+                        hit_time=minute_label,
+                        last_change_time=minute_label,
+                        change_count=0,
+                        name=hit["name"],
+                        industry=hit["industry"],
+                        industry_l1=hit["industry_l1"],
+                        industry_l2=hit["industry_l2"],
+                        industry_l3=hit["industry_l3"],
+                        label=hit["label"],
+                        score=hit["score"],
+                        price=hit["price"],
+                        pct=hit["pct"],
+                        amount_yi=hit["amount_yi"],
+                        volume_ratio=hit["volume_ratio"],
+                        speed5=hit["speed5"],
+                        td_up=hit["td_up"],
+                        td_down=hit["td_down"],
+                        days_since_low9=hit["days_since_low9"],
+                        last_price=hit["price"],
+                        cum_pct=0.0,
+                    )
+                    db.add(row)
+                    rows_by_code[code] = row
+                    db.add(_event_from_hit(today, minute_label, hit, prev_label=None))
+                    inserted += 1
+                elif row.label != hit["label"]:
+                    db.add(_event_from_hit(today, minute_label, hit, prev_label=row.label))
+                    row.label = hit["label"]
+                    row.last_change_time = minute_label
+                    row.change_count = (row.change_count or 0) + 1
+                    row.score = hit["score"]
+                    row.volume_ratio = hit["volume_ratio"]
+                    row.td_up = hit["td_up"]
+                    row.td_down = hit["td_down"]
+                    changed += 1
+                recorded[code] = hit["label"]
+
+            # 每轮刷新现价与命中后涨幅（个股与行业一样），供事后打分
+            for row in rows_by_code.values():
+                pct_now = current_pct.get(row.ts_code)
+                if pct_now is None or not row.price:
+                    continue
+                quote_price = row.price * (1 + (pct_now - (row.pct or 0)) / 100)
+                row.last_price = round(quote_price, 3)
+                row.cum_pct = round((quote_price / row.price - 1) * 100, 2)
+        return {"recorded": inserted, "changed": changed}
+
+
+def _pct_map(quotes: pd.DataFrame) -> Dict[str, float]:
+    result: Dict[str, float] = {}
+    for quote in quotes.itertuples(index=False):
+        price = safe_float(getattr(quote, "close", None))
+        pre_close = safe_float(getattr(quote, "pre_close", None))
+        if price and pre_close:
+            result[str(quote.ts_code).strip().upper()] = (price / pre_close - 1) * 100
+    return result
+
+
+def _event_from_hit(today: date, minute_label: str, hit: Dict[str, Any], prev_label: Optional[str]) -> MarketAlertEvent:
+    return MarketAlertEvent(
+        trade_date=today,
+        ts_code=hit["ts_code"],
+        entity_type=hit.get("entity_type") or ENTITY_STOCK,
+        event_time=minute_label,
+        label=hit["label"],
+        prev_label=prev_label,
+        price=hit["price"],
+        pct=hit["pct"],
+        volume_ratio=hit["volume_ratio"],
+        td_up=hit["td_up"],
+        td_down=hit["td_down"],
+    )
 
 
 _snapshot_cache: Tuple[float, Optional[pd.DataFrame]] = (0.0, None)
@@ -549,9 +713,12 @@ def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:
         "industry_l1": row.industry_l1 or row.industry,
         "industry_l2": row.industry_l2 or row.industry,
         "industry_l3": row.industry_l3 or row.industry,
+        "entity_type": row.entity_type or ENTITY_STOCK,
         "label": row.label,
         "score": row.score,
         "hit_time": row.hit_time,
+        "last_change_time": row.last_change_time or row.hit_time,
+        "change_count": row.change_count or 0,
         "price": row.price,
         "pct": row.pct,
         "amount_yi": row.amount_yi,
@@ -647,12 +814,42 @@ def summarize_hits(rows: List[Dict[str, Any]], level: str = "l1") -> Dict[str, A
     }
 
 
+LABEL_FILTER_VALUES = ("", "none", LABEL_STRONG, LABEL_ACTIVE, LABEL_WATCH, LABEL_AVOID)
+
+
+def sw_label_maps(rows: List[MarketAlertHit]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """当日申万一/二级信号：{行业名: 最新标签}。个股按所属行业名去查。"""
+    l1: Dict[str, str] = {}
+    l2: Dict[str, str] = {}
+    for row in rows:
+        if row.entity_type == ENTITY_SW_L1:
+            l1[row.name] = row.label
+        elif row.entity_type == ENTITY_SW_L2:
+            l2[row.name] = row.label
+    return l1, l2
+
+
+def industry_label_matches(actual: Optional[str], wanted: Optional[str]) -> bool:
+    """行业标签过滤：空=不限；none=该行业当日无信号；其余按标签精确匹配。"""
+    if not wanted:
+        return True
+    if wanted == "none":
+        return not actual
+    return actual == wanted
+
+
 def fetch_alerts(
     trade_date: Optional[date] = None,
     label: Optional[str] = None,
     level: str = "l1",
+    l1_label: Optional[str] = None,
+    l2_label: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """读取某个交易日的命中记录与事后统计。"""
+    """读取某个交易日的命中记录与事后统计。
+
+    列表只放个股，每只附上所属申万一级/二级行业当日的最新标签（l1_label / l2_label），
+    可以与个股标签组合过滤，例如「个股活跃 + 一级强势 + 二级活跃」。
+    """
     with get_db_ctx() as db:
         dates = [
             row[0] for row in db.query(MarketAlertHit.trade_date)
@@ -660,15 +857,30 @@ def fetch_alerts(
         ]
         target = trade_date or (dates[0] if dates else None)
         rows: List[Dict[str, Any]] = []
+        sw_rows: List[Dict[str, Any]] = []
         if target:
-            query = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == target)
-            if label:
-                query = query.filter(MarketAlertHit.label == label)
-            rows = [_row_to_dict(row) for row in query.order_by(MarketAlertHit.hit_time.desc()).all()]
+            all_rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == target).all()
+            l1_map, l2_map = sw_label_maps(all_rows)
+            for row in sorted(all_rows, key=lambda item: item.hit_time or "", reverse=True):
+                item = _row_to_dict(row)
+                if item["entity_type"] != ENTITY_STOCK:
+                    sw_rows.append(item)
+                    continue
+                item["l1_label"] = l1_map.get(item["industry_l1"])
+                item["l2_label"] = l2_map.get(item["industry_l2"])
+                if label and item["label"] != label:
+                    continue
+                if not industry_label_matches(item["l1_label"], l1_label):
+                    continue
+                if not industry_label_matches(item["l2_label"], l2_label):
+                    continue
+                rows.append(item)
     return {
         "date": target.isoformat() if target else None,
         "dates": [d.isoformat() for d in dates],
         "rows": rows,
+        # 当日申万一/二级自身的信号，前端用来显示行业信号条
+        "sw_signals": sorted(sw_rows, key=lambda item: (item["entity_type"], item["name"] or "")),
         "industry_level": level if level in INDUSTRY_LEVELS else "l1",
         "summary": summarize_hits(rows, level),
         "thresholds": {

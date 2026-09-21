@@ -447,13 +447,17 @@ class MarketAlertHit(Base):
 
     trade_date = Column(Date, primary_key=True)
     ts_code = Column(String(16), primary_key=True)
-    hit_time = Column(String(8), nullable=False)      # 命中时刻 HH:MM
+    # stock=个股，sw_l1/sw_l2=申万一/二级行业指数（代码 801xxx.SI，与个股不会撞）
+    entity_type = Column(String(8), nullable=False, default="stock")
+    hit_time = Column(String(8), nullable=False)      # 当日首次命中时刻 HH:MM（命中价/命中后涨幅都以它为准）
+    last_change_time = Column(String(8))              # 标签最近一次变化的时刻
+    change_count = Column(Integer, nullable=False, default=0)   # 当日标签变化次数
     name = Column(String(64))
     industry = Column(String(64))                     # 旧字段：tushare stock_basic 单级分类，仅兼容历史记录
     industry_l1 = Column(String(64))                  # 申万一级（与行业关联同一口径）
     industry_l2 = Column(String(64))                  # 申万二级
     industry_l3 = Column(String(64))                  # 申万三级（细分行业）
-    label = Column(String(8), nullable=False)         # 强势 / 活跃 / 观望 / 规避
+    label = Column(String(8), nullable=False)         # 最新标签：强势 / 活跃 / 观望 / 规避（盘中变化会覆盖）
     score = Column(Float)                             # 0~100 综合分，用于同档内排序
     price = Column(Float)                             # 命中价
     pct = Column(Float)                               # 命中时当日涨幅
@@ -465,6 +469,29 @@ class MarketAlertHit(Base):
     days_since_low9 = Column(Integer)                 # 距上次低9的交易日数（只记录，不参与判定）
     last_price = Column(Float)                        # 最新价，盘中每轮刷新
     cum_pct = Column(Float)                           # 命中后涨幅 = 最新价 / 命中价 - 1
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class MarketAlertEvent(Base):
+    """提示看板信号变更流水：每次标签出现或变化都记一条，用于在分时图上标出全部历史信号。
+
+    market_alert_hits 只保留每个标的当天的最新状态；这里保留完整变化轨迹，
+    比如 规避→观望→活跃 会有三条。
+    """
+    __tablename__ = "market_alert_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    ts_code = Column(String(16), nullable=False, index=True)
+    entity_type = Column(String(8), nullable=False, default="stock")
+    event_time = Column(String(8), nullable=False)    # HH:MM
+    label = Column(String(8), nullable=False)
+    prev_label = Column(String(8))                    # 首次出现为空
+    price = Column(Float)
+    pct = Column(Float)
+    volume_ratio = Column(Float)
+    td_up = Column(Integer)
+    td_down = Column(Integer)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -2155,6 +2182,10 @@ def ensure_table_columns():
         },
         # 提示看板的行业从 tushare 单级分类改为申万三级，老库补这三列
         "market_alert_hits": {
+            # 标签改为"盘中变化覆盖、保留最新"，并纳入申万一二级实体
+            "entity_type": "ALTER TABLE market_alert_hits ADD COLUMN entity_type VARCHAR(8) NOT NULL DEFAULT 'stock'",
+            "last_change_time": "ALTER TABLE market_alert_hits ADD COLUMN last_change_time VARCHAR(8)",
+            "change_count": "ALTER TABLE market_alert_hits ADD COLUMN change_count INTEGER NOT NULL DEFAULT 0",
             "industry_l1": "ALTER TABLE market_alert_hits ADD COLUMN industry_l1 VARCHAR(64)",
             "industry_l2": "ALTER TABLE market_alert_hits ADD COLUMN industry_l2 VARCHAR(64)",
             "industry_l3": "ALTER TABLE market_alert_hits ADD COLUMN industry_l3 VARCHAR(64)",

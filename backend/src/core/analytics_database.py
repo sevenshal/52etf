@@ -195,6 +195,24 @@ class AStockSWDaily(AnalyticsBase):
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
+class AStockSWMinuteBar(AnalyticsBase):
+    """申万一/二级行业指数 1 分钟线（tushare sw_mins），与个股分钟线同一滚动窗口。
+
+    三级行业 tushare 没有分钟数据（sw_mins 与 rt_sw_k 都只覆盖一二级）。
+    """
+    __tablename__ = "a_stock_sw_minute_bar"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_time = Column(DateTime, primary_key=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    vol = Column(Float)
+    amount = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
 class AStockTHSDaily(AnalyticsBase):
     """同花顺行业/概念/主题板块日行情。"""
     __tablename__ = "a_stock_ths_daily"
@@ -988,6 +1006,7 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l1 ON a_stock_sw_member(l1_name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_change_con ON a_stock_sw_member_change(con_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_daily_date ON a_stock_sw_daily(trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_minute_bar_time ON a_stock_sw_minute_bar(trade_time)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_sw_member_l3 ON a_stock_sw_member(l3_name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_ann ON a_stock_income(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_income_symbol_end ON a_stock_income(ts_code, end_date)",

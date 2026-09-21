@@ -66,3 +66,30 @@ def test_build_minute_series_keeps_last_days_and_indexes_each_day():
 
 def test_build_minute_series_handles_empty_rows():
     assert build_minute_series([], days=5) == {"days": [], "points": [], "today": None}
+
+
+def test_load_signal_events_returns_every_change_in_order():
+    """分时小图要标出全部历史信号：同一只股票的每次出现/变化都返回，按时间排序。"""
+    from src.core.database import MarketAlertEvent, get_db_ctx
+    from src.core.services.intraday_minutes import load_signal_events
+
+    days = [date(2000, 2, 1), date(2000, 2, 2)]
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_(days)).delete(synchronize_session=False)
+        db.add_all([
+            MarketAlertEvent(trade_date=days[0], ts_code="000001.SZ", event_time="10:05", label="观望"),
+            MarketAlertEvent(trade_date=days[0], ts_code="000001.SZ", event_time="13:40", label="活跃", prev_label="观望"),
+            MarketAlertEvent(trade_date=days[1], ts_code="000001.SZ", event_time="09:36", label="强势"),
+            MarketAlertEvent(trade_date=days[1], ts_code="600519.SH", event_time="09:40", label="规避"),
+        ])
+
+    events = load_signal_events("000001.SZ", ["2000-02-01", "2000-02-02"])
+
+    assert [(e["date"], e["time"], e["prev_label"], e["label"]) for e in events] == [
+        ("2000-02-01", "10:05", None, "观望"),
+        ("2000-02-01", "13:40", "观望", "活跃"),
+        ("2000-02-02", "09:36", None, "强势"),
+    ]
+    assert load_signal_events("000001.SZ", []) == []
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_(days)).delete(synchronize_session=False)
