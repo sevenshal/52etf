@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Radio, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Card, Col, Empty, Radio, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
@@ -19,6 +19,7 @@ const LABEL_META = {
   规避: { color: 'success', desc: '九转低计数 ≥4 且当日下跌' },
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
+const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
 
 const formatErrorMessage = (error, fallback) => {
   const detail = error?.response?.data?.detail || error?.message;
@@ -41,6 +42,7 @@ const MarketAlerts = () => {
   const [tradeDate, setTradeDate] = useState(null);
   const [label, setLabel] = useState('');
   const [industry, setIndustry] = useState(null);     // 点击行业柱筛选
+  const [industryLevel, setIndustryLevel] = useState('l1'); // 申万级别，默认一级（与行业关联同一口径）
   const [klineStock, setKlineStock] = useState(null); // 内嵌K线面板（点名称打开，不弹窗）
 
   const load = useCallback(async ({ silent = false } = {}) => {
@@ -49,6 +51,7 @@ const MarketAlerts = () => {
       const params = {};
       if (tradeDate) params.date = tradeDate;
       if (label) params.label = label;
+      params.level = industryLevel;
       const response = await request.get('/api/market/alerts', { params });
       setData(response.data);
       setError('');
@@ -57,7 +60,7 @@ const MarketAlerts = () => {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [tradeDate, label]);
+  }, [tradeDate, label, industryLevel]);
 
   useEffect(() => {
     load();
@@ -147,8 +150,8 @@ const MarketAlerts = () => {
   }, [summary, industry]);
 
   const visibleRows = useMemo(
-    () => (data?.rows || []).filter(row => !industry || row.industry === industry),
-    [data, industry],
+    () => (data?.rows || []).filter(row => !industry || row[`industry_${industryLevel}`] === industry),
+    [data, industry, industryLevel],
   );
 
   const columns = useMemo(() => [
@@ -166,8 +169,8 @@ const MarketAlerts = () => {
     },
     { title: '代码', dataIndex: 'code', width: 90, render: value => <Text type="secondary">{value}</Text> },
     {
-      title: '行业',
-      dataIndex: 'industry',
+      title: INDUSTRY_LEVEL_TITLE[industryLevel],
+      dataIndex: `industry_${industryLevel}`,
       width: 100,
       ellipsis: true,
       render: value => (
@@ -219,7 +222,7 @@ const MarketAlerts = () => {
       sorter: (a, b) => (a.cum_pct || 0) - (b.cum_pct || 0),
       render: value => <Text className={pctClass(value)}>{fmtPct(value)}</Text>,
     },
-  ], []);
+  ], [industryLevel]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="market-alerts">
@@ -301,7 +304,22 @@ const MarketAlerts = () => {
                 </Card>
               </Col>
               <Col xs={24} xl={8}>
-                <Card size="small" title="行业分布" extra={<Text type="secondary">柱=命中数 · 线=平均涨幅</Text>}>
+                <Card
+                  size="small"
+                  title="行业分布"
+                  extra={(
+                    <Segmented
+                      size="small"
+                      value={industryLevel}
+                      onChange={value => { setIndustryLevel(value); setIndustry(null); }}
+                      options={[
+                        { label: '一级', value: 'l1' },
+                        { label: '二级', value: 'l2' },
+                        { label: '细分', value: 'l3' },
+                      ]}
+                    />
+                  )}
+                >
                   {industryOption ? (
                     <ReactECharts
                       option={industryOption}

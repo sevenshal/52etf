@@ -449,7 +449,10 @@ class MarketAlertHit(Base):
     ts_code = Column(String(16), primary_key=True)
     hit_time = Column(String(8), nullable=False)      # 命中时刻 HH:MM
     name = Column(String(64))
-    industry = Column(String(64))
+    industry = Column(String(64))                     # 旧字段：tushare stock_basic 单级分类，仅兼容历史记录
+    industry_l1 = Column(String(64))                  # 申万一级（与行业关联同一口径）
+    industry_l2 = Column(String(64))                  # 申万二级
+    industry_l3 = Column(String(64))                  # 申万三级（细分行业）
     label = Column(String(8), nullable=False)         # 强势 / 活跃 / 观望 / 规避
     score = Column(Float)                             # 0~100 综合分，用于同档内排序
     price = Column(Float)                             # 命中价
@@ -2149,6 +2152,12 @@ def ensure_table_columns():
             "last_external_sync_at": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_at DATETIME",
             "last_external_sync_status": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_status VARCHAR(16)",
             "last_external_sync_message": "ALTER TABLE portfolio_copy_configs ADD COLUMN last_external_sync_message VARCHAR(500)",
+        },
+        # 提示看板的行业从 tushare 单级分类改为申万三级，老库补这三列
+        "market_alert_hits": {
+            "industry_l1": "ALTER TABLE market_alert_hits ADD COLUMN industry_l1 VARCHAR(64)",
+            "industry_l2": "ALTER TABLE market_alert_hits ADD COLUMN industry_l2 VARCHAR(64)",
+            "industry_l3": "ALTER TABLE market_alert_hits ADD COLUMN industry_l3 VARCHAR(64)",
         },
         "scheduled_task_configs": {
             "cron_rule": "ALTER TABLE scheduled_task_configs ADD COLUMN cron_rule VARCHAR(1000)",

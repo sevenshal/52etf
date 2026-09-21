@@ -71,7 +71,10 @@ class StockStructure:
     """盘前算好的个股结构：九转计数基数、参考收盘价、名称行业等。"""
     ts_code: str
     name: str = ""
-    industry: str = ""
+    industry: str = ""          # = 申万一级，保留这个字段名兼容老调用方
+    industry_l1: str = ""       # 申万一级（与行业关联同一口径）
+    industry_l2: str = ""
+    industry_l3: str = ""
     td_up_prev: int = 0        # 截至昨日的连续 C>REF(C,4) 天数
     td_down_prev: int = 0      # 截至昨日的连续 C<REF(C,4) 天数
     close_ref: List[float] = field(default_factory=list)   # 最近 5 日收盘，close_ref[-1] 为昨收
@@ -111,13 +114,20 @@ def td_counts(closes: List[float]) -> Tuple[int, int, Optional[int]]:
     return up, down, last_low9
 
 
+def _text(value: Any) -> str:
+    return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+
+
 def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[str, StockStructure]:
     """从 DuckDB 日线算出每只股票的九转计数基数与参考价（不含当日）。"""
     frame = connection.execute(
         """
-        SELECT d.ts_code, d.trade_date, d.close, d.open, b.name, b.industry, b.list_date
+        SELECT d.ts_code, d.trade_date, d.close, d.open, b.name, b.list_date,
+               m.l1_name, m.l2_name, m.l3_name
         FROM a_stock_market_daily d
         LEFT JOIN a_stock_basic b ON b.ts_code = d.ts_code
+        -- 行业统一用申万三级（与行业关联同一口径），不用 stock_basic 的单级 industry
+        LEFT JOIN a_stock_sw_member m ON m.ts_code = d.ts_code
         WHERE d.trade_date >= ? AND d.trade_date < ?
         ORDER BY d.ts_code, d.trade_date
         """,
@@ -137,7 +147,10 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
         structures[str(ts_code)] = StockStructure(
             ts_code=str(ts_code),
             name=name,
-            industry=str(group["industry"].iloc[-1] or ""),
+            industry=_text(group["l1_name"].iloc[-1]),
+            industry_l1=_text(group["l1_name"].iloc[-1]),
+            industry_l2=_text(group["l2_name"].iloc[-1]),
+            industry_l3=_text(group["l3_name"].iloc[-1]),
             td_up_prev=up,
             td_down_prev=down,
             close_ref=closes[-5:],
@@ -316,6 +329,9 @@ def evaluate_snapshot(
             "ts_code": ts_code,
             "name": structure.name,
             "industry": structure.industry,
+            "industry_l1": structure.industry_l1,
+            "industry_l2": structure.industry_l2,
+            "industry_l3": structure.industry_l3,
             "label": label,
             "hit_time": minute_label,
             "price": round(price, 3),
@@ -448,6 +464,9 @@ class AlertScanner:
                     hit_time=hit["hit_time"],
                     name=hit["name"],
                     industry=hit["industry"],
+                    industry_l1=hit["industry_l1"],
+                    industry_l2=hit["industry_l2"],
+                    industry_l3=hit["industry_l3"],
                     label=hit["label"],
                     score=hit["score"],
                     price=hit["price"],
@@ -527,6 +546,9 @@ def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:
         "code": row.ts_code.split(".")[0],
         "name": row.name,
         "industry": row.industry,
+        "industry_l1": row.industry_l1 or row.industry,
+        "industry_l2": row.industry_l2 or row.industry,
+        "industry_l3": row.industry_l3 or row.industry,
         "label": row.label,
         "score": row.score,
         "hit_time": row.hit_time,
@@ -562,8 +584,12 @@ RETURN_BUCKETS: Tuple[Tuple[str, Optional[float], Optional[float]], ...] = (
 )
 
 
-def summarize_hits(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """命中后表现统计：总体、按标签、按时段、按行业、按涨幅分档。"""
+INDUSTRY_LEVELS = ("l1", "l2", "l3")
+
+
+def summarize_hits(rows: List[Dict[str, Any]], level: str = "l1") -> Dict[str, Any]:
+    """命中后表现统计：总体、按标签、按时段、按行业（指定申万级别）、按涨幅分档。"""
+    industry_key = f"industry_{level if level in INDUSTRY_LEVELS else 'l1'}"
     scored = [row for row in rows if row.get("cum_pct") is not None]
 
     def _avg(values: List[float]) -> Optional[float]:
@@ -594,7 +620,9 @@ def summarize_hits(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     industries: Dict[str, List[float]] = {}
     for row in scored:
-        industries.setdefault(row.get("industry") or "未知", []).append(row["cum_pct"])
+        # 老记录没有申万字段时退回旧的单级 industry，避免历史日期全部归到"未知"
+        name = row.get(industry_key) or row.get("industry") or "未知"
+        industries.setdefault(name, []).append(row["cum_pct"])
     industry_rows = sorted(
         ({"industry": k, "count": len(v), "avg": _avg(v)} for k, v in industries.items()),
         key=lambda item: -item["count"],
@@ -619,7 +647,11 @@ def summarize_hits(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def fetch_alerts(trade_date: Optional[date] = None, label: Optional[str] = None) -> Dict[str, Any]:
+def fetch_alerts(
+    trade_date: Optional[date] = None,
+    label: Optional[str] = None,
+    level: str = "l1",
+) -> Dict[str, Any]:
     """读取某个交易日的命中记录与事后统计。"""
     with get_db_ctx() as db:
         dates = [
@@ -637,7 +669,8 @@ def fetch_alerts(trade_date: Optional[date] = None, label: Optional[str] = None)
         "date": target.isoformat() if target else None,
         "dates": [d.isoformat() for d in dates],
         "rows": rows,
-        "summary": summarize_hits(rows),
+        "industry_level": level if level in INDUSTRY_LEVELS else "l1",
+        "summary": summarize_hits(rows, level),
         "thresholds": {
             "min_amount_yi": DEFAULT_THRESHOLDS.min_amount_yuan / 1e8,
             "min_volume_ratio": DEFAULT_THRESHOLDS.min_volume_ratio,

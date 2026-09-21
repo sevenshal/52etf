@@ -93,12 +93,13 @@ async def get_daily_amount(
 async def get_market_alerts(
     date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     label: Optional[str] = Query(None, max_length=8),
+    level: str = Query("l1", pattern="^(l1|l2|l3)$"),
     account_id: str = Depends(valid_admin_account),
 ):
-    """提示看板：某交易日的命中记录与命中后表现统计。"""
+    """提示看板：某交易日的命中记录与命中后表现统计；行业分布按申万 level 级分组（默认一级）。"""
     from datetime import date as date_cls
     trade_date = date_cls.fromisoformat(date) if date else None
-    return await run_in_threadpool(fetch_alerts, trade_date, label)
+    return await run_in_threadpool(fetch_alerts, trade_date, label, level)
 
 
 @router.post("/alerts/scan")

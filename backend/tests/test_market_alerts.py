@@ -219,3 +219,84 @@ def test_prepare_does_not_mark_ready_when_baseline_missing(monkeypatch):
     scanner.prepare(date_cls(2026, 9, 21), connection=object())
 
     assert scanner._baseline_date is None      # 下次调用还会重试
+
+
+def test_alert_hits_sw_industry_columns_upgrade_from_old_schema():
+    """存量库：旧 market_alert_hits 没有申万三级列 → ensure_table_columns 自动补齐，且可重复执行。"""
+    from datetime import date as date_cls
+
+    from sqlalchemy import text
+
+    from src.core.database import MarketAlertHit, engine, ensure_table_columns, get_db_ctx
+
+    new_columns = ("industry_l1", "industry_l2", "industry_l3")
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(market_alert_hits)")).fetchall()}
+        for column in new_columns:
+            if column in existing:
+                conn.execute(text(f"ALTER TABLE market_alert_hits DROP COLUMN {column}"))
+
+    ensure_table_columns()
+    ensure_table_columns()   # 幂等：重复执行不报错
+    with engine.connect() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(market_alert_hits)")).fetchall()}
+    assert set(new_columns) <= cols
+
+    # 补列后 ORM 读写正常
+    trade_date = date_cls(2000, 1, 3)
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == trade_date).delete()
+        db.add(MarketAlertHit(
+            trade_date=trade_date, ts_code="000001.SZ", hit_time="09:40", label="活跃",
+            industry="银行", industry_l1="银行", industry_l2="股份制银行Ⅱ", industry_l3="股份制银行Ⅲ",
+        ))
+    with get_db_ctx() as db:
+        row = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == trade_date).one()
+        assert (row.industry_l1, row.industry_l3) == ("银行", "股份制银行Ⅲ")
+        db.delete(row)
+
+
+def test_summarize_hits_groups_by_requested_sw_level():
+    from src.core.services.market_alerts import summarize_hits
+
+    rows = [
+        {"label": LABEL_ACTIVE, "hit_time": "09:40", "cum_pct": 1.0, "name": "A",
+         "industry_l1": "电子", "industry_l2": "半导体", "industry_l3": "数字芯片设计"},
+        {"label": LABEL_ACTIVE, "hit_time": "09:50", "cum_pct": 3.0, "name": "B",
+         "industry_l1": "电子", "industry_l2": "半导体", "industry_l3": "半导体设备"},
+        {"label": LABEL_STRONG, "hit_time": "10:10", "cum_pct": 2.0, "name": "C",
+         "industry_l1": "电子", "industry_l2": "光学光电子", "industry_l3": "面板"},
+    ]
+
+    l1 = summarize_hits(rows)            # 默认一级
+    assert l1["industries"] == [{"industry": "电子", "count": 3, "avg": 2.0}]
+
+    l2 = {item["industry"]: item["count"] for item in summarize_hits(rows, "l2")["industries"]}
+    assert l2 == {"半导体": 2, "光学光电子": 1}
+
+    l3 = {item["industry"] for item in summarize_hits(rows, "l3")["industries"]}
+    assert l3 == {"数字芯片设计", "半导体设备", "面板"}
+
+
+def test_build_structures_takes_industry_from_sw_members():
+    """行业口径与行业关联一致：用申万三级，不用 stock_basic 的单级 industry。"""
+    import duckdb
+    from datetime import date as date_cls, timedelta
+
+    from src.core.services.market_alerts import build_structures
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE)")
+    con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR, industry VARCHAR, list_date DATE)")
+    con.execute("CREATE TABLE a_stock_sw_member (ts_code VARCHAR, l1_name VARCHAR, l2_name VARCHAR, l3_name VARCHAR)")
+    start = date_cls(2026, 8, 1)
+    con.executemany("INSERT INTO a_stock_market_daily VALUES ('600519.SH', ?, ?, ?)",
+                    [(start + timedelta(days=i), 10.0 + i, 10.0 + i) for i in range(15)])
+    con.execute("INSERT INTO a_stock_basic VALUES ('600519.SH', '贵州茅台', '白酒', DATE '2001-08-27')")
+    con.execute("INSERT INTO a_stock_sw_member VALUES ('600519.SH', '食品饮料', '白酒Ⅱ', '白酒Ⅲ')")
+
+    structure = build_structures(con, date_cls(2026, 8, 20))["600519.SH"]
+
+    assert (structure.industry_l1, structure.industry_l2, structure.industry_l3) == ("食品饮料", "白酒Ⅱ", "白酒Ⅲ")
+    assert structure.industry == "食品饮料"      # 兼容字段 = 申万一级，不是 stock_basic 的「白酒」
+    con.close()
