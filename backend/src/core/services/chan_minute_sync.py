@@ -21,6 +21,7 @@ from .chan_minute_data import (
     recent_market_universe,
     upsert_minute_frame,
 )
+from .sw_minute_data import sync_sw_minute_bars
 from .tushare import TushareService
 
 
@@ -237,6 +238,18 @@ class ChanMinuteSyncManager:
                     executor.shutdown(wait=True, cancel_futures=cancelled)
 
             if not cancelled:
+                # 申万一/二级分钟线与个股同一窗口、同一任务里同步；失败只记告警，不影响个股结果
+                try:
+                    sw_result = sync_sw_minute_bars(requested_days if full else ROLLING_TRADING_DAYS, full=full)
+                except Exception as exc:  # noqa: BLE001
+                    sw_result = {"saved_rows": 0, "errors": [f"申万分钟线同步失败: {exc}"]}
+                with cls._lock:
+                    cls._state["sw_saved_rows"] = sw_result.get("saved_rows", 0)
+                    cls._state["sw_requests"] = sw_result.get("requests", 0)
+                    cls._state["sw_mode"] = sw_result.get("mode")
+                    remaining_error_slots = max(0, 200 - len(cls._state["errors"]))
+                    cls._state["errors"].extend((sw_result.get("errors") or [])[:remaining_error_slots])
+
                 pruned_rows = 0
                 if full:
                     try:

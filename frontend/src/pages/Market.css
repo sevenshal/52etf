@@ -237,6 +237,46 @@
   margin-top: 12px;
 }
 
+.market-alerts__sw {
+  margin-bottom: 12px;
+}
+
+.sw-signal-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin-bottom: 4px;
+}
+
+.sw-signal-row__title {
+  width: 36px;
+  font-size: 12px;
+}
+
+.industry-signal-tag {
+  margin-inline-end: 0;
+}
+
+.signal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 2px 0 0 6px;
+  font-size: 11px;
+  color: #61708a;
+}
+
+.signal-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
 .market-alerts__table {
   margin-top: 12px;
 }
@@ -328,6 +368,26 @@
 .trend-watch { background: #a9ddb5; color: #2f6b45; }
 .trend-avoid { background: #2f9e63; }
 .trend-limit-down { outline: 1px solid #0a7a38; }
+
+.market-industry .industry-name-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+/* 行业自身信号的小圆点：强势/活跃/观望/规避 */
+.industry-name-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.industry-name-dot.dot-0 { background: #c62828; }
+.industry-name-dot.dot-1 { background: #f08a5d; }
+.industry-name-dot.dot-2 { background: #6cc087; }
+.industry-name-dot.dot-3 { background: #0a7a38; }
 
 .market-industry__row--active > td {
   background: #eef6ff !important;

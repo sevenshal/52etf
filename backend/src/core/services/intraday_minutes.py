@@ -105,6 +105,37 @@ def build_minute_series(rows: List[Dict[str, Any]], days: int) -> Dict[str, Any]
     return {"days": day_infos, "points": points, "today": day_infos[-1]["date"] if day_infos else None}
 
 
+def load_signal_events(ts_code: str, dates: List[str]) -> List[Dict[str, Any]]:
+    """提示看板的信号变更流水（每次出现/变化一条），用于在分时图上按类型标出全部历史信号。"""
+    if not dates:
+        return []
+    try:
+        from ..database import MarketAlertEvent, get_db_ctx
+
+        wanted = [date.fromisoformat(value) for value in dates]
+        with get_db_ctx() as db:
+            rows = (
+                db.query(MarketAlertEvent)
+                .filter(MarketAlertEvent.ts_code == ts_code, MarketAlertEvent.trade_date.in_(wanted))
+                .order_by(MarketAlertEvent.trade_date, MarketAlertEvent.event_time, MarketAlertEvent.id)
+                .all()
+            )
+            return [
+                {
+                    "date": row.trade_date.isoformat(),
+                    "time": row.event_time,
+                    "label": row.label,
+                    "prev_label": row.prev_label,
+                    "price": row.price,
+                    "pct": row.pct,
+                }
+                for row in rows
+            ]
+    except Exception as exc:  # noqa: BLE001  信号标注是附加信息，失败不影响分时
+        logger.warning("读取 %s 信号流水失败: %s", ts_code, exc)
+        return []
+
+
 def fetch_intraday_minutes(ts_code: str, days: int = 5, now: Optional[datetime] = None) -> Dict[str, Any]:
     """某只股票最近 days 个交易日的分时（含当日实时补齐）。"""
     symbol = str(ts_code or "").strip().upper()
@@ -139,6 +170,7 @@ def fetch_intraday_minutes(ts_code: str, days: int = 5, now: Optional[datetime] 
             logger.warning("rt_min_daily 补齐 %s 当日分时失败: %s", symbol, exc)
 
     series = build_minute_series(rows, days)
+    series["events"] = load_signal_events(symbol, [day["date"] for day in series["days"]])
     series.update({
         "ts_code": symbol,
         "realtime_merged": realtime_merged,

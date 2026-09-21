@@ -219,3 +219,279 @@ def test_prepare_does_not_mark_ready_when_baseline_missing(monkeypatch):
     scanner.prepare(date_cls(2026, 9, 21), connection=object())
 
     assert scanner._baseline_date is None      # 下次调用还会重试
+
+
+def test_alert_hits_sw_industry_columns_upgrade_from_old_schema():
+    """存量库：旧 market_alert_hits 没有申万三级列 → ensure_table_columns 自动补齐，且可重复执行。"""
+    from datetime import date as date_cls
+
+    from sqlalchemy import text
+
+    from src.core.database import MarketAlertHit, engine, ensure_table_columns, get_db_ctx
+
+    new_columns = ("industry_l1", "industry_l2", "industry_l3", "entity_type", "last_change_time", "change_count")
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(market_alert_hits)")).fetchall()}
+        for column in new_columns:
+            if column in existing:
+                conn.execute(text(f"ALTER TABLE market_alert_hits DROP COLUMN {column}"))
+
+    ensure_table_columns()
+    ensure_table_columns()   # 幂等：重复执行不报错
+    with engine.connect() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(market_alert_hits)")).fetchall()}
+    assert set(new_columns) <= cols
+
+    # 补列后 ORM 读写正常
+    trade_date = date_cls(2000, 1, 3)
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == trade_date).delete()
+        db.add(MarketAlertHit(
+            trade_date=trade_date, ts_code="000001.SZ", hit_time="09:40", label="活跃",
+            industry="银行", industry_l1="银行", industry_l2="股份制银行Ⅱ", industry_l3="股份制银行Ⅲ",
+        ))
+    with get_db_ctx() as db:
+        row = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == trade_date).one()
+        assert (row.industry_l1, row.industry_l3) == ("银行", "股份制银行Ⅲ")
+        db.delete(row)
+
+
+def test_summarize_hits_groups_by_requested_sw_level():
+    from src.core.services.market_alerts import summarize_hits
+
+    rows = [
+        {"label": LABEL_ACTIVE, "hit_time": "09:40", "cum_pct": 1.0, "name": "A",
+         "industry_l1": "电子", "industry_l2": "半导体", "industry_l3": "数字芯片设计"},
+        {"label": LABEL_ACTIVE, "hit_time": "09:50", "cum_pct": 3.0, "name": "B",
+         "industry_l1": "电子", "industry_l2": "半导体", "industry_l3": "半导体设备"},
+        {"label": LABEL_STRONG, "hit_time": "10:10", "cum_pct": 2.0, "name": "C",
+         "industry_l1": "电子", "industry_l2": "光学光电子", "industry_l3": "面板"},
+    ]
+
+    l1 = summarize_hits(rows)            # 默认一级
+    assert l1["industries"] == [{"industry": "电子", "count": 3, "avg": 2.0}]
+
+    l2 = {item["industry"]: item["count"] for item in summarize_hits(rows, "l2")["industries"]}
+    assert l2 == {"半导体": 2, "光学光电子": 1}
+
+    l3 = {item["industry"] for item in summarize_hits(rows, "l3")["industries"]}
+    assert l3 == {"数字芯片设计", "半导体设备", "面板"}
+
+
+def test_build_structures_takes_industry_from_sw_members():
+    """行业口径与行业关联一致：用申万三级，不用 stock_basic 的单级 industry。"""
+    import duckdb
+    from datetime import date as date_cls, timedelta
+
+    from src.core.services.market_alerts import build_structures
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE)")
+    con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR, industry VARCHAR, list_date DATE)")
+    con.execute("CREATE TABLE a_stock_sw_member (ts_code VARCHAR, l1_name VARCHAR, l2_name VARCHAR, l3_name VARCHAR)")
+    start = date_cls(2026, 8, 1)
+    con.executemany("INSERT INTO a_stock_market_daily VALUES ('600519.SH', ?, ?, ?)",
+                    [(start + timedelta(days=i), 10.0 + i, 10.0 + i) for i in range(15)])
+    con.execute("INSERT INTO a_stock_basic VALUES ('600519.SH', '贵州茅台', '白酒', DATE '2001-08-27')")
+    con.execute("INSERT INTO a_stock_sw_member VALUES ('600519.SH', '食品饮料', '白酒Ⅱ', '白酒Ⅲ')")
+
+    structure = build_structures(con, date_cls(2026, 8, 20))["600519.SH"]
+
+    assert (structure.industry_l1, structure.industry_l2, structure.industry_l3) == ("食品饮料", "白酒Ⅱ", "白酒Ⅲ")
+    assert structure.industry == "食品饮料"      # 兼容字段 = 申万一级，不是 stock_basic 的「白酒」
+    con.close()
+
+
+def _hit(code, label, *, price=10.0, pct=1.0, entity="stock", name="平安银行", l1="银行", l2="股份制银行Ⅱ"):
+    return {
+        "ts_code": code, "entity_type": entity, "name": name,
+        "industry": l1, "industry_l1": l1, "industry_l2": l2, "industry_l3": "",
+        "label": label, "score": 50.0, "price": price, "pct": pct, "amount_yi": 1.0,
+        "volume_ratio": 1.6, "speed5": 0.2, "td_up": 2, "td_down": 0, "days_since_low9": None,
+    }
+
+
+def test_write_hits_overwrites_latest_label_and_logs_every_change():
+    """标签盘中变化要覆盖成最新，但每次变化都在流水里留一条；命中价始终是首次命中的。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services.market_alerts import AlertScanner
+
+    today = date_cls(2000, 1, 4)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
+
+    scanner = AlertScanner()
+    scanner._write_hits(today, "09:40", [_hit("000001.SZ", LABEL_WATCH, price=10.0, pct=-1.0)], {})
+    scanner._write_hits(today, "09:41", [_hit("000001.SZ", LABEL_WATCH, price=10.1)], {})      # 没变：不记
+    scanner._write_hits(today, "10:05", [_hit("000001.SZ", LABEL_ACTIVE, price=10.5)], {})     # 观望→活跃
+    scanner._write_hits(today, "10:30", [], {})                                                 # 此刻无信号：不清空
+
+    with get_db_ctx() as db:
+        row = db.query(MarketAlertHit).filter_by(trade_date=today, ts_code="000001.SZ").one()
+        assert row.label == LABEL_ACTIVE                        # 最新标签
+        assert row.hit_time == "09:40"                          # 首次命中时刻不变
+        assert row.last_change_time == "10:05" and row.change_count == 1
+        assert row.price == 10.0                                # 命中价以首次为准，事后打分不漂移
+        events = db.query(MarketAlertEvent).filter_by(trade_date=today, ts_code="000001.SZ") \
+            .order_by(MarketAlertEvent.id).all()
+        assert [(e.event_time, e.prev_label, e.label) for e in events] == [
+            ("09:40", None, LABEL_WATCH),
+            ("10:05", LABEL_WATCH, LABEL_ACTIVE),
+        ]
+        for event in events:
+            db.delete(event)
+        db.delete(row)
+
+
+def test_fetch_alerts_attaches_and_filters_by_industry_labels():
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services.market_alerts import AlertScanner, fetch_alerts
+
+    today = date_cls(2000, 1, 5)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
+    AlertScanner()._write_hits(today, "09:40", [
+        _hit("000001.SZ", LABEL_ACTIVE, l1="银行", l2="股份制银行Ⅱ"),
+        _hit("600519.SH", LABEL_ACTIVE, name="贵州茅台", l1="食品饮料", l2="白酒Ⅱ"),
+        _hit("801780.SI", LABEL_STRONG, entity="sw_l1", name="银行", l1="银行", l2=""),
+        _hit("801783.SI", LABEL_WATCH, entity="sw_l2", name="股份制银行Ⅱ", l1="银行", l2="股份制银行Ⅱ"),
+    ], {})
+
+    result = fetch_alerts(today)
+    by_code = {row["ts_code"]: row for row in result["rows"]}
+    assert set(by_code) == {"000001.SZ", "600519.SH"}                 # 列表只放个股
+    assert by_code["000001.SZ"]["l1_label"] == LABEL_STRONG
+    assert by_code["000001.SZ"]["l2_label"] == LABEL_WATCH
+    assert by_code["600519.SH"]["l1_label"] is None                   # 食品饮料当天没信号
+    assert {row["name"] for row in result["sw_signals"]} == {"银行", "股份制银行Ⅱ"}
+
+    # 组合过滤：个股活跃 + 一级强势
+    assert [r["ts_code"] for r in fetch_alerts(today, label=LABEL_ACTIVE, l1_label=LABEL_STRONG)["rows"]] == ["000001.SZ"]
+    # 一级无信号
+    assert [r["ts_code"] for r in fetch_alerts(today, l1_label="none")["rows"]] == ["600519.SH"]
+    # 二级观望
+    assert [r["ts_code"] for r in fetch_alerts(today, l2_label=LABEL_WATCH)["rows"]] == ["000001.SZ"]
+
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
+
+
+def test_build_sw_structures_and_sw_baseline_share_stock_logic():
+    import duckdb
+    from datetime import date as date_cls, timedelta
+
+    from src.core.services.market_alerts import baseline_at, build_sw_structures, build_volume_baseline
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_sw_industry (index_code VARCHAR, industry_name VARCHAR, industry_code VARCHAR, level VARCHAR, parent_code VARCHAR)")
+    con.executemany("INSERT INTO a_stock_sw_industry VALUES (?, ?, ?, ?, ?)", [
+        ("801080.SI", "电子", "270000", "L1", "0"),
+        ("801081.SI", "半导体", "270100", "L2", "270000"),
+        ("850812.SI", "数字芯片设计", "270101", "L3", "270100"),      # 三级不参与
+    ])
+    con.execute("CREATE TABLE a_stock_sw_daily (ts_code VARCHAR, trade_date DATE, close DOUBLE, open DOUBLE)")
+    start = date_cls(2026, 8, 1)
+    for code in ("801080.SI", "801081.SI", "850812.SI"):
+        con.executemany("INSERT INTO a_stock_sw_daily VALUES (?, ?, ?, ?)",
+                        [(code, start + timedelta(days=i), 100.0 + i, 100.0 + i) for i in range(20)])
+
+    structures = build_sw_structures(con, date_cls(2026, 9, 1))
+    assert set(structures) == {"801080.SI", "801081.SI"}
+    assert structures["801080.SI"].entity_type == "sw_l1" and structures["801080.SI"].industry_l1 == "电子"
+    semi = structures["801081.SI"]
+    assert semi.entity_type == "sw_l2" and (semi.industry_l1, semi.industry_l2) == ("电子", "半导体")
+    assert semi.td_up_prev > 0                      # 持续上涨，九转高计数累积
+
+    con.execute("CREATE TABLE a_stock_sw_minute_bar (ts_code VARCHAR, trade_time TIMESTAMP, vol DOUBLE)")
+    con.executemany("INSERT INTO a_stock_sw_minute_bar VALUES (?, ?, ?)", [
+        ("801080.SI", "2026-08-31 09:31:00", 100.0), ("801080.SI", "2026-08-28 09:31:00", 300.0),
+    ])
+    baseline = build_volume_baseline(con, date_cls(2026, 9, 1), days=20, table="a_stock_sw_minute_bar")
+    assert baseline_at(baseline, "09:31")["801080.SI"] == 200.0
+    with pytest.raises(ValueError):
+        build_volume_baseline(con, date_cls(2026, 9, 1), table="some_other_table")
+    con.close()
+
+
+def test_industry_label_matches():
+    from src.core.services.market_alerts import industry_label_matches
+
+    assert industry_label_matches(LABEL_STRONG, "") and industry_label_matches(None, None)
+    assert industry_label_matches(LABEL_STRONG, LABEL_STRONG)
+    assert not industry_label_matches(LABEL_ACTIVE, LABEL_STRONG)
+    assert industry_label_matches(None, "none") and not industry_label_matches(LABEL_WATCH, "none")
+
+
+@pytest.mark.parametrize("current, new, allowed", [
+    # 强势可覆盖其余三个
+    (LABEL_ACTIVE, LABEL_STRONG, True), (LABEL_WATCH, LABEL_STRONG, True), (LABEL_AVOID, LABEL_STRONG, True),
+    # 活跃可覆盖观望与规避
+    (LABEL_WATCH, LABEL_ACTIVE, True), (LABEL_AVOID, LABEL_ACTIVE, True),
+    # 规避可覆盖观望
+    (LABEL_WATCH, LABEL_AVOID, True),
+    # 其余一律不能覆盖
+    (LABEL_STRONG, LABEL_ACTIVE, False), (LABEL_STRONG, LABEL_WATCH, False), (LABEL_STRONG, LABEL_AVOID, False),
+    (LABEL_ACTIVE, LABEL_WATCH, False), (LABEL_ACTIVE, LABEL_AVOID, False),
+    (LABEL_AVOID, LABEL_WATCH, False),
+    # 同一标签不算变更
+    (LABEL_WATCH, LABEL_WATCH, False), (LABEL_STRONG, LABEL_STRONG, False),
+])
+def test_can_override_follows_signal_priority(current, new, allowed):
+    from src.core.services.market_alerts import can_override
+
+    assert can_override(current, new) is allowed
+
+
+def test_write_hits_ignores_downgrades_and_resets_each_day():
+    """当天只允许往更强的方向覆盖；往弱变不改标签也不记流水；隔日从头开始。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services.market_alerts import AlertScanner
+
+    day1, day2 = date_cls(2000, 1, 6), date_cls(2000, 1, 7)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+
+    scanner = AlertScanner()
+    code = "000001.SZ"
+    for minute, label in (
+        ("09:40", LABEL_WATCH),     # 首次出现
+        ("09:50", LABEL_AVOID),     # 规避覆盖观望 ✓
+        ("10:00", LABEL_WATCH),     # 观望不能覆盖规避 ✗
+        ("10:10", LABEL_ACTIVE),    # 活跃覆盖规避 ✓
+        ("10:20", LABEL_AVOID),     # 规避不能覆盖活跃 ✗
+        ("10:30", LABEL_STRONG),    # 强势覆盖活跃 ✓
+        ("10:40", LABEL_ACTIVE),    # 活跃不能覆盖强势 ✗
+    ):
+        scanner._write_hits(day1, minute, [_hit(code, label)], {})
+
+    # 次日重新开始：前一天是强势，今天出观望照样记录，不和前一天比较
+    scanner._write_hits(day2, "09:40", [_hit(code, LABEL_WATCH)], {})
+
+    with get_db_ctx() as db:
+        row1 = db.query(MarketAlertHit).filter_by(trade_date=day1, ts_code=code).one()
+        assert row1.label == LABEL_STRONG and row1.change_count == 3
+        assert row1.last_change_time == "10:30" and row1.hit_time == "09:40"
+        events = db.query(MarketAlertEvent).filter_by(trade_date=day1, ts_code=code).order_by(MarketAlertEvent.id).all()
+        assert [(e.event_time, e.prev_label, e.label) for e in events] == [
+            ("09:40", None, LABEL_WATCH),
+            ("09:50", LABEL_WATCH, LABEL_AVOID),
+            ("10:10", LABEL_AVOID, LABEL_ACTIVE),
+            ("10:30", LABEL_ACTIVE, LABEL_STRONG),
+        ]
+
+        row2 = db.query(MarketAlertHit).filter_by(trade_date=day2, ts_code=code).one()
+        assert row2.label == LABEL_WATCH and row2.change_count == 0
+        assert db.query(MarketAlertEvent).filter_by(trade_date=day2, ts_code=code).count() == 1
+
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([day1, day2])).delete(synchronize_session=False)
