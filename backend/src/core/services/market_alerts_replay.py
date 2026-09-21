@@ -179,18 +179,9 @@ def replay_day(
 
     sw_structures = build_sw_structures(connection, day)
     sw_minutes = _load_day_minutes(connection, "a_stock_sw_minute_bar", day)
-    # 申万一/二级缺数据时只关掉行业信号、个股照常回放，但要把原因带出去——
-    # 否则任务显示"完成"，页面上行业信号却是空的，看不出是缺了分钟线
-    sw_history = _baseline_days_available(connection, "a_stock_sw_minute_bar", day, baseline_days)
-    if not sw_structures:
-        sw_reason = "没有申万一/二级日线"
-    elif sw_minutes.empty:
-        sw_reason = "当天没有申万分钟线"
-    elif sw_history < baseline_days:
-        sw_reason = f"申万分钟线量能基准不足（之前只有 {sw_history} 天，需要 {baseline_days} 天）"
-    else:
-        sw_reason = ""
-    sw_ready = not sw_reason
+    sw_ready = bool(sw_structures) and not sw_minutes.empty and _baseline_days_available(
+        connection, "a_stock_sw_minute_bar", day, baseline_days,
+    ) >= baseline_days
     sw_panels = build_minute_panels(sw_minutes) if sw_ready else None
     sw_baseline = build_volume_baseline(connection, day, days=baseline_days, table="a_stock_sw_minute_bar") if sw_ready else None
     sw_pre = _sw_pre_close(connection, day) if sw_ready else {}
@@ -241,7 +232,6 @@ def replay_day(
         "minutes": len(minutes),
         "stocks": int(covered),
         "sw": "on" if sw_ready else "off",
-        "sw_reason": sw_reason,
         "records": len(rows),
         "events": events,
         "by_label": by_label,
