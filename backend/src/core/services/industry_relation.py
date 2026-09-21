@@ -266,6 +266,7 @@ def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -
                     vol_max_prev=max(vols[max(0, index - DEFAULT_THRESHOLDS.strong_volume_days):index]) * STOCK_DAILY_VOL_TO_SHARES,
                     listed_days=index,
                     is_st="ST" in name.upper(),
+                    last_up_close=next((closes[j] for j in range(index - 1, -1, -1) if up_runs[j] > 0), None),
                 )
                 prior = [value for value in vols[max(0, index - 20):index] if value]
                 label = classify(

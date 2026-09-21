@@ -10,11 +10,12 @@
 
 标签（一根轴上的四档，方向由九转计数定，强度由量比与位置定）：
 
-- 强势：活跃全部条件 + 九转高计数 3~4（实测这一档命中后表现最好）+ 量比 ≥2
-- 活跃：九转高计数 ≥2 · 当日上涨 · 现价>今开 · 累计成交额 ≥0.8亿 · 量比 ≥1.3
+- 强势：活跃 + 当日累计量 ≥ 前 8 日最大日成交量
+- 活跃：价格结构 COND1|COND2 · 3日涨幅 5%~15% · 累计成交额 ≥0.8亿 · 同时段量比 ≥1.3
 - 观望：九转低计数 ≥2，或急跌结构（较 3 日前跌 >4% 且跌破 4 日前开盘价）
-- 规避：观望条件 + 九转低计数 ≥4 + 当日下跌
+- 规避：观望 + 较最近一根高计数≥1 的收盘回撤 >7%
 
+判定细节见 classify()。
 每只个股每个交易日只记第一次命中；命中后每轮只更新现价与命中后涨幅，用于事后打分。
 """
 from __future__ import annotations
@@ -82,7 +83,7 @@ class AlertThresholds:
     gain3_max_pct: float = 15.0           # 3 日涨幅上限（超过 15% 的不再算活跃，避免追高）
     strong_volume_days: int = 8           # 强势：当日累计量 ≥ 前 N 个交易日的最大日成交量（=通达信 V≥HHV(V,9)）
     watch_td_down_min: int = 2
-    avoid_td_down_min: int = 4
+    avoid_drawdown_pct: float = 7.0   # 规避：较最近一根高计数≥1 的收盘回撤超过该比例
     drop_pct_vs_3d: float = 4.0
 
 
@@ -107,6 +108,7 @@ class StockStructure:
     listed_days: int = 0
     is_st: bool = False
     days_since_low9: Optional[int] = None                  # 距上次「低9」的交易日数（仅记录，不参与判定）
+    last_up_close: Optional[float] = None                  # 最近一根高计数≥1（C>REF(C,4)）的收盘，规避的回撤参照
     entity_type: str = "stock"                              # stock / sw_l1 / sw_l2
 
     def __post_init__(self) -> None:
@@ -138,6 +140,14 @@ def td_counts(closes: List[float]) -> Tuple[int, int, Optional[int]]:
             last_low9 = len(closes) - 1 - i
         up, down = up_run, down_run
     return up, down, last_low9
+
+
+def last_up_close(closes: List[float]) -> Optional[float]:
+    """最近一根满足 C>REF(C,4)（九转高计数≥1）的 K 线收盘价；窗口内没有则 None。"""
+    for i in range(len(closes) - 1, 3, -1):
+        if closes[i] > closes[i - 4]:
+            return closes[i]
+    return None
 
 
 def _text(value: Any) -> str:
@@ -185,6 +195,7 @@ def build_structures(connection, today: date, lookback_days: int = 90) -> Dict[s
             vol_max_prev=_max_prev_volume(group["vol"], STOCK_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
+            last_up_close=last_up_close(closes),
         )
     return structures
 
@@ -253,6 +264,7 @@ def build_sw_structures(connection, today: date, lookback_days: int = 90) -> Dic
             vol_max_prev=_max_prev_volume(group["vol"], SW_DAILY_VOL_TO_SHARES),
             listed_days=len(closes),
             days_since_low9=since_low9,
+            last_up_close=last_up_close(closes),
         )
         structures[code].entity_type = SW_ENTITY_BY_LEVEL[level]
     return structures
@@ -358,14 +370,13 @@ def classify(
       ④ 同时段量比 ≥ 1.3             （我们的量能口径；参考站点这一道在日线上无法精确还原）
     强势：活跃 AND 当日累计量 ≥ 前 8 个交易日最大日成交量（通达信 V≥HHV(V,9)，验证 100%）
     观望：九转低计数≥2，或急跌结构（参考站点公开公式，验证 100%）
-    规避：观望 AND 九转低计数≥4 AND 当日下跌（我们自己的口径，与参考站点不同）
+    规避：观望 AND 现价较最近一根高计数≥1（C>REF(C,4)）的收盘回撤 >7%（参考站点口径）
     """
     if not price or not pre_close or pre_close <= 0:
         return None
     if structure.is_st or structure.listed_days < MIN_LISTED_TRADING_DAYS:
         return None
 
-    pct = (price / pre_close - 1) * 100
     refs = structure.close_ref
     close_ref1 = refs[-1] if len(refs) >= 1 else None
     close_ref2 = refs[-2] if len(refs) >= 2 else None
@@ -403,7 +414,8 @@ def classify(
         and (close_ref3 - price) / price * 100 > thresholds.drop_pct_vs_3d
     )
     if td_down >= thresholds.watch_td_down_min or sharp_drop:
-        if td_down >= thresholds.avoid_td_down_min and pct < 0:
+        if (structure.last_up_close
+                and price < structure.last_up_close * (1 - thresholds.avoid_drawdown_pct / 100)):
             return LABEL_AVOID
         return LABEL_WATCH
     return None

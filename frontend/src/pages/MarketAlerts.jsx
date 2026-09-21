@@ -16,7 +16,7 @@ const LABEL_META = {
   强势: { color: 'red', desc: '活跃 且 当日累计量 ≥ 前 8 日最大日成交量' },
   活跃: { color: 'volcano', desc: '连阳结构（九转高2 连涨收阳 或 3日涨幅>5%的突破）· 3日涨幅 5%~15% · 成交额 ≥0.8亿 · 同时段量比 ≥1.3' },
   观望: { color: 'green', desc: '九转低计数 ≥2 或急跌结构' },
-  规避: { color: 'success', desc: '九转低计数 ≥4 且当日下跌（口径与参考站点不同）' },
+  规避: { color: 'success', desc: '观望 且 较最近一根九转高计数≥1 的收盘回撤 >7%' },
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };

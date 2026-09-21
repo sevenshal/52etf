@@ -96,13 +96,28 @@ def test_classify_rejects_thin_volume_and_amount():
 
 
 def test_classify_watch_and_avoid():
-    watch = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0])
+    # 九转低计数 2 → 观望；最近一根高计数≥1 的收盘 10.5，现价 9.8 回撤 6.7% 不到 7%
+    watch = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=10.5)
     assert classify(price=9.8, pre_close=10.0, day_open=10.0, cum_amount=1e8,
                     volume_ratio=1.0, structure=watch) == LABEL_WATCH
 
-    avoid = _structure(td_up_prev=0, td_down_prev=3, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0])
+    # 参照收盘 10.6：9.8 < 10.6×0.93=9.858，回撤超过 7% → 规避（与低计数多少、当日涨跌无关）
+    avoid = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=10.6)
     assert classify(price=9.8, pre_close=10.0, day_open=10.0, cum_amount=1e8,
                     volume_ratio=1.0, structure=avoid) == LABEL_AVOID
+
+    # 找不到参照（窗口内没有高计数）时只到观望
+    no_ref = _structure(td_up_prev=0, td_down_prev=1, close_ref=[11.0, 10.8, 10.5, 10.2, 10.0], last_up_close=None)
+    assert classify(price=9.0, pre_close=10.0, day_open=10.0, cum_amount=1e8,
+                    volume_ratio=1.0, structure=no_ref) == LABEL_WATCH
+
+
+def test_last_up_close_picks_most_recent_bar_above_ref4():
+    from src.core.services.market_alerts import last_up_close
+
+    # 第 5 根 12 > 第 1 根 10（高计数≥1），之后一路低于 4 根前
+    assert last_up_close([10, 11, 11.5, 11.8, 12, 11, 10.5, 10, 9]) == 12
+    assert last_up_close([10, 9, 8, 7, 6, 5]) is None
 
 
 def test_classify_skips_st_and_new_listings():
