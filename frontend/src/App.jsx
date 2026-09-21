@@ -4,6 +4,7 @@ import { Spin } from 'antd';
 import { AccountProvider, useAccount } from './contexts/AccountContext';
 import AppLayout from './pages/Layout';
 import { adminRouteDescriptors } from './routes/adminRoutes';
+import { marketRouteDescriptors } from './routes/marketRoutes';
 
 // ---- 普通页面：按需加载（code splitting），每个页面一个独立 chunk ----
 const FearDashboard = lazy(() => import('./pages/fear/FearDashboard'));
@@ -46,6 +47,17 @@ const AiStockRoute = ({ children }) => {
   return isAdmin || canViewAiStock ? children : <Navigate to="/profile" replace />;
 };
 
+// 市场（含雪球持仓、东方财富）：管理员或已被授权（canViewMarket）的账户可看
+const MarketRoute = ({ children }) => {
+  const { isAdmin, canViewMarket, accountReady } = useAccount();
+
+  if (!accountReady) {
+    return null;
+  }
+
+  return isAdmin || canViewMarket ? children : <Navigate to="/profile" replace />;
+};
+
 const LoadingFallback = ({ fullScreen = false }) => (
   <div
     style={{
@@ -85,6 +97,20 @@ function AppRoutes() {
           <Route path="/soxl-fear-strategy" element={<LiveTabRedirect tab="sentiment" />} />
           {/* AI 荐股：管理员或已授权账户可看（独立 ai-stock chunk，不进 admin chunk） */}
           <Route path="/ai-stock" element={<AiStockRoute><AIStock /></AiStockRoute>} />
+          {/* 市场：管理员或已授权账户可看（独立 market chunk，不进 admin chunk） */}
+          {marketRouteDescriptors.map(({ path, Component, props }) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <MarketRoute>
+                  <Component {...props} />
+                </MarketRoute>
+              }
+            />
+          ))}
+          {/* 雪球持仓已从「研究」挪到「市场」，旧链接跳过去 */}
+          <Route path="/factor-lab/xueqiu-holdings" element={<Navigate to="/market/xueqiu-holdings" replace />} />
 
           {/* 管理员专属路由：仅 isAdmin 时注册。非管理员访问这些 URL 会命中下面的
               "*" 兜底路由重定向到 /profile，且永远不会加载 admin chunk。 */}

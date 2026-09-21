@@ -34,6 +34,7 @@ class AccountCacheTest(TestCase):
             db.add(WebAccount(account_id="disabled-account", enabled=False))
             db.add(WebAccount(account_id="ai-viewer-account", enabled=True, can_view_ai_stock=True))
             db.add(WebAccount(account_id="disabled-viewer", enabled=False, can_view_ai_stock=True))
+            db.add(WebAccount(account_id="market-viewer-account", enabled=True, can_view_market=True))
             db.commit()
         finally:
             db.close()
@@ -73,6 +74,25 @@ class AccountCacheTest(TestCase):
         with self.assertRaises(Exception) as ctx:
             asyncio.run(check("enabled-account"))
         self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_valid_market_viewer_gates_access(self):
+        import asyncio
+        admin = account_api.ADMIN_ACCOUNT_ID
+
+        async def check(account_id):
+            return await account_api.valid_market_viewer(account_id)
+
+        self.assertEqual(asyncio.run(check(admin)), admin)
+        self.assertEqual(asyncio.run(check("market-viewer-account")), "market-viewer-account")
+        # 市场与 AI 荐股是两个独立开关
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(check("ai-viewer-account"))
+        self.assertEqual(ctx.exception.status_code, 403)
+
+        account_api.update_account(
+            "enabled-account", AccountUpdate(can_view_market=True), _="admin"
+        )
+        self.assertEqual(asyncio.run(check("enabled-account")), "enabled-account")  # 授权立即生效
 
     def test_cache_stays_warm_until_invalidated(self):
         self.assertTrue(account_api.is_valid_account("enabled-account"))  # 加载缓存
@@ -133,3 +153,34 @@ class AccountCacheTest(TestCase):
         with patch.object(account_api, "_load_account_flags", side_effect=RuntimeError("db down")):
             # 加载失败：保留旧缓存，返回旧结果而不是异常
             self.assertTrue(account_api.is_valid_account("enabled-account"))
+
+
+class WebAccountSchemaMigrationTest(TestCase):
+    def test_legacy_table_gets_can_view_market_column(self):
+        """存量 web_accounts 表（只有 can_view_ai_stock）升级后补上 can_view_market，默认不授权。"""
+        from sqlalchemy import inspect, text
+
+        engine = create_engine("sqlite:///:memory:")
+        self.addCleanup(engine.dispose)
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE web_accounts ("
+                "account_id VARCHAR(128) PRIMARY KEY, note VARCHAR(500) NOT NULL DEFAULT '', "
+                "enabled BOOLEAN NOT NULL DEFAULT 1, can_view_ai_stock BOOLEAN NOT NULL DEFAULT 0, "
+                "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+            ))
+            connection.execute(text(
+                "INSERT INTO web_accounts (account_id, enabled, created_at, updated_at) "
+                "VALUES ('legacy', 1, '2026-01-01', '2026-01-01')"
+            ))
+
+        with patch.object(account_api, "engine", engine):
+            account_api._ensure_web_account_schema()
+
+        columns = {column["name"] for column in inspect(engine).get_columns("web_accounts")}
+        self.assertIn("can_view_market", columns)
+        with engine.connect() as connection:
+            value = connection.execute(
+                text("SELECT can_view_market FROM web_accounts WHERE account_id = 'legacy'")
+            ).scalar()
+        self.assertEqual(value, 0)

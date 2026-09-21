@@ -21,6 +21,7 @@ class AccountValidation(BaseModel):
     message: str = ""
     is_admin: bool = False
     can_view_ai_stock: bool = False
+    can_view_market: bool = False
 
 
 class AccountCreate(BaseModel):
@@ -28,12 +29,14 @@ class AccountCreate(BaseModel):
     note: str = ""
     enabled: bool = True
     can_view_ai_stock: bool = False
+    can_view_market: bool = False
 
 
 class AccountUpdate(BaseModel):
     enabled: Optional[bool] = None
     note: Optional[str] = None
     can_view_ai_stock: Optional[bool] = None
+    can_view_market: Optional[bool] = None
 
 
 class AccountItem(BaseModel):
@@ -42,6 +45,7 @@ class AccountItem(BaseModel):
     enabled: bool
     is_admin: bool
     can_view_ai_stock: bool = False
+    can_view_market: bool = False
     today_request_count: int = 0
     last_30_days_request_count: int = 0
     created_at: Optional[str] = None
@@ -137,6 +141,9 @@ def _ensure_web_account_schema() -> None:
     if "can_view_ai_stock" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE web_accounts ADD COLUMN can_view_ai_stock BOOLEAN NOT NULL DEFAULT 0"))
+    if "can_view_market" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE web_accounts ADD COLUMN can_view_market BOOLEAN NOT NULL DEFAULT 0"))
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +179,13 @@ def _load_account_flags() -> dict:
             WebAccount.account_id,
             WebAccount.enabled,
             WebAccount.can_view_ai_stock,
+            WebAccount.can_view_market,
         ).all()
         return {
             row[0]: {
                 "enabled": bool(row[1]),
                 "can_view_ai_stock": bool(row[2]),
+                "can_view_market": bool(row[3]),
             }
             for row in rows
         }
@@ -208,6 +217,11 @@ def can_view_ai_stock(account_id: str) -> bool:
     return _account_flag(account_id, "can_view_ai_stock")
 
 
+def can_view_market(account_id: str) -> bool:
+    """检查账户是否被授权查看「市场」页面（带 24h 内存缓存）。"""
+    return _account_flag(account_id, "can_view_market")
+
+
 async def valid_account(x_account_id: Optional[str] = Header(None)) -> str:
     if not x_account_id:
         raise HTTPException(status_code=401, detail="Missing account ID")
@@ -226,6 +240,13 @@ async def valid_ai_stock_viewer(account_id: str = Depends(valid_account)) -> str
     """管理员或已被授权查看 AI 荐股的账户。"""
     if account_id != ADMIN_ACCOUNT_ID and not can_view_ai_stock(account_id):
         raise HTTPException(status_code=403, detail="无 AI 荐股查看权限")
+    return account_id
+
+
+async def valid_market_viewer(account_id: str = Depends(valid_account)) -> str:
+    """管理员或已被授权查看「市场」页面（含雪球持仓、东方财富）的账户。"""
+    if account_id != ADMIN_ACCOUNT_ID and not can_view_market(account_id):
+        raise HTTPException(status_code=403, detail="无市场查看权限")
     return account_id
 
 @router.get("/validate-account", response_model=AccountValidation)
@@ -248,6 +269,7 @@ async def validate_account(account_id: str):
             valid=True,
             is_admin=account_id == ADMIN_ACCOUNT_ID,
             can_view_ai_stock=can_view_ai_stock(account_id),
+            can_view_market=can_view_market(account_id),
         )
     else:
         return AccountValidation(valid=False, message="无效或已停用的账户ID")
@@ -265,6 +287,7 @@ def _account_item(
         enabled=account.enabled,
         is_admin=account.account_id == ADMIN_ACCOUNT_ID,
         can_view_ai_stock=bool(account.can_view_ai_stock),
+        can_view_market=bool(account.can_view_market),
         today_request_count=today_request_count,
         last_30_days_request_count=last_30_days_request_count,
         created_at=account.created_at.isoformat() if account.created_at else None,
@@ -366,6 +389,7 @@ def create_account(payload: AccountCreate, _: str = Depends(valid_admin_account)
             note=note,
             enabled=payload.enabled,
             can_view_ai_stock=payload.can_view_ai_stock,
+            can_view_market=payload.can_view_market,
         )
         db.add(account)
         db.commit()
@@ -393,6 +417,8 @@ def update_account(account_id: str, payload: AccountUpdate, _: str = Depends(val
             account.note = payload.note.strip()
         if payload.can_view_ai_stock is not None:
             account.can_view_ai_stock = payload.can_view_ai_stock
+        if payload.can_view_market is not None:
+            account.can_view_market = payload.can_view_market
         db.commit()
         invalidate_account_cache()
         db.refresh(account)

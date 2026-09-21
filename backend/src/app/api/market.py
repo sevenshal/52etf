@@ -27,7 +27,7 @@ from ...core.services.market_overview import (
     fetch_index_overview,
 )
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
-from .account import valid_admin_account
+from .account import ADMIN_ACCOUNT_ID, valid_admin_account, valid_market_viewer
 
 
 router = APIRouter(prefix="/api/market", tags=["Market"])
@@ -37,7 +37,7 @@ router = APIRouter(prefix="/api/market", tags=["Market"])
 def get_intraday_volume(
     target_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     compare_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     try:
         return fetch_intraday_volume_compare(target_date=target_date, compare_date=compare_date)
@@ -50,9 +50,11 @@ def get_intraday_volume(
 @router.get("/earnings-gap")
 async def get_earnings_gap_signals(
     refresh: bool = Query(False),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
-    """净利润断层信号：默认读最近一次计算的快照，refresh=true 时立即重算。"""
+    """净利润断层信号：默认读最近一次计算的快照，refresh=true 时立即重算（全市场扫描，仅管理员）。"""
+    if refresh and account_id != ADMIN_ACCOUNT_ID:
+        raise HTTPException(status_code=403, detail="仅管理员可重新计算")
     try:
         return await run_in_threadpool(get_earnings_gap, refresh)
     except (EarningsGapDataError, RuntimeError) as exc:
@@ -60,7 +62,7 @@ async def get_earnings_gap_signals(
 
 
 @router.get("/index-overview")
-async def get_index_overview(account_id: str = Depends(valid_admin_account)):
+async def get_index_overview(account_id: str = Depends(valid_market_viewer)):
     """指数概览条：上证/深证成指/创业板指/科创50 的现价、涨跌幅与当日分时曲线。"""
     try:
         return await run_in_threadpool(fetch_index_overview)
@@ -69,7 +71,7 @@ async def get_index_overview(account_id: str = Depends(valid_admin_account)):
 
 
 @router.get("/breadth-distribution")
-async def get_breadth_distribution(account_id: str = Depends(valid_admin_account)):
+async def get_breadth_distribution(account_id: str = Depends(valid_market_viewer)):
     """全A涨跌分布：分析库最新交易日按涨跌幅分档，涨停/跌停单列。"""
     try:
         return await run_in_threadpool(fetch_breadth_distribution)
@@ -80,7 +82,7 @@ async def get_breadth_distribution(account_id: str = Depends(valid_admin_account
 @router.get("/daily-amount")
 async def get_daily_amount(
     days: int = Query(120, ge=20, le=250),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     """每日两市成交额（亿元）。"""
     try:
@@ -96,7 +98,7 @@ async def get_market_alerts(
     level: str = Query("l1", pattern="^(l1|l2|l3)$"),
     l1_label: Optional[str] = Query(None, max_length=8),
     l2_label: Optional[str] = Query(None, max_length=8),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     """提示看板：某交易日的命中记录与命中后表现统计；行业分布按申万 level 级分组（默认一级）。
 
@@ -119,7 +121,7 @@ async def get_industry_relation(
     focus: str = Query("", max_length=4),
     l1_label: str = Query("", max_length=8),
     l2_label: str = Query("", max_length=8),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     """行业关联：申万一/二/三级行业的盘中聚合与成分股明细。
 
@@ -137,7 +139,7 @@ async def get_industry_relation_history(
     level: str = Query("l1", pattern="^(?i)(l1|l2|l3)$"),
     name: str = Query(..., min_length=1, max_length=64),
     days: int = Query(60, ge=5, le=250),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     """某个行业的申万行业指数走势（关联结构面板）。"""
     try:
@@ -163,7 +165,7 @@ class EarningsGapConfigPayload(BaseModel):
 
 
 @router.get("/earnings-gap/config")
-def get_earnings_gap_config(account_id: str = Depends(valid_admin_account)):
+def get_earnings_gap_config(account_id: str = Depends(valid_market_viewer)):
     return {"config": load_config(), "defaults": DEFAULT_CONFIG}
 
 
@@ -190,7 +192,7 @@ async def update_earnings_gap_config(
 async def get_intraday_minutes(
     ts_code: str = Query(..., min_length=6, max_length=16),
     days: int = Query(5, ge=1, le=10),
-    account_id: str = Depends(valid_admin_account),
+    account_id: str = Depends(valid_market_viewer),
 ):
     """个股分时小图：库里分钟历史 + 当日实时补齐，点开个股时按需调用。"""
     try:

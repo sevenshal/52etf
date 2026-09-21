@@ -56,16 +56,17 @@ const StockDetail = () => {
   const symbolSearchTimer = useRef(null);
   const symbolSearchSequence = useRef(0);
   const { quotes, register } = useRealtimeQuotes('stock_detail_page');
-  // 雪球持仓数据属于管理员专属的因子实验室（接口是 valid_admin_account），
-  // 非管理员不请求、K 线上也就不出现雪球副图，维持原有权限不变
-  const { isAdmin } = useAccount();
+  // 雪球持仓数据属于「市场」模块（接口是 valid_market_viewer），
+  // 没有市场查看权限的账户不请求、K 线上也就不出现雪球副图
+  const { isAdmin, canViewMarket } = useAccount();
+  const canViewXueqiu = isAdmin || canViewMarket;
 
   // 雪球持仓历史只取一次：K 线的雪球副图和行情摘要的「雪球持仓排行」共用这一份。
   // 与「雪球持仓」模块同一接口、同一默认口径（只统计主理人活跃组合）。
   const [xueqiuPayload, setXueqiuPayload] = useState(null);
   useEffect(() => {
     setXueqiuPayload(null);
-    if (!isAStock || !isAdmin) return undefined;
+    if (!isAStock || !canViewXueqiu) return undefined;
     let cancelled = false;
     request.get('/api/factor-lab/xueqiu-top-holdings/history', {
       params: { symbol: normalizedSymbol, active_only: true, limit: XUEQIU_HISTORY_LIMIT },
@@ -75,7 +76,7 @@ const StockDetail = () => {
       })
       .catch(error => console.error('获取雪球持仓历史失败:', error));
     return () => { cancelled = true; };
-  }, [isAStock, isAdmin, normalizedSymbol]);
+  }, [isAStock, canViewXueqiu, normalizedSymbol]);
   const xueqiuHistoryRows = useMemo(() => xueqiuPayload?.history || [], [xueqiuPayload]);
   const xueqiuRank = useMemo(
     () => (xueqiuPayload ? resolveXueqiuRank(xueqiuPayload.history, xueqiuPayload.latest_snapshot_date) : null),
