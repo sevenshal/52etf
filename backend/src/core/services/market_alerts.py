@@ -495,6 +495,9 @@ def evaluate_snapshot(
     return results
 
 
+LIMITS_RETRY_SECONDS = 300   # stk_limit 取到空/失败后的重试间隔
+
+
 class AlertScanner:
     """进程内保存基准表与最近几轮快照，供 1 分钟一轮的定时任务调用。"""
 
@@ -507,6 +510,7 @@ class AlertScanner:
         self._recorded: Dict[date, Dict[str, str]] = {}   # {交易日: {代码: 当前标签}}
         self._limits: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
         self._limits_date: Optional[date] = None
+        self._limits_retry_at = 0.0          # 取到空/失败后，最早什么时候再试（time.time()）
         # 申万一/二级：与个股同一口径，只是结构来自行业指数日线、基准来自申万分钟线、行情来自 rt_sw_k
         self._sw_structures: Dict[str, StockStructure] = {}
         self._sw_baseline: pd.DataFrame = pd.DataFrame()
@@ -551,8 +555,14 @@ class AlertScanner:
         }
 
     def limits(self, today: date) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
-        """当日涨跌停价，每天只取一次 stk_limit。"""
+        """当日涨跌停价，每天只取一次 stk_limit。
+
+        盘前还没发布时会取到空：不缓存一整天，但也不每次调用都重打接口
+        （行业关联每个请求都会走到这里），空结果/失败后隔 LIMITS_RETRY_SECONDS 再试。
+        """
         if self._limits_date == today:
+            return self._limits
+        if time.time() < self._limits_retry_at:
             return self._limits
         try:
             frame = TushareService.get_instance().get_a_stock_stk_limit_frame(today)
@@ -562,13 +572,12 @@ class AlertScanner:
                     for row in frame.itertuples(index=False)
                 }
                 self._limits_date = today
-            else:
-                # 盘前 stk_limit 还没发布时会取到空；不要把空结果缓存一整天
-                logger.warning("tushare stk_limit 返回空（%s），下次调用会重试", today)
-                self._limits = {}
+                return self._limits
+            logger.warning("tushare stk_limit 返回空（%s），%ss 后重试", today, LIMITS_RETRY_SECONDS)
         except Exception as exc:  # noqa: BLE001  取不到只影响涨停/连板统计
             logger.warning("tushare stk_limit 获取 %s 失败: %s", today, exc)
-            self._limits = {}
+        self._limits = {}
+        self._limits_retry_at = time.time() + LIMITS_RETRY_SECONDS
         return self._limits
 
     def _recorded_today(self, today: date) -> Dict[str, str]:

@@ -207,3 +207,17 @@ def test_load_recent_labels_returns_last_days_with_boards():
     assert [item["boards"] for item in history] == [0, 1, 2]      # 连板数递增
     assert all(item["d"] for item in history)
     con.close()
+
+
+def test_cache_ttl_short_in_session_long_off_hours():
+    from datetime import datetime as dt
+
+    from src.core.services.industry_relation import (
+        CACHE_TTL_SECONDS, OFF_HOURS_CACHE_TTL_SECONDS, cache_ttl_seconds,
+    )
+
+    assert cache_ttl_seconds(dt(2026, 9, 22, 10, 0)) == CACHE_TTL_SECONDS       # 盘中
+    assert cache_ttl_seconds(dt(2026, 9, 22, 9, 20)) == CACHE_TTL_SECONDS       # 集合竞价
+    assert cache_ttl_seconds(dt(2026, 9, 22, 12, 0)) == OFF_HOURS_CACHE_TTL_SECONDS   # 午休
+    assert cache_ttl_seconds(dt(2026, 9, 22, 0, 50)) == OFF_HOURS_CACHE_TTL_SECONDS   # 半夜
+    assert cache_ttl_seconds(dt(2026, 9, 26, 10, 0)) == OFF_HOURS_CACHE_TTL_SECONDS   # 周六
