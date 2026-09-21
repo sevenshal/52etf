@@ -494,7 +494,7 @@ def _load_relation(
     baseline = state.get("baseline")
     limits = state.get("limits") or {}
     if baseline is None or getattr(baseline, "empty", True):
-        warnings.append("量能基准未就绪（分析库分钟线缺失或盘前任务未跑），强势/活跃暂不可用")
+        warnings.append("盘前数据未就绪，强势/活跃暂不可用")
     if not limits:
         warnings.append("涨跌停价(stk_limit)未取到，涨停/跌停与连板统计暂不可用")
 

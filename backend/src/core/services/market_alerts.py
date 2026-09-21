@@ -1090,11 +1090,4 @@ def fetch_alerts(
         "sw_signals": sorted(sw_rows, key=lambda item: (item["entity_type"], item["name"] or "")),
         "industry_level": level if level in INDUSTRY_LEVELS else "l1",
         "summary": summarize_hits(rows, level),
-        "thresholds": {
-            "min_amount_yi": DEFAULT_THRESHOLDS.min_amount_yuan / 1e8,
-            "min_volume_ratio": DEFAULT_THRESHOLDS.min_volume_ratio,
-            "gain3_min_pct": DEFAULT_THRESHOLDS.gain3_min_pct,
-            "gain3_max_pct": DEFAULT_THRESHOLDS.gain3_max_pct,
-            "strong_volume_days": DEFAULT_THRESHOLDS.strong_volume_days,
-        },
     }

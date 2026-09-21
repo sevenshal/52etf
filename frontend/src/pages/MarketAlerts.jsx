@@ -13,10 +13,10 @@ const UP_COLOR = '#e5484d';
 const DOWN_COLOR = '#2f9e63';
 
 const LABEL_META = {
-  强势: { color: 'red', desc: '活跃 且 当日累计量 ≥ 前 8 日最大日成交量' },
-  活跃: { color: 'volcano', desc: '连阳结构（九转高2 连涨收阳 或 3日涨幅>5%的突破）· 3日涨幅 5%~15% · 成交额 ≥0.8亿 · 同时段量比 ≥1.3' },
-  观望: { color: 'green', desc: '九转低计数 ≥2 或急跌结构' },
-  规避: { color: 'success', desc: '观望 且 较最近一根九转高计数≥1 的收盘回撤 >7%' },
+  强势: { color: 'red' },
+  活跃: { color: 'volcano' },
+  观望: { color: 'green' },
+  规避: { color: 'success' },
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
@@ -211,8 +211,6 @@ const MarketAlerts = () => {
       render: (value, record) => (
         <Tooltip title={(
           <span>
-            {LABEL_META[value]?.desc}
-            <br />
             首次命中 {record.hit_time}
             {record.change_count ? ` · 当日升级 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
           </span>
@@ -313,13 +311,9 @@ const MarketAlerts = () => {
             options={INDUSTRY_LABEL_OPTIONS}
           />
         </Space>
-        {data?.thresholds && (
-          <Text type="secondary">
-            口径：3日涨幅 {data.thresholds.gain3_min_pct}%~{data.thresholds.gain3_max_pct}% · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
-            同时段量比 ≥{data.thresholds.min_volume_ratio}（强势：累计量 ≥ 前 {data.thresholds.strong_volume_days} 日最大量）
-            · 当日标签只往更强的方向覆盖（强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过）· 命中价以首次命中为准
-          </Text>
-        )}
+        <Text type="secondary">
+          当日标签只往更强的方向覆盖（强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过）· 命中价以首次命中为准
+        </Text>
       </div>
 
       {error && <Alert className="market-alert" type="warning" showIcon message={error} />}
