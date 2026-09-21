@@ -45,6 +45,20 @@ LABEL_WATCH = "观望"
 LABEL_AVOID = "规避"
 BULLISH_LABELS = (LABEL_STRONG, LABEL_ACTIVE)
 
+# 当日信号覆盖优先级：强势 > 活跃 > 规避 > 观望，只有排名更高的新标签才能覆盖当前标签。
+# 即 强势可覆盖其余三个、活跃可覆盖观望与规避、规避可覆盖观望，其余变化一律忽略、不算信号变更。
+# 覆盖只在当天内判断：每个交易日各自一行，隔日从头开始，不与前一天比较。
+LABEL_OVERRIDE_RANK = {LABEL_WATCH: 0, LABEL_AVOID: 1, LABEL_ACTIVE: 2, LABEL_STRONG: 3}
+
+
+def can_override(current: Optional[str], new: Optional[str]) -> bool:
+    """当日已有标签 current 时，新判定 new 能否覆盖它（只能往更强的方向变）。"""
+    if not new or new not in LABEL_OVERRIDE_RANK:
+        return False
+    if not current or current not in LABEL_OVERRIDE_RANK:
+        return True
+    return LABEL_OVERRIDE_RANK[new] > LABEL_OVERRIDE_RANK[current]
+
 SCAN_START = dtime(9, 35)
 SCAN_END = dtime(15, 5)
 LUNCH_START = dtime(11, 31)
@@ -568,10 +582,12 @@ class AlertScanner:
         hits: List[Dict[str, Any]],
         current_pct: Dict[str, float],
     ) -> Dict[str, int]:
-        """写入当日状态：新出现的插入；标签变了就覆盖成最新，并在流水表记一条。
+        """写入当日状态：新出现的插入；标签只按优先级往更强的方向覆盖，每次覆盖在流水表记一条。
 
-        命中价/首次命中时刻/命中后涨幅始终以首次命中为准（用于事后打分），只有标签跟随最新。
-        某只股票此刻不满足任何条件时不清空标签——"今天出现过的信号"不会因为盘中回落而消失。
+        覆盖规则见 can_override：强势 > 活跃 > 规避 > 观望，只有更强的能覆盖更弱的。
+        往弱的方向变（如 活跃→观望、规避→观望、强势→活跃）一律忽略，不改标签、不记流水。
+        覆盖只在当天内判断，隔日各自独立。
+        命中价/首次命中时刻/命中后涨幅始终以首次命中为准（用于事后打分）。
         """
         recorded = self._recorded_today(today)
         inserted = changed = 0
@@ -613,7 +629,7 @@ class AlertScanner:
                     rows_by_code[code] = row
                     db.add(_event_from_hit(today, minute_label, hit, prev_label=None))
                     inserted += 1
-                elif row.label != hit["label"]:
+                elif can_override(row.label, hit["label"]):
                     db.add(_event_from_hit(today, minute_label, hit, prev_label=row.label))
                     row.label = hit["label"]
                     row.last_change_time = minute_label
@@ -623,7 +639,7 @@ class AlertScanner:
                     row.td_up = hit["td_up"]
                     row.td_down = hit["td_down"]
                     changed += 1
-                recorded[code] = hit["label"]
+                recorded[code] = row.label
 
             # 每轮刷新现价与命中后涨幅（个股与行业一样），供事后打分
             for row in rows_by_code.values():

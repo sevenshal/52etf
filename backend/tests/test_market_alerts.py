@@ -427,3 +427,71 @@ def test_industry_label_matches():
     assert industry_label_matches(LABEL_STRONG, LABEL_STRONG)
     assert not industry_label_matches(LABEL_ACTIVE, LABEL_STRONG)
     assert industry_label_matches(None, "none") and not industry_label_matches(LABEL_WATCH, "none")
+
+
+@pytest.mark.parametrize("current, new, allowed", [
+    # 强势可覆盖其余三个
+    (LABEL_ACTIVE, LABEL_STRONG, True), (LABEL_WATCH, LABEL_STRONG, True), (LABEL_AVOID, LABEL_STRONG, True),
+    # 活跃可覆盖观望与规避
+    (LABEL_WATCH, LABEL_ACTIVE, True), (LABEL_AVOID, LABEL_ACTIVE, True),
+    # 规避可覆盖观望
+    (LABEL_WATCH, LABEL_AVOID, True),
+    # 其余一律不能覆盖
+    (LABEL_STRONG, LABEL_ACTIVE, False), (LABEL_STRONG, LABEL_WATCH, False), (LABEL_STRONG, LABEL_AVOID, False),
+    (LABEL_ACTIVE, LABEL_WATCH, False), (LABEL_ACTIVE, LABEL_AVOID, False),
+    (LABEL_AVOID, LABEL_WATCH, False),
+    # 同一标签不算变更
+    (LABEL_WATCH, LABEL_WATCH, False), (LABEL_STRONG, LABEL_STRONG, False),
+])
+def test_can_override_follows_signal_priority(current, new, allowed):
+    from src.core.services.market_alerts import can_override
+
+    assert can_override(current, new) is allowed
+
+
+def test_write_hits_ignores_downgrades_and_resets_each_day():
+    """当天只允许往更强的方向覆盖；往弱变不改标签也不记流水；隔日从头开始。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services.market_alerts import AlertScanner
+
+    day1, day2 = date_cls(2000, 1, 6), date_cls(2000, 1, 7)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+
+    scanner = AlertScanner()
+    code = "000001.SZ"
+    for minute, label in (
+        ("09:40", LABEL_WATCH),     # 首次出现
+        ("09:50", LABEL_AVOID),     # 规避覆盖观望 ✓
+        ("10:00", LABEL_WATCH),     # 观望不能覆盖规避 ✗
+        ("10:10", LABEL_ACTIVE),    # 活跃覆盖规避 ✓
+        ("10:20", LABEL_AVOID),     # 规避不能覆盖活跃 ✗
+        ("10:30", LABEL_STRONG),    # 强势覆盖活跃 ✓
+        ("10:40", LABEL_ACTIVE),    # 活跃不能覆盖强势 ✗
+    ):
+        scanner._write_hits(day1, minute, [_hit(code, label)], {})
+
+    # 次日重新开始：前一天是强势，今天出观望照样记录，不和前一天比较
+    scanner._write_hits(day2, "09:40", [_hit(code, LABEL_WATCH)], {})
+
+    with get_db_ctx() as db:
+        row1 = db.query(MarketAlertHit).filter_by(trade_date=day1, ts_code=code).one()
+        assert row1.label == LABEL_STRONG and row1.change_count == 3
+        assert row1.last_change_time == "10:30" and row1.hit_time == "09:40"
+        events = db.query(MarketAlertEvent).filter_by(trade_date=day1, ts_code=code).order_by(MarketAlertEvent.id).all()
+        assert [(e.event_time, e.prev_label, e.label) for e in events] == [
+            ("09:40", None, LABEL_WATCH),
+            ("09:50", LABEL_WATCH, LABEL_AVOID),
+            ("10:10", LABEL_AVOID, LABEL_ACTIVE),
+            ("10:30", LABEL_ACTIVE, LABEL_STRONG),
+        ]
+
+        row2 = db.query(MarketAlertHit).filter_by(trade_date=day2, ts_code=code).one()
+        assert row2.label == LABEL_WATCH and row2.change_count == 0
+        assert db.query(MarketAlertEvent).filter_by(trade_date=day2, ts_code=code).count() == 1
+
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([day1, day2])).delete(synchronize_session=False)
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([day1, day2])).delete(synchronize_session=False)

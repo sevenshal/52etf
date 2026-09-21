@@ -214,7 +214,7 @@ const MarketAlerts = () => {
             {LABEL_META[value]?.desc}
             <br />
             首次命中 {record.hit_time}
-            {record.change_count ? ` · 盘中变化 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
+            {record.change_count ? ` · 当日升级 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
           </span>
         )}
         >
@@ -309,7 +309,7 @@ const MarketAlerts = () => {
           <Text type="secondary">
             口径：九转高计数 ≥{data.thresholds.active_td_up_min} · 成交额 ≥{data.thresholds.min_amount_yi}亿 ·
             同时段量比 ≥{data.thresholds.min_volume_ratio}（强势 ≥{data.thresholds.strong_volume_ratio}）
-            · 标签盘中变化取最新（带 * 表示变过）· 命中价以首次命中为准
+            · 当日标签只往更强的方向覆盖（强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过）· 命中价以首次命中为准
           </Text>
         )}
       </div>
