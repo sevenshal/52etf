@@ -408,6 +408,7 @@ const AIStock = () => {
   const [newsSignalWeight, setNewsSignalWeight] = useState(0.5);
   const [xueqiuSignalEnabled, setXueqiuSignalEnabled] = useState(0);
   const [newsAnchorTime, setNewsAnchorTime] = useState('14:00');
+  const [scheduleTimes, setScheduleTimes] = useState('09:25,12:55');
   const [paperConfig, setPaperConfig] = useState(null);
   const [paperConfigOpen, setPaperConfigOpen] = useState(false);
   const [savingPaperConfig, setSavingPaperConfig] = useState(false);
@@ -552,6 +553,7 @@ const AIStock = () => {
     setNewsSignalWeight(settings?.news_signal_weight ?? 0.5);
     setXueqiuSignalEnabled(settings?.xueqiu_signal_enabled ?? 0);
     setNewsAnchorTime(settings?.news_anchor_time || '14:00');
+    setScheduleTimes(settings?.schedule_times ?? '09:25,12:55');
     setSettingsOpen(true);
   }, [settings]);
 
@@ -579,6 +581,7 @@ const AIStock = () => {
       payload.news_signal_weight = newsSignalWeight;
       payload.xueqiu_signal_enabled = xueqiuSignalEnabled ? 1 : 0;
       payload.news_anchor_time = newsAnchorTime;
+      payload.schedule_times = scheduleTimes.trim();
       const response = await request.put('/api/ai-stock/settings', payload);
       setSettings(response.data);
       setDeepseekApiKey('');
@@ -590,7 +593,7 @@ const AIStock = () => {
     } finally {
       setSavingSettings(false);
     }
-  }, [llmProvider, deepseekApiKey, deepseekModel, zhipuApiKey, zhipuModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled, newsAnchorTime]);
+  }, [llmProvider, deepseekApiKey, deepseekModel, zhipuApiKey, zhipuModel, maxCandidates, maxEvents, maxBoards, maxCandidatesPerBoard, minMarketCap, minAvgTurnover, maxRecommendations, minListingDays, targetReturnPctMin, targetReturnPctMax, newsSignalWeight, xueqiuSignalEnabled, newsAnchorTime, scheduleTimes]);
 
   const openPaperConfig = useCallback(() => {
     const p = paperConfig?.parameters || {};
@@ -901,6 +904,15 @@ const AIStock = () => {
             </>
           )}
           <Divider style={{ margin: '4px 0' }}>策略参数</Divider>
+          <Row align="middle" gutter={12}>
+            <Col span={14}>
+              <Text style={{ fontSize: 13 }}>自动推荐时间</Text>
+              <div><Text type="secondary" style={{ fontSize: 12 }}>交易日到点各跑一批，HH:mm 逗号分隔，可选 9:15~11:30、12:30~14:57；留空则只手动生成</Text></div>
+            </Col>
+            <Col span={10}>
+              <Input value={scheduleTimes} onChange={event => setScheduleTimes(event.target.value)} placeholder="09:25,12:55" />
+            </Col>
+          </Row>
           <Row align="middle" gutter={12}>
             <Col span={16}>
               <Text style={{ fontSize: 13 }}>新闻窗口起点</Text>

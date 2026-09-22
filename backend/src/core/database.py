@@ -764,6 +764,8 @@ class AIStockServiceConfig(Base):
     target_return_pct_max = Column(Integer)
     news_signal_weight = Column(Integer)
     news_anchor_time = Column(String(5), nullable=False, default="14:00")
+    # 自动生成推荐的触发时间（上海时间 HH:mm，逗号分隔），每个时间点每个交易日跑一批
+    schedule_times = Column(String(128), nullable=False, default="09:25,12:55")
     # 雪球活跃组合行为信号（xueqiu 块）是否喂给 AI 选股：0=关（默认），1=开
     xueqiu_signal_enabled = Column(Integer)
     updated_by = Column(String(128))
@@ -2212,6 +2214,7 @@ def ensure_table_columns():
         "ai_stock_service_configs": {
             "xueqiu_signal_enabled": "ALTER TABLE ai_stock_service_configs ADD COLUMN xueqiu_signal_enabled INTEGER NOT NULL DEFAULT 0",
             "news_anchor_time": "ALTER TABLE ai_stock_service_configs ADD COLUMN news_anchor_time VARCHAR(5) NOT NULL DEFAULT '14:00'",
+            "schedule_times": "ALTER TABLE ai_stock_service_configs ADD COLUMN schedule_times VARCHAR(128) NOT NULL DEFAULT '09:25,12:55'",
             "llm_provider": "ALTER TABLE ai_stock_service_configs ADD COLUMN llm_provider VARCHAR(16) NOT NULL DEFAULT 'deepseek'",
             "zhipu_api_key": "ALTER TABLE ai_stock_service_configs ADD COLUMN zhipu_api_key VARCHAR(512)",
             "zhipu_model": "ALTER TABLE ai_stock_service_configs ADD COLUMN zhipu_model VARCHAR(100) NOT NULL DEFAULT 'glm-4.6'",
