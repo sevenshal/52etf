@@ -115,8 +115,9 @@ EVENT_PARQUET_DIR = os.getenv("EARNINGS_GAP_EVENT_DIR", "")
 def load_raw_events(con, sources) -> pd.DataFrame:
     """三个事件源统一成 ts_code/source/end_date/ann_date/np_yoy。
 
-    财报读分析库；预告/快报读 `EARNINGS_GAP_EVENT_DIR` 下由 tushare forecast_vip/express_vip
-    拉好的 parquet（生产分析库还没有这两张表时用）。同一 (股票, 报告期, 事件源) 取首次公告。
+    财报读分析库；预告/快报优先读分析库的 a_stock_forecast / a_stock_express，设置了
+    `EARNINGS_GAP_EVENT_DIR` 时改读该目录下 forecast_vip/express_vip 拉好的 parquet。
+    同一 (股票, 报告期, 事件源) 取首次公告。
     """
     frames = []
     if "report" in sources:
@@ -124,10 +125,13 @@ def load_raw_events(con, sources) -> pd.DataFrame:
     for name in ("forecast", "express"):
         if name not in sources:
             continue
-        path = os.path.join(EVENT_PARQUET_DIR, f"{name}.parquet")
-        if not os.path.exists(path):
-            raise SystemExit(f"缺少 {path}；先用 forecast_vip/express_vip 拉好历史再跑")
-        frame = pd.read_parquet(path)
+        if EVENT_PARQUET_DIR:
+            path = os.path.join(EVENT_PARQUET_DIR, f"{name}.parquet")
+            if not os.path.exists(path):
+                raise SystemExit(f"缺少 {path}；先用 forecast_vip/express_vip 拉好历史再跑")
+            frame = pd.read_parquet(path)
+        else:
+            frame = con.execute(f"SELECT * FROM a_stock_{name} WHERE ann_date >= DATE '{START}'").fetchdf()
         if name == "forecast":
             # 预告只有变动幅度区间，取下限（最保守）
             frame["np_yoy"] = pd.to_numeric(frame["p_change_min"], errors="coerce")
