@@ -1,13 +1,15 @@
 """净利润断层：业绩公告（财报/快报/预告）净利高增 + 公告后首个交易日跳空高开、收阳且未封板。
 
-口径（全 A、每只股票只看最近一次业绩公告）：
+口径（全 A、每只股票看最新一个报告期的业绩公告）：
 
 - 事件源三选多（页面可配）：
   - 财报 = tushare fina_indicator，净利同比 netprofit_yoy、营收同比 or_yoy、
     单季净利环比 q_netprofit_qoq、单季营收环比 q_sales_qoq
   - 快报 = tushare express，净利同比按 净利润 ÷ 去年同期修正后净利润 − 1 算，营收同比取 yoy_sales
   - 预告 = tushare forecast，只有净利变动幅度区间，净利同比取**下限** p_change_min（最保守）
-  同一只股票取公告日最新的一条；公告日相同时优先级 财报 > 快报 > 预告（数据最全的优先）。
+  每只股票取最新一个报告期，该期的预告/快报/财报都作为候选事件（先发的不被后发的覆盖）；
+  同一报告期多个事件源都触发断层时只保留最早那条（通常是预告，断层反应的是第一次出现的新消息）；
+  同一天多个事件源公告时只留一条，优先级 财报 > 快报 > 预告（数据最全的优先）。
 - T = 公告日，T+1 = 公告日之后的第一个交易日（公告多在盘后/非交易日发布）。
 - T+1 的硬条件（阈值都在页面上可改，见 DEFAULT_CONFIG）：上市满 N 个交易日、成交额 ≥ 下限、
   开盘较前收高开 ≥ 下限、收盘 > 开盘（收阳）、收盘未封涨停（tushare stk_limit 的涨停价）、
@@ -41,7 +43,7 @@ logger = logging.getLogger(__name__)
 SIGNAL_KEY = "earnings_gap"
 # 快照结构版本：新增/改动 items 里的字段时 +1，旧版本快照会被自动重算，
 # 否则页面会一直显示上一版代码算出来的老快照（新列全是空）
-PAYLOAD_VERSION = 3
+PAYLOAD_VERSION = 5
 
 SOURCE_REPORT = "report"
 SOURCE_EXPRESS = "express"
@@ -150,19 +152,45 @@ def save_config(payload: Dict[str, Any], updated_by: Optional[str] = None) -> Di
 # ---------------------------------------------------------------------------
 
 
-def pick_latest_events(frame: pd.DataFrame) -> pd.DataFrame:
-    """每只股票留最近一次公告：公告日最新；同一天时按 财报 > 快报 > 预告 取。"""
+def select_candidate_events(frame: pd.DataFrame) -> pd.DataFrame:
+    """每只股票取最新一个报告期，保留该报告期里每个事件源的公告，作为候选事件。
+
+    不能只留"每只股票最近一条公告"：同一季里预告/快报先发、财报后发，按单条最新取的话，
+    7 月预告触发的断层信号到 8 月中报一出就被覆盖（生产上预告只剩 3 条、列表全是财报）。
+    报告期一更新（比如三季报预告出来），上一期的事件就不再参与——那已经是旧消息了。
+    同一只股票同一天多个事件源公告时只留一条（财报 > 快报 > 预告），避免同一根 T+1 K 线算两次。
+    同一报告期多个事件源都触发时只保留最早那条，见 keep_earliest_signal_per_period。
+    """
     columns = ["ts_code", "source", "end_date", "ann_date", "np_yoy"]
     if frame is None or frame.empty:
         return pd.DataFrame(columns=columns)
     data = frame.dropna(subset=["ts_code", "end_date", "ann_date"]).copy()
     data["ts_code"] = data["ts_code"].astype(str).str.strip().str.upper()
     data["source_rank"] = data["source"].map(SOURCE_PRIORITY)
-    data = data.sort_values(
-        ["ts_code", "ann_date", "source_rank", "end_date"],
-        ascending=[True, False, True, False],
-    )
-    return data.drop_duplicates(subset=["ts_code"], keep="first").reset_index(drop=True)
+    latest_period = data.groupby("ts_code")["end_date"].transform("max")
+    data = data[data["end_date"] == latest_period]
+    data = data.sort_values(["ts_code", "ann_date", "source_rank"])
+    # 同一报告期同一事件源多次公告（更正/修正）时，_load_events 已经只留首次公告
+    data = data.drop_duplicates(subset=["ts_code", "source"], keep="first")
+    return data.drop_duplicates(subset=["ts_code", "ann_date"], keep="first").reset_index(drop=True)
+
+
+def keep_earliest_signal_per_period(signals: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """同一只股票同一报告期被多个事件源触发断层时，只保留最早的那条信号。
+
+    回测（2018-08 至今，同一报告期多源触发的 45 组）：最早那条（35 组是预告）20 日 +6.31%、
+    胜率 66.7%，后面的只有 -0.51%、51.1%。断层反应的是市场没预期到的新消息，
+    预告之后的正式财报多半只是确认已知数字。按 T+1 先后比，同一天按 财报 > 快报 > 预告。
+    """
+    best: Dict[Tuple[str, date], Dict[str, Any]] = {}
+    for signal in signals:
+        row = signal["row"]
+        key = (row.ts_code, row.end_date)
+        rank = (row.t1_date, SOURCE_PRIORITY.get(row.source, 99))
+        current = best.get(key)
+        if current is None or rank < (current["row"].t1_date, SOURCE_PRIORITY.get(current["row"].source, 99)):
+            best[key] = signal
+    return list(best.values())
 
 
 def express_np_yoy(n_income: Any, last_year_np: Any, fallback: Any = None) -> Optional[float]:
@@ -440,7 +468,7 @@ def _load_events(connection, since: date, sources: Sequence[str], warnings: List
         combined[column] = pd.to_numeric(combined[column], errors="coerce")
     if "forecast_type" not in combined.columns:
         combined["forecast_type"] = None
-    return pick_latest_events(combined)
+    return select_candidate_events(combined)
 
 
 def _load_basic(connection) -> pd.DataFrame:
@@ -766,6 +794,8 @@ def compute_earnings_gap(
                 "prev_high": prev_high,
                 "amount_ratio": amount_ratio,
             })
+        stats["triggered"] = len(signals)
+        signals = keep_earliest_signal_per_period(signals)
         stats["signals"] = len(signals)
 
         items = _build_items(connection, signals, calendar)

@@ -424,7 +424,7 @@ const MarketEarningsGap = () => {
 
       <Card size="small">
         <Table
-          rowKey={record => `${record.symbol}-${record.ann_date}`}
+          rowKey={record => `${record.symbol}-${record.source}-${record.ann_date}`}
           size="small"
           loading={loading}
           columns={columns}
@@ -436,7 +436,7 @@ const MarketEarningsGap = () => {
       {criteria && (
         <Text type="secondary" className="market-footnote">
           条件（可在「参数」里改）：事件源 {(criteria.sources || []).map(key => data?.source_labels?.[key] || key).join('/')}；
-          全A上市满 {criteria.min_listed_trade_days} 个交易日；每只股票最近一次业绩公告，
+          全A上市满 {criteria.min_listed_trade_days} 个交易日；每只股票最新一个报告期的财报/快报/预告（同一报告期多个都触发时只留最早一条），
           净利同比 {criteria.min_profit_yoy}%～{criteria.max_profit_yoy}%（上限剔除基数效应，预告取变动下限）；
           公告后首个交易日 T+1 跳空高开 ≥ {criteria.min_gap_pct}%
           {criteria.require_bullish_close ? '、收盘 > 开盘' : ''}

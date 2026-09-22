@@ -2036,7 +2036,7 @@ class ScheduledTaskManager:
             "a_stock_earnings_gap_scan": TaskDefinition(
                 task_key="a_stock_earnings_gap_scan",
                 name="净利润断层信号",
-                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的业绩公告（财报/快报/预告）和日K扫描全A：每只股票取最近一次公告，净利同比达标且公告后首个交易日(T+1)跳空高开、收阳未封板、成交额达标，按T+1收盘出买入信号。阈值在「市场-净利润断层」页配置。",
+                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的业绩公告（财报/快报/预告）和日K扫描全A：每只股票取最新一个报告期的公告（同期多源触发只留最早一条），净利同比达标且公告后首个交易日(T+1)跳空高开、收阳未封板、成交额达标，按T+1收盘出买入信号。阈值在「市场-净利润断层」页配置。",
                 default_time="18:25",
                 default_enabled=True,
                 sort_order=76,

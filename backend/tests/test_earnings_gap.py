@@ -74,20 +74,6 @@ def test_gap_fill_status():
     }
 
 
-def test_pick_latest_events_prefers_report_on_same_day():
-    frame = pd.DataFrame([
-        {"ts_code": "000001.SZ", "source": "forecast", "end_date": date(2026, 6, 30),
-         "ann_date": date(2026, 8, 21), "np_yoy": 40.0},
-        {"ts_code": "000001.SZ", "source": "report", "end_date": date(2026, 6, 30),
-         "ann_date": date(2026, 8, 21), "np_yoy": 55.0},
-        {"ts_code": "000001.SZ", "source": "express", "end_date": date(2026, 6, 30),
-         "ann_date": date(2026, 7, 20), "np_yoy": 50.0},
-    ])
-    latest = eg.pick_latest_events(frame)
-    assert len(latest) == 1
-    assert latest.iloc[0]["source"] == "report" and latest.iloc[0]["np_yoy"] == 55.0
-
-
 def test_express_np_yoy():
     # 净利 120 / 去年同期 80 − 1 = 50%
     assert eg.express_np_yoy(120.0, 80.0) == pytest.approx(50.0)
@@ -464,3 +450,100 @@ def test_json_safe_replaces_non_finite_and_numpy_scalars():
     })
     assert payload == {"a": None, "b": None, "c": [None, 1.5, 3], "d": {"e": True, "f": "文本", "g": None}}
     json.dumps(payload, allow_nan=False)
+
+
+def _two_announcements_db(forecast_bar, report_bar, extra_forecasts=()):
+    """同一只股票：7 月发中报预告、8 月发中报，两根 T+1 K 线由调用方给。"""
+    calendar = _calendar(date(2024, 1, 1), date(2026, 9, 18))
+    return _build_db(
+        [forecast_bar, report_bar],
+        [("600001.SH", date(2026, 6, 30), date(2026, 8, 21), 60.0)],
+        [("600001.SH", "先预告后中报", "电子", date(2018, 1, 2))],
+        calendar=calendar,
+        forecasts=[("600001.SH", date(2026, 6, 30), date(2026, 7, 10), "预增", 50.0, 90.0), *extra_forecasts],
+    )
+
+
+FORECAST_T1, REPORT_T1 = date(2026, 7, 13), date(2026, 8, 24)
+GAP_UP_BAR = (10.3, 10.8, 10.25, 10.6, 10.0, 80000.0)   # 高开 3%、收阳
+FLAT_BAR = (10.05, 10.2, 9.95, 10.1, 10.0, 80000.0)     # 高开 0.5%，不触发
+
+
+def _run(connection):
+    return eg.compute_earnings_gap(
+        now=datetime(2026, 9, 18, 18, 25),
+        service=FakeTushare(limits={FORECAST_T1: {}, REPORT_T1: {}}),
+        connection=connection,
+    )
+
+
+def test_same_period_multi_source_keeps_earliest_signal():
+    """预告和中报都触发断层：只留最早那条（预告）。
+
+    同一报告期的正式财报多半只是确认预告里已知的数字；回测里最早那条 20 日 +6.31%、
+    后面的 -0.51%。预告也不能被后发的中报覆盖掉（旧逻辑的 bug：列表里只剩财报）。
+    """
+    payload = _run(_two_announcements_db(
+        ("600001.SH", FORECAST_T1, *GAP_UP_BAR),
+        ("600001.SH", REPORT_T1, 12.3, 12.9, 12.25, 12.7, 12.0, 90000.0),
+    ))
+    assert [(item["source"], item["signal_date"]) for item in payload["items"]] == [("forecast", "2026-07-13")]
+    assert payload["stats"]["triggered"] == 2
+    assert payload["stats"]["signals"] == 1
+
+
+def test_later_report_signal_kept_when_forecast_did_not_trigger():
+    """去重是在"触发了的信号"之间做：预告那天没跳空、中报那天跳空了，中报信号照样要在。"""
+    payload = _run(_two_announcements_db(
+        ("600001.SH", FORECAST_T1, *FLAT_BAR),
+        ("600001.SH", REPORT_T1, 12.3, 12.9, 12.25, 12.7, 12.0, 90000.0),
+    ))
+    assert [(item["source"], item["signal_date"]) for item in payload["items"]] == [("report", "2026-08-24")]
+
+
+def test_newer_period_announcement_retires_previous_period():
+    """三季报预告出来之后，中报那一期的事件就是旧消息了，不再参与。"""
+    q3_forecast = ("600001.SH", date(2026, 9, 30), date(2026, 9, 15), "预增", 5.0, 10.0)
+    payload = _run(_two_announcements_db(
+        ("600001.SH", FORECAST_T1, *GAP_UP_BAR),
+        ("600001.SH", REPORT_T1, 12.3, 12.9, 12.25, 12.7, 12.0, 90000.0),
+        extra_forecasts=[q3_forecast],
+    ))
+    # 最新报告期是 9/30，只有一条增速 5% 的预告，不达标
+    assert payload["items"] == []
+    assert payload["stats"]["events"] == 1
+
+
+def test_keep_earliest_signal_per_period_tie_breaks_by_source():
+    from types import SimpleNamespace
+
+    def signal(source, t1, end=date(2026, 6, 30)):
+        return {"row": SimpleNamespace(ts_code="000001.SZ", end_date=end, t1_date=t1, source=source)}
+
+    kept = eg.keep_earliest_signal_per_period([
+        signal("report", date(2026, 8, 24)),
+        signal("forecast", date(2026, 7, 13)),
+        signal("express", date(2026, 7, 13)),
+        signal("report", date(2026, 4, 29), end=date(2026, 3, 31)),  # 另一个报告期，互不影响
+    ])
+    by_period = {item["row"].end_date: item["row"].source for item in kept}
+    # 同一天快报排在预告前面
+    assert by_period == {date(2026, 6, 30): "express", date(2026, 3, 31): "report"}
+
+
+def test_select_candidate_events_latest_period_and_same_day():
+    """只取最新报告期；同一天既发预告又发财报时只留财报一条，不然同一根 T+1 K 线会算两次。"""
+    frame = pd.DataFrame([
+        {"ts_code": "000001.SZ", "source": "forecast", "end_date": date(2026, 6, 30),
+         "ann_date": date(2026, 8, 21), "np_yoy": 40.0},
+        {"ts_code": "000001.SZ", "source": "report", "end_date": date(2026, 6, 30),
+         "ann_date": date(2026, 8, 21), "np_yoy": 55.0},
+        {"ts_code": "000001.SZ", "source": "express", "end_date": date(2026, 6, 30),
+         "ann_date": date(2026, 7, 20), "np_yoy": 50.0},
+        {"ts_code": "000001.SZ", "source": "report", "end_date": date(2026, 3, 31),
+         "ann_date": date(2026, 4, 28), "np_yoy": 70.0},  # 上一期，不参与
+    ])
+    candidates = eg.select_candidate_events(frame)
+    assert sorted(zip(candidates["source"], candidates["ann_date"].astype(str))) == [
+        ("express", "2026-07-20"), ("report", "2026-08-21"),
+    ]
