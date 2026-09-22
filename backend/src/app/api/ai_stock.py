@@ -53,6 +53,7 @@ class AIStockServiceSettingsUpdate(BaseModel):
     news_signal_weight: Optional[float] = Field(default=None, ge=0, le=1)
     xueqiu_signal_enabled: Optional[int] = Field(default=None, ge=0, le=1)
     news_anchor_time: Optional[str] = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    schedule_times: Optional[str] = Field(default=None, max_length=128)
 
 
 def _translate_error(exc: Exception) -> HTTPException:
@@ -94,6 +95,7 @@ def save_ai_stock_settings(
             news_signal_weight=payload.news_signal_weight,
             xueqiu_signal_enabled=payload.xueqiu_signal_enabled,
             news_anchor_time=payload.news_anchor_time,
+            schedule_times=payload.schedule_times,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

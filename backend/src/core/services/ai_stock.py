@@ -109,6 +109,8 @@ MIN_MARKET_CAP = 1_000_000  # 万元 = 100 亿
 MIN_AVG_TURNOVER = 20_000  # 千元 = 2000 万
 THS_INDEX_TYPES = ("N", "TH", "I")
 NEWS_ANCHOR_TIME = "14:00"
+SCHEDULE_TIMES = "09:25,12:55"  # 自动推荐触发时间：上午、下午开盘前 5 分钟各一批
+MAX_SCHEDULE_TIMES = 10
 
 # Paper-trading Chan buy/sell point selection (configurable via strategy_params).
 CHAN_BUY_TYPES = ("一买", "二买", "三买")
@@ -224,6 +226,7 @@ def get_ai_stock_service_settings() -> Dict[str, Any]:
             "news_signal_weight": config.news_signal_weight if config and config.news_signal_weight is not None else NEWS_SIGNAL_WEIGHT,
             "xueqiu_signal_enabled": config.xueqiu_signal_enabled if config and config.xueqiu_signal_enabled is not None else XUEQIU_SIGNAL_ENABLED,
             "news_anchor_time": (config.news_anchor_time if config else None) or NEWS_ANCHOR_TIME,
+            "schedule_times": _format_schedule_times(_parse_schedule_times(config.schedule_times if config else None)),
             "updated_at": config.updated_at if config else None,
             "updated_by": config.updated_by if config else None,
         }
@@ -265,6 +268,7 @@ def update_ai_stock_service_settings(
     news_signal_weight: Optional[float] = None,
     xueqiu_signal_enabled: Optional[int] = None,
     news_anchor_time: Optional[str] = None,
+    schedule_times: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist write-only model keys and strategy limits in one short transaction."""
     key = str(deepseek_api_key or "").strip()
@@ -295,6 +299,7 @@ def update_ai_stock_service_settings(
     anchor_time = str(news_anchor_time or "").strip()
     if news_anchor_time is not None and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", anchor_time):
         raise ValueError("新闻起点时间必须是 HH:mm 格式")
+    normalized_schedule = _format_schedule_times(_validate_schedule_times(schedule_times)) if schedule_times is not None else None
     with get_db_ctx() as db:
         config = db.get(AIStockServiceConfig, 1)
         if not config:
@@ -336,6 +341,8 @@ def update_ai_stock_service_settings(
             config.xueqiu_signal_enabled = xueqiu_signal_enabled
         if news_anchor_time is not None:
             config.news_anchor_time = anchor_time
+        if normalized_schedule is not None:
+            config.schedule_times = normalized_schedule
         config.updated_by = updated_by
     return get_ai_stock_service_settings()
 
@@ -394,7 +401,61 @@ def _is_market_session(now: datetime) -> bool:
 
 def _is_recommendation_window(now: datetime) -> bool:
     minute = now.hour * 60 + now.minute
-    return now.weekday() < 5 and ((9 * 60 + 15 <= minute <= 9 * 60 + 30) or _is_market_session(now))
+    return now.weekday() < 5 and _is_recommendation_minute(minute)
+
+
+def _is_recommendation_minute(minute: int) -> bool:
+    """集合竞价、连续竞价和午间开盘前半小时都允许生成推荐（收盘后不再出新推荐）。"""
+    return (9 * 60 + 15 <= minute <= 11 * 60 + 30) or (12 * 60 + 30 <= minute <= 14 * 60 + 57)
+
+
+def _schedule_minutes(raw: Any) -> List[int]:
+    """Split a comma separated HH:mm list into sorted unique minutes of day.
+
+    Raises ValueError on malformed items; range checks are the caller's job.
+    """
+    items = [item.strip() for item in re.split(r"[,，\s]+", str(raw or "")) if item.strip()]
+    minutes = set()
+    for item in items:
+        matched = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", item)
+        if not matched:
+            raise ValueError(f"推荐时间 {item} 必须是 HH:mm 格式")
+        minutes.add(int(matched.group(1)) * 60 + int(matched.group(2)))
+    return sorted(minutes)
+
+
+def _validate_schedule_times(raw: Any) -> List[int]:
+    minutes = _schedule_minutes(raw)
+    if len(minutes) > MAX_SCHEDULE_TIMES:
+        raise ValueError(f"推荐时间最多 {MAX_SCHEDULE_TIMES} 个")
+    for minute in minutes:
+        if not _is_recommendation_minute(minute):
+            raise ValueError(f"推荐时间 {minute // 60:02d}:{minute % 60:02d} 不在 9:15~11:30 或 12:30~14:57 内")
+    return minutes
+
+
+def _parse_schedule_times(raw: Any) -> List[int]:
+    """Lenient runtime parse: fall back to the default schedule if the stored value is unusable."""
+    if raw is None:
+        raw = SCHEDULE_TIMES
+    try:
+        return _validate_schedule_times(raw)
+    except ValueError:
+        return _schedule_minutes(SCHEDULE_TIMES)
+
+
+def _format_schedule_times(minutes: List[int]) -> str:
+    return ",".join(f"{minute // 60:02d}:{minute % 60:02d}" for minute in minutes)
+
+
+def _load_schedule_minutes() -> List[int]:
+    try:
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            raw = config.schedule_times if config else None
+    except Exception:
+        raw = None
+    return _parse_schedule_times(raw)
 
 
 def _serialize_news_headlines(*frames: Tuple[str, Any]) -> List[Dict[str, Any]]:
@@ -1978,26 +2039,17 @@ class AIStockRecommendationService:
         return {"run_id": int(run_id), "as_of": as_of, "items": result}
 
 
-def _scheduled_recommendation_type(timestamp: datetime) -> Optional[str]:
-    """Return the one batch type allowed for this local Shanghai minute."""
+def _scheduled_recommendation_type(timestamp: datetime, schedule_minutes: Optional[List[int]] = None) -> Optional[str]:
+    """Return the batch type due at this local Shanghai minute, or None.
+
+    触发时间在 AI 荐股设置里配置（默认 9:25、12:55 两批），批次类型按时间段推导。
+    """
     if timestamp.weekday() >= 5:
         return None
-    minute = timestamp.hour * 60 + timestamp.minute
-    if minute == 9 * 60 + 26:
-        return "PREOPEN"
-    if minute == 9 * 60 + 40:
-        return "OPENING"
-    intraday_minutes = {
-        10 * 60,
-        10 * 60 + 30,
-        11 * 60,
-        11 * 60 + 30,
-        13 * 60,
-        13 * 60 + 30,
-        14 * 60,
-        14 * 60 + 30,
-    }
-    return "INTRADAY" if minute in intraday_minutes else None
+    minutes = _load_schedule_minutes() if schedule_minutes is None else schedule_minutes
+    if timestamp.hour * 60 + timestamp.minute not in minutes:
+        return None
+    return _run_type_for_time(timestamp)
 
 
 def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -2028,7 +2080,7 @@ def process_ai_stock_automation_for_robot(now: Optional[datetime] = None) -> Dic
         if not already_started:
             try:
                 # 异步：占位后立即返回，不阻塞机器人主循环（模型多轮调用可能耗时数分钟），
-                # 避免卡住后续 OPENING/INTRADAY 的触发窗口。
+                # 避免卡住后续批次的触发窗口。
                 AIStockRecommendationService().run_recommendation_async(now=timestamp, run_type=run_type)
                 result["recommendation"] = {"status": "RUNNING", "run_type": run_type}
                 # The reference service is optional and strictly read-only.
@@ -3061,7 +3113,7 @@ def ai_stock_runtime_logs(limit: int = 100) -> List[Dict[str, Any]]:
     return sorted(events, key=lambda item: item["time"], reverse=True)[:safe_limit]
 
 
-RUN_TYPE_LABELS = {"PREOPEN": "竞价 9:26", "OPENING": "开盘 9:40", "INTRADAY": "盘中"}
+RUN_TYPE_LABELS = {"PREOPEN": "盘前", "OPENING": "开盘", "INTRADAY": "盘中"}
 
 
 def _aggregate_hit_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:

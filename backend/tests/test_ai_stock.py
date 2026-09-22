@@ -468,10 +468,46 @@ def test_a_share_costs_include_minimum_commission_transfer_and_stamp_duty():
 
 
 def test_recommendation_schedule_has_preopen_opening_and_half_hour_intraday_batches():
-    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 26)) == "PREOPEN"
-    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 40)) == "OPENING"
-    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 10, 30)) == "INTRADAY"
-    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 10, 15)) is None
+    default = [9 * 60 + 25, 12 * 60 + 55]
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 25), default) == "PREOPEN"
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 12, 55), default) == "INTRADAY"
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 26), default) is None
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 10, 30), default) is None
+    assert _scheduled_recommendation_type(datetime(2026, 8, 15, 9, 25), default) is None
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 40), [9 * 60 + 40]) == "OPENING"
+    assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 25), []) is None
+
+
+def test_schedule_times_are_configurable_and_validated():
+    from src.core.database import get_db_ctx, AIStockServiceConfig
+
+    with get_db_ctx() as db:
+        config = db.get(AIStockServiceConfig, 1)
+        original = config.schedule_times if config else None
+
+    try:
+        saved = update_ai_stock_service_settings(
+            deepseek_api_key=None,
+            deepseek_model=None,
+            schedule_times="12:55, 9:25，09:25",
+            updated_by="admin",
+        )
+        assert saved["schedule_times"] == "09:25,12:55"
+        assert _scheduled_recommendation_type(datetime(2026, 8, 10, 12, 55)) == "INTRADAY"
+        for bad in ("9:25,25:00", "15:30", "12:00"):
+            try:
+                update_ai_stock_service_settings(deepseek_api_key=None, deepseek_model=None, schedule_times=bad, updated_by="admin")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"非法推荐时间 {bad} 必须被拒绝")
+        assert update_ai_stock_service_settings(deepseek_api_key=None, deepseek_model=None, schedule_times="", updated_by="admin")["schedule_times"] == ""
+        assert _scheduled_recommendation_type(datetime(2026, 8, 10, 9, 25)) is None
+    finally:
+        with get_db_ctx() as db:
+            config = db.get(AIStockServiceConfig, 1)
+            if config:
+                config.schedule_times = original if original is not None else "09:25,12:55"
 
 
 def test_manual_override_is_the_only_after_hours_recommendation_path():
