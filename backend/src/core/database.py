@@ -2431,6 +2431,7 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                         cooldown_remaining_days INTEGER NOT NULL DEFAULT 0,
                         greed_peak_price FLOAT,
                         take_profit_cycle_sell_count INTEGER NOT NULL DEFAULT 0,
+                        pending_sell_signal_date DATE,
                         updated_at DATETIME,
                         FOREIGN KEY(config_id) REFERENCES soxl_fear_strategy_configs (id)
                     )
@@ -2466,7 +2467,7 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                     INSERT OR IGNORE INTO soxl_fear_strategy_states (
                         config_id, account_id, symbol, last_processed_date,
                         cooldown_remaining_days, greed_peak_price,
-                        take_profit_cycle_sell_count, updated_at
+                        take_profit_cycle_sell_count, pending_sell_signal_date, updated_at
                     )
                     SELECT
                         {config_id_expr},
@@ -2476,12 +2477,17 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                         COALESCE({old_state_column("cooldown_remaining_days", "0")}, 0),
                         {old_state_column("greed_peak_price", "NULL")},
                         COALESCE({old_state_column("take_profit_cycle_sell_count", "0")}, 0),
+                        {old_state_column("pending_sell_signal_date", "NULL")},
                         {state_updated_at_expr}
                     FROM soxl_fear_strategy_states_old s
                     {join_expr}
                     WHERE {config_id_expr} IS NOT NULL
                 """))
                 conn.execute(text("DROP TABLE soxl_fear_strategy_states_old"))
+
+            # 卖出跌破MA5确认挂起的信号日（模型已有该列，老库补列；NULL = 没有挂起的卖出信号）
+            if "pending_sell_signal_date" not in get_columns(conn, "soxl_fear_strategy_states"):
+                conn.execute(text("ALTER TABLE soxl_fear_strategy_states ADD COLUMN pending_sell_signal_date DATE"))
 
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_soxl_fear_strategy_states_account_id "
