@@ -21,7 +21,7 @@ const INDUSTRY_LABEL_OPTIONS = [
   { label: '无信号', value: 'none' },
 ];
 const DEFAULT_INDUSTRY_LABELS = ['强势', '活跃', '观望', 'none'];
-// 个股焦点：默认只看当日升级上来的强势/活跃（后端 focus_options 里的 st_up / by_up）
+// 个股焦点：默认只看相对最近一次标签升级的强势/活跃（最多回看 5 个交易日）
 const DEFAULT_FOCUS = ['st_up', 'by_up'];
 
 /** 申万一/二级指数自身的当日信号；三级 tushare 没有行情，不显示 */
@@ -39,7 +39,7 @@ const formatErrorMessage = (error, fallback) => {
 const fmtPct = value => (value === null || value === undefined ? '-' : `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(2)}%`);
 const pctClass = value => (value > 0 ? 'is-up' : value < 0 ? 'is-down' : '');
 
-/** 前3标签：三段色块，从左到右是前第三日→前一日；涨停那天把连板数写进色块 */
+/** 最近3标签：从最近5个交易日内取最后3个非空标签，左到右由旧到新；涨停那天写进连板数 */
 const TrendSegments = ({ history }) => {
   const items = [0, 1, 2].map(index => (history || [])[index] || null);
   return (
@@ -409,7 +409,7 @@ const MarketIndustryRelation = () => {
       ),
     },
     {
-      title: '前3标签',
+      title: '最近3标签',
       key: 'labels_3d',
       width: 76,
       // 排序按最近一天的连板数，其次看有没有标签，方便把连续走强的排到前面
@@ -589,7 +589,7 @@ const MarketIndustryRelation = () => {
                 size="small"
                 className="market-industry__members"
                 title={`成分股（${memberRows.length}）`}
-                extra={<Text type="secondary">行业列可点击联动 · 前3标签自左向右为前第三日→前一日</Text>}
+                extra={<Text type="secondary">行业列可点击联动 · 最近3标签最多回看5个交易日，自左向右由旧到新</Text>}
               >
                 <Table
                   size="small"

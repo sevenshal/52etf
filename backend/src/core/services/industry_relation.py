@@ -45,7 +45,8 @@ OFF_HOURS_CACHE_TTL_SECONDS = 300   # 盘外：快照不再变化，没必要每
 LIMIT_UP_STATUS = (2, 3)
 LIMIT_DOWN_STATUS = (5, 6)
 MIN_RANK_COUNT = 5
-RECENT_LABEL_DAYS = 3          # 成分股「前3标签」看前 3 个交易日的收盘口径状态
+RECENT_LABEL_DAYS = 3          # 成分股最多展示最近 3 个实际出现过的收盘口径标签
+RECENT_LABEL_LOOKBACK_DAYS = 5 # 展示/比较标签时最多回看此前 5 个交易日
 MICRO_CAP_COUNT = 400          # 微盘股范围取总市值最小的 N 只
 
 # 市场范围：代码前缀类直接按 ts_code 判断，指数类走 a_stock_index_weight
@@ -74,7 +75,7 @@ FOCUS_OPTIONS: Tuple[Dict[str, str], ...] = (
     {"key": "lb", "name": "多板"},
     {"key": "st", "name": "强势"},
     {"key": "by", "name": "活跃"},
-    {"key": "st_up", "name": "强势*"},      # 当日由更弱的标签升级上来的强势
+    {"key": "st_up", "name": "强势*"},      # 相对最近一次标签升级的强势
     {"key": "by_up", "name": "活跃*"},
     {"key": "gw", "name": "观望"},
     {"key": "av", "name": "规避"},
@@ -211,24 +212,49 @@ def load_universe_codes(connection, universe: str, today: date) -> Optional[set]
     return codes
 
 
-def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -> Dict[str, List[Dict[str, Any]]]:
-    """前 N 个交易日的收盘口径标签与连板数：{ts_code: [{d, label, boards}, ...]}（按日期升序）。
+def load_recent_labels(
+    connection,
+    today: date,
+    days: int = RECENT_LABEL_DAYS,
+    lookback_days: int = RECENT_LABEL_LOOKBACK_DAYS,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """此前 N 个实际标签：在最近 lookback_days 个交易日内选取（按日期升序）。
+
+    某天没有标签时不占展示位；例如 5 个交易日内只在第 1、3、5 天有标签，就展示这 3 个。
+    ``today`` 是当前标签的生效日，因此历史严格取其之前的交易日，既避免把当天标签和自己
+    比较，也能让休市日回退到最近标签日时正确寻找其前一次标签。
 
     用日线还原，所以上线第一天就有历史。判定直接调盘中用的同一个 classify()，
     只是把"当时"换成那一天的收盘：结构取那天之前的日线，量比分母换成前 20 日均量
     （历史日期拿不到盘中同时段数据）。不要在这里另写一份判定——以前复制过一份，
-    结果急跌结构漏了「跌破 4 日前开盘」，前3标签的观望一直比盘中宽。
+    结果急跌结构漏了「跌破 4 日前开盘」，最近标签的观望一直比盘中宽。
     """
+    recent_trade_dates = {
+        str(row[0])[:10]
+        for row in connection.execute(
+            """
+            SELECT DISTINCT trade_date
+            FROM a_stock_market_daily
+            WHERE trade_date < ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+            """,
+            [today, lookback_days],
+        ).fetchall()
+    }
+    if not recent_trade_dates:
+        return {}
+
     frame = connection.execute(
         """
         SELECT d.ts_code, d.trade_date, d.open, d.close, d.pre_close, d.vol, d.amount, d.limit_status, b.name
         FROM a_stock_market_daily d
         LEFT JOIN a_stock_basic b ON b.ts_code = d.ts_code
-        WHERE d.trade_date >= ?
+        WHERE d.trade_date >= ? AND d.trade_date < ?
         ORDER BY d.ts_code, d.trade_date
         """,
         # 窗口要够长：classify 要求上市满 60 个交易日，太短会把所有股票都判成"新股"
-        [today - timedelta(days=200)],
+        [today - timedelta(days=200), today],
     ).fetchdf()
     if frame.empty:
         return {}
@@ -256,7 +282,7 @@ def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -
 
         name = str(group["name"].iloc[-1] or "")
         history: List[Dict[str, Any]] = []
-        for index in range(max(0, len(group) - days), len(group)):
+        for index in range(len(group)):
             row = group.iloc[index]
             label = None
             if index >= 5 and closes[index]:
@@ -291,18 +317,22 @@ def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -
                     boards += 1
                     back -= 1
             trade_date = row["trade_date"]
+            trade_date_text = str(trade_date)[:10]
+            if trade_date_text not in recent_trade_dates or not label:
+                continue
             history.append({
-                "d": trade_date.strftime("%Y-%m-%d") if hasattr(trade_date, "strftime") else str(trade_date)[:10],
+                "d": trade_date.strftime("%Y-%m-%d") if hasattr(trade_date, "strftime") else trade_date_text,
                 "label": label,
                 "boards": boards,
                 "limit_down": bool(statuses[index] in LIMIT_DOWN_STATUS),
             })
-        results[str(ts_code)] = history
+        if history:
+            results[str(ts_code)] = history[-days:]
     return results
 
 
 FOCUS_LABELS = {"st": LABEL_STRONG, "by": LABEL_ACTIVE, "gw": LABEL_WATCH, "av": LABEL_AVOID}
-FOCUS_UPGRADED = {"st_up": LABEL_STRONG, "by_up": LABEL_ACTIVE}   # 只要当日升级上来的那部分
+FOCUS_UPGRADED = {"st_up": LABEL_STRONG, "by_up": LABEL_ACTIVE}
 
 
 def focus_matches(stock: Dict[str, Any], focus: Any) -> bool:
@@ -325,7 +355,16 @@ def _focus_match_one(stock: Dict[str, Any], focus: str) -> bool:
     if focus == "lb":
         return bool(stock.get("limit_up")) and (stock.get("boards") or 0) >= 3
     if focus in FOCUS_UPGRADED:
-        return stock.get("label") == FOCUS_UPGRADED[focus] and bool(stock.get("change_count"))
+        # 星号不是盘中同日变化次数：当前标签必须强于此前 5 个交易日内最近一次实际标签。
+        # 没有可比较的历史标签时，不把“首次出现”误判成升级。
+        previous_label = stock.get("previous_label")
+        from .market_alerts import can_override
+
+        return (
+            stock.get("label") == FOCUS_UPGRADED[focus]
+            and bool(previous_label)
+            and can_override(previous_label, stock["label"])
+        )
     return stock.get("label") == FOCUS_LABELS.get(focus)
 
 
@@ -496,12 +535,15 @@ def _load_relation(
     if quotes is None or quotes.empty:
         raise IndustryRelationDataError("tushare 快照为空")
 
+    hits, l1_labels, l2_labels, label_date = _load_today_hits(today)
+    # 休市日时当前标签回退到最近有命中的交易日，历史也要以那天为锚点，避免拿当天标签和自己比较。
+    history_as_of = label_date or today
     connection = connect_analytics_db()
     try:
         members = load_members(connection)
         boards = load_board_counts(connection, today)
         universe_codes = load_universe_codes(connection, universe, today)
-        recent_labels = _cached_recent_labels(connection, today)
+        recent_labels = _cached_recent_labels(connection, history_as_of)
     finally:
         connection.close()
 
@@ -521,9 +563,9 @@ def _load_relation(
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")
 
-    hits, l1_labels, l2_labels, label_date = _load_today_hits(today)
     for stock in stocks:
         stock["labels_3d"] = recent_labels.get(stock["ts_code"], [])
+        stock["previous_label"] = stock["labels_3d"][-1]["label"] if stock["labels_3d"] else None
         hit = hits.get(stock["ts_code"])
         stock["hit_time"] = hit["hit_time"] if hit else None
         stock["last_change_time"] = hit["last_change_time"] if hit else None
@@ -614,7 +656,7 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
                     "hit_time": str(row.hit_time),
                     "last_change_time": str(row.last_change_time or row.hit_time),
                     "label": str(row.label),
-                    "change_count": row.change_count or 0,   # >0 = 当日升级上来的（强势*/活跃*）
+                    "change_count": row.change_count or 0,   # 盘中标签变化次数，仅供详情展示
                 }
                 for row in rows
                 if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK
@@ -626,7 +668,7 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
 
 
 def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, Any]]]:
-    """前3标签按日变化，缓存到当天结束。"""
+    """最近标签按锚点交易日变化，缓存到当天结束。"""
     key = f"recent_labels:{today.isoformat()}"
     hit = _cache.get(key)
     if hit:

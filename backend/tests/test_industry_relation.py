@@ -150,11 +150,13 @@ def test_focus_matches_labels_and_boards():
     assert focus_matches(limit_third, "lb") is True and focus_matches(limit_first, "lb") is False
     assert focus_matches(limit_third, "st") is True and focus_matches(watch, "st") is False
     assert focus_matches(watch, "gw") is True
-    # 多选取并集；st_up / by_up 只要当日升级上来的
+    # 多选取并集；st_up / by_up 仅当前标签强于最近一次标签时命中
     assert focus_matches(watch, "lu,gw") is True and focus_matches(limit_first, "lb,gw") is False
-    assert focus_matches({"label": LABEL_STRONG, "change_count": 1}, "st_up") is True
-    assert focus_matches({"label": LABEL_STRONG, "change_count": 0}, "st_up") is False
-    assert focus_matches({"label": LABEL_ACTIVE, "change_count": 3}, "st_up,by_up") is True
+    assert focus_matches({"label": LABEL_STRONG, "previous_label": LABEL_ACTIVE}, "st_up") is True
+    assert focus_matches({"label": LABEL_STRONG, "previous_label": LABEL_STRONG}, "st_up") is False
+    assert focus_matches({"label": LABEL_STRONG, "previous_label": None}, "st_up") is False
+    assert focus_matches({"label": LABEL_ACTIVE, "previous_label": LABEL_WATCH}, "st_up,by_up") is True
+    assert focus_matches({"label": LABEL_ACTIVE, "previous_label": LABEL_STRONG}, "by_up") is False
 
 
 def test_load_universe_codes_by_board_index_and_micro():
@@ -185,9 +187,10 @@ def test_load_universe_codes_by_board_index_and_micro():
     con.close()
 
 
-def test_load_recent_labels_returns_last_days_with_boards():
+def test_load_recent_labels_returns_last_labeled_days_with_boards(monkeypatch):
     import duckdb
 
+    from src.core.services import industry_relation
     from src.core.services.industry_relation import load_recent_labels
 
     con = duckdb.connect()
@@ -206,10 +209,21 @@ def test_load_recent_labels_returns_last_days_with_boards():
     con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR)")
     con.execute("INSERT INTO a_stock_basic VALUES ('000001.SZ', '平安银行')")
 
-    history = load_recent_labels(con, date(2026, 9, 1), days=3)["000001.SZ"]
+    # 最近 5 个交易日内，第 1、3、4、5 天有标签；只保留其中最近 3 个，跳过无标签日。
+    labels = {
+        round(rows[25][3], 2): LABEL_WATCH,
+        round(rows[27][3], 2): LABEL_ACTIVE,
+        round(rows[28][3], 2): LABEL_STRONG,
+        round(rows[29][3], 2): LABEL_STRONG,
+    }
+    monkeypatch.setattr(industry_relation, "classify", lambda *, price, **_: labels.get(round(price, 2)))
+
+    history = load_recent_labels(con, date(2026, 8, 31), days=3)["000001.SZ"]
 
     assert len(history) == 3
+    assert [item["d"] for item in history] == ["2026-08-28", "2026-08-29", "2026-08-30"]
     assert [item["boards"] for item in history] == [0, 1, 2]      # 连板数递增
+    assert [item["label"] for item in history] == [LABEL_ACTIVE, LABEL_STRONG, LABEL_STRONG]
     assert all(item["d"] for item in history)
     con.close()
 
