@@ -1073,6 +1073,227 @@ def _compute_valuation_gap(df: pl.DataFrame, context: FactorContext) -> pl.DataF
     )
 
 
+def _is_a_share_symbol(symbol: str) -> bool:
+    text = str(symbol or "").strip().upper()
+    return text.endswith((".SH", ".SZ", ".BJ"))
+
+
+def load_a_stock_valuation_metrics_frame(
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+) -> pl.DataFrame:
+    """A股逐日估值指标（PB / PS-TTM），来自 tushare 日线基本面数据。
+
+    这两个字段本身就是按 trade_date 逐日披露的即时口径（用当天市值 / 当天已知的 TTM 财务数据算出），
+    不存在“未来函数”问题，直接按 (symbol, trade_date) 精确对齐即可，不需要像财报字段那样用 ann_date 挡未来数据。
+    """
+    from ..duckdb_utils import connect_duckdb
+
+    a_symbols = [symbol for symbol in symbols if _is_a_share_symbol(symbol)]
+    if not a_symbols:
+        return pl.DataFrame()
+    connection = connect_duckdb(prefer_read_only=True)
+    try:
+        symbol_sql = ", ".join("'" + symbol.replace("'", "''") + "'" for symbol in a_symbols)
+        query = f"""
+            SELECT ts_code AS symbol, CAST(trade_date AS DATE) AS trade_date, pb, ps_ttm
+            FROM a_stock_market_daily
+            WHERE ts_code IN ({symbol_sql}) AND trade_date BETWEEN ? AND ?
+        """
+        frame = pl.read_database(query, connection, execute_options={"parameters": [start_date, end_date]})
+    finally:
+        connection.close()
+    if frame.is_empty():
+        return frame
+    return (
+        frame.with_columns(
+            pl.col("trade_date").cast(pl.Date),
+            pl.col("pb").cast(pl.Float64),
+            pl.col("ps_ttm").cast(pl.Float64),
+        )
+        .sort(["symbol", "trade_date"])
+    )
+
+
+_load_a_stock_valuation_metrics_frame = load_a_stock_valuation_metrics_frame
+
+
+def load_a_stock_quality_frame(
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+) -> pl.DataFrame:
+    """A股扣非ROE(TTM)历史序列，按财报公告日(ann_date)对齐，避免用尚未公告的数据做回测。
+
+    TTM 扣非归母净利润 = 当期(年初至今累计)扣非净利 + 上年年报扣非净利 - 上年同期累计扣非净利；
+    当期本身就是年报(12-31)时直接用全年数。净资产取归母权益期末值（合并报表 report_type='1'）。
+    口径与 earnings_gap.dedt_roe_ttm / a_stock_financials.compute_ttm_deducted_roe 一致，这里向量化到
+    全历史用于因子回测；每一行打上 known_date = max(利润公告日, 净资产公告日)，回测时按 known_date
+    做 as-of 对齐，同一份数据不会被回测用到公告之前的交易日上。
+    """
+    from ..duckdb_utils import connect_duckdb
+
+    a_symbols = [symbol for symbol in symbols if _is_a_share_symbol(symbol)]
+    if not a_symbols:
+        return pl.DataFrame()
+    lookback_start = start_date - timedelta(days=760)
+    connection = connect_duckdb(prefer_read_only=True)
+    try:
+        symbol_sql = ", ".join("'" + symbol.replace("'", "''") + "'" for symbol in a_symbols)
+        profit_query = f"""
+            SELECT ts_code AS symbol, end_date, ann_date, profit_dedt
+            FROM (
+                SELECT ts_code, end_date, ann_date, profit_dedt,
+                       ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn
+                FROM a_stock_fina_indicator
+                WHERE ts_code IN ({symbol_sql}) AND end_date BETWEEN ? AND ? AND profit_dedt IS NOT NULL
+            ) WHERE rn = 1
+        """
+        equity_query = f"""
+            SELECT ts_code AS symbol, end_date, ann_date, total_hldr_eqy_exc_min_int AS equity
+            FROM (
+                SELECT ts_code, end_date, ann_date, total_hldr_eqy_exc_min_int,
+                       ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn
+                FROM a_stock_balancesheet
+                WHERE ts_code IN ({symbol_sql}) AND end_date BETWEEN ? AND ? AND report_type = '1'
+                  AND total_hldr_eqy_exc_min_int IS NOT NULL
+            ) WHERE rn = 1
+        """
+        profit_df = pl.read_database(profit_query, connection, execute_options={"parameters": [lookback_start, end_date]})
+        equity_df = pl.read_database(equity_query, connection, execute_options={"parameters": [lookback_start, end_date]})
+    finally:
+        connection.close()
+
+    if profit_df.is_empty() or equity_df.is_empty():
+        return pl.DataFrame()
+
+    profit_df = profit_df.with_columns(
+        pl.col("end_date").cast(pl.Date),
+        pl.col("ann_date").cast(pl.Date),
+        pl.col("profit_dedt").cast(pl.Float64),
+    ).with_columns(
+        pl.col("end_date").dt.year().alias("_year"),
+        pl.col("end_date").dt.month().alias("_month"),
+        pl.col("end_date").dt.day().alias("_day"),
+    )
+    equity_df = equity_df.with_columns(
+        pl.col("end_date").cast(pl.Date),
+        pl.col("ann_date").cast(pl.Date),
+        pl.col("equity").cast(pl.Float64),
+    )
+
+    lookup = profit_df.select(
+        pl.col("symbol"),
+        pl.col("end_date").alias("_lk_end_date"),
+        pl.col("profit_dedt").alias("_lk_profit"),
+    )
+    prior_same = (
+        profit_df.select(
+            pl.col("symbol"),
+            pl.col("end_date"),
+            pl.date(pl.col("_year") - 1, pl.col("_month"), pl.col("_day")).alias("_lk_end_date"),
+        )
+        .join(lookup, on=["symbol", "_lk_end_date"], how="left")
+        .select(["symbol", "end_date", pl.col("_lk_profit").alias("_prior_same_profit")])
+    )
+    prior_annual = (
+        profit_df.select(
+            pl.col("symbol"),
+            pl.col("end_date"),
+            pl.date(pl.col("_year") - 1, 12, 31).alias("_lk_end_date"),
+        )
+        .join(lookup, on=["symbol", "_lk_end_date"], how="left")
+        .select(["symbol", "end_date", pl.col("_lk_profit").alias("_prior_annual_profit")])
+    )
+    profit_df = (
+        profit_df.join(prior_same, on=["symbol", "end_date"], how="left")
+        .join(prior_annual, on=["symbol", "end_date"], how="left")
+        .with_columns(
+            pl.when(pl.col("_month") == 12)
+            .then(pl.col("profit_dedt"))
+            .otherwise(
+                pl.when(pl.col("_prior_annual_profit").is_not_null() & pl.col("_prior_same_profit").is_not_null())
+                .then(pl.col("profit_dedt") + pl.col("_prior_annual_profit") - pl.col("_prior_same_profit"))
+                .otherwise(None)
+            )
+            .alias("_profit_ttm")
+        )
+    )
+
+    merged = (
+        profit_df.select(["symbol", "end_date", "ann_date", "_profit_ttm"])
+        .join(
+            equity_df.select(["symbol", "end_date", pl.col("ann_date").alias("_equity_ann_date"), "equity"]),
+            on=["symbol", "end_date"],
+            how="inner",
+        )
+        .filter(pl.col("_profit_ttm").is_not_null() & pl.col("equity").is_not_null() & (pl.col("equity") > 0))
+    )
+    if merged.is_empty():
+        return pl.DataFrame()
+    return (
+        merged.with_columns(
+            pl.max_horizontal(["ann_date", "_equity_ann_date"]).alias("known_date"),
+            (pl.col("_profit_ttm") / pl.col("equity") * 100).alias("roe_ttm_pct"),
+        )
+        .select(["symbol", "known_date", "roe_ttm_pct"])
+        .sort(["symbol", "known_date"])
+    )
+
+
+_load_a_stock_quality_frame = load_a_stock_quality_frame
+
+
+def _compute_ps_ttm(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    metrics_df = load_a_stock_valuation_metrics_frame(
+        context.symbols, context.start_date - timedelta(days=10), context.end_date
+    )
+    if metrics_df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    return (
+        df.sort(["symbol", "trade_date"])
+        .join_asof(metrics_df.select(["symbol", "trade_date", "ps_ttm"]), on="trade_date", by="symbol", strategy="backward")
+        .with_columns(
+            pl.when(pl.col("ps_ttm").is_not_null() & (pl.col("ps_ttm") > 0))
+            .then(pl.col("ps_ttm"))
+            .otherwise(None)
+            .alias("factor_value")
+        )
+    )
+
+
+def _compute_roe_pb(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
+    if df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    quality_df = load_a_stock_quality_frame(context.symbols, context.start_date, context.end_date)
+    if quality_df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    metrics_df = load_a_stock_valuation_metrics_frame(
+        context.symbols, context.start_date - timedelta(days=10), context.end_date
+    )
+    if metrics_df.is_empty():
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
+    joined = (
+        df.sort(["symbol", "trade_date"])
+        .join_asof(quality_df, left_on="trade_date", right_on="known_date", by="symbol", strategy="backward")
+        .join_asof(
+            metrics_df.select(["symbol", "trade_date", "pb"]),
+            on="trade_date",
+            by="symbol",
+            strategy="backward",
+        )
+    )
+    return joined.with_columns(
+        pl.when(pl.col("roe_ttm_pct").is_not_null() & pl.col("pb").is_not_null() & (pl.col("pb") > 0))
+        .then(pl.col("roe_ttm_pct") / pl.col("pb"))
+        .otherwise(None)
+        .alias("factor_value")
+    )
+
+
 def _compute_index_weight(df: pl.DataFrame, context: FactorContext) -> pl.DataFrame:
     if df.is_empty():
         return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("factor_value"))
@@ -1572,6 +1793,28 @@ FACTOR_REGISTRY: Dict[str, FactorDefinition] = {
         supports_mixed_windows=False,
         direction="higher_is_better",
         compute=_compute_valuation_gap,
+    ),
+    "ps_ttm": FactorDefinition(
+        key="ps_ttm",
+        label="基本面：市销率(PS-TTM)",
+        group="基本面",
+        description="A股逐日市销率(TTM营收口径，来自tushare日线基本面)，数值越低视为越便宜。仅覆盖A股股票池，美股/自定义美股池无数据。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="lower_is_better",
+        compute=_compute_ps_ttm,
+    ),
+    "roe_pb": FactorDefinition(
+        key="roe_pb",
+        label="基本面：扣非ROE(TTM)/PB",
+        group="基本面",
+        description="扣非归母净利润TTM / 期末归母净资产，按财报公告日(ann_date)对齐避免未来函数，再除以当日PB。仅覆盖A股股票池，美股/自定义美股池无数据。",
+        default_windows=[20],
+        supports_windows=False,
+        supports_mixed_windows=False,
+        direction="higher_is_better",
+        compute=_compute_roe_pb,
     ),
     "index_weight": FactorDefinition(
         key="index_weight",
