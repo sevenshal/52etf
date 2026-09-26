@@ -1,4 +1,4 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useLayoutEffect, useRef } from 'react';
 import { Layout, Tabs, Spin } from 'antd';
 import {
   DollarOutlined,
@@ -100,7 +100,14 @@ const getActiveTabKey = (pathname, state) => {
 const AppLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const scrollRef = useRef(null);
   const { accountId, isAdmin, canViewAiStock, canViewMarket } = useAccount();
+
+  // 内嵌 K 线会显著拉长市场页面；路由切换后若保留旧页面的滚动位置，新的 Tab 虽已渲染，
+  // 视口却还停在很靠下的位置，看起来像点击无效。
+  useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }, [location.pathname]);
 
   const renderTabLabel = (icon, text) => (
     <span className="app-shell__tab-label">
@@ -184,7 +191,7 @@ const AppLayout = () => {
   return (
     <Layout className="app-shell">
       <Content className="app-shell__content">
-        <div className="app-shell__scroll">
+        <div ref={scrollRef} className="app-shell__scroll">
           <Suspense
             fallback={
               <div
