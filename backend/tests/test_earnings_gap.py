@@ -27,6 +27,34 @@ def test_next_trade_date_and_listed_days():
     assert eg.listed_trade_days(calendar, date(2020, 1, 1), date(2026, 8, 24)) > 120
 
 
+def test_normalize_config_optional_growth_ranges():
+    config = eg.normalize_config(None)
+    assert config["min_profit_qoq"] is None
+    assert config["max_profit_qoq"] is None
+    assert config["min_revenue_yoy"] is None
+    assert config["max_revenue_yoy"] is None
+    assert config["min_revenue_qoq"] is None
+    assert config["max_revenue_qoq"] is None
+
+    configured = eg.normalize_config({
+        "min_profit_qoq": "10",
+        "max_profit_qoq": 30,
+        "min_revenue_yoy": -5,
+        "max_revenue_yoy": 50,
+        "min_revenue_qoq": "",
+        "max_revenue_qoq": None,
+    })
+    assert configured["min_profit_qoq"] == 10.0
+    assert configured["max_profit_qoq"] == 30.0
+    assert configured["min_revenue_yoy"] == -5.0
+    assert configured["max_revenue_yoy"] == 50.0
+    assert configured["min_revenue_qoq"] is None
+    assert configured["max_revenue_qoq"] is None
+
+    with pytest.raises(ValueError, match="净利环比下限不能大于上限"):
+        eg.normalize_config({"min_profit_qoq": 31, "max_profit_qoq": 30})
+
+
 def test_evaluate_t1_bar():
     config = eg.normalize_config(None)
     base = {"open": 10.3, "close": 10.6, "low": 10.25, "pre_close": 10.0, "amount_yuan": 5e7}
@@ -219,6 +247,46 @@ def test_compute_earnings_gap_end_to_end():
     assert payload["stats"]["growth_passed"] == 3
     assert payload["trade_date"] == "2026-09-18"
     assert payload["warnings"] == []
+
+
+def test_compute_earnings_gap_filters_optional_growth_ranges():
+    calendar = _calendar(date(2024, 1, 1), date(2026, 9, 18))
+    t1 = date(2026, 8, 24)
+    old = date(2018, 1, 2)
+    metrics = {
+        "000001.SZ": (30.0, 20.0, 10.0),  # 全部达标
+        "000002.SZ": (30.0, 5.0, 10.0),   # 净利环比不足
+        "000003.SZ": (80.0, 20.0, 10.0),  # 营收同比超过上限
+        "000004.SZ": (30.0, 20.0, -5.0),  # 营收环比不足
+        "000005.SZ": (None, None, None),   # 已启用指标缺失
+    }
+    reports = [
+        (code, date(2026, 6, 30), date(2026, 8, 21), 60.0, None, or_yoy, np_qoq, or_qoq)
+        for code, (or_yoy, np_qoq, or_qoq) in metrics.items()
+    ]
+    basic = [(code, code, "测试", old) for code in metrics]
+    bars = [(code, t1, 10.3, 10.8, 10.25, 10.6, 10.0, 80000.0) for code in metrics]
+    connection = _build_db(bars, reports, basic, calendar=calendar)
+
+    payload = eg.compute_earnings_gap(
+        now=datetime(2026, 9, 18, 18, 25),
+        service=FakeTushare(limits={t1: {}}),
+        connection=connection,
+        config={
+            "min_profit_qoq": 10,
+            "max_profit_qoq": 30,
+            "min_revenue_yoy": 20,
+            "max_revenue_yoy": 50,
+            "min_revenue_qoq": 0,
+            "max_revenue_qoq": 20,
+        },
+    )
+
+    assert [item["symbol"] for item in payload["items"]] == ["000001.SZ"]
+    assert payload["stats"]["events"] == 5
+    assert payload["stats"]["growth_passed"] == 1
+    assert payload["criteria"]["min_profit_qoq"] == 10.0
+    assert payload["criteria"]["max_revenue_qoq"] == 20.0
 
 
 def test_announcement_on_latest_synced_day_is_pending():

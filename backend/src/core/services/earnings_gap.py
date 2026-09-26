@@ -41,9 +41,9 @@ from .duckdb_analytics import connect_analytics_db, safe_float
 logger = logging.getLogger(__name__)
 
 SIGNAL_KEY = "earnings_gap"
-# 快照结构版本：新增/改动 items 里的字段时 +1，旧版本快照会被自动重算，
-# 否则页面会一直显示上一版代码算出来的老快照（新列全是空）
-PAYLOAD_VERSION = 5
+# 快照结构版本：新增/改动 items 或 criteria 字段时 +1，旧版本快照会被自动重算，
+# 否则页面会一直显示上一版代码算出来的老快照（新列或新条件全是空）
+PAYLOAD_VERSION = 6
 
 SOURCE_REPORT = "report"
 SOURCE_EXPRESS = "express"
@@ -56,6 +56,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "sources": [SOURCE_REPORT, SOURCE_EXPRESS, SOURCE_FORECAST],
     "min_profit_yoy": 30.0,
     "max_profit_yoy": 3000.0,
+    "min_profit_qoq": None,
+    "max_profit_qoq": None,
+    "min_revenue_yoy": None,
+    "max_revenue_yoy": None,
+    "min_revenue_qoq": None,
+    "max_revenue_qoq": None,
     "min_gap_pct": 2.0,
     "min_amount_yuan": 3e7,
     "min_listed_trade_days": 120,
@@ -68,6 +74,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 CONFIG_NUMERIC_BOUNDS = {
     "min_profit_yoy": (-1000.0, 10000.0),
     "max_profit_yoy": (0.0, 1e6),
+    "min_profit_qoq": (-1e6, 1e6),
+    "max_profit_qoq": (-1e6, 1e6),
+    "min_revenue_yoy": (-1e6, 1e6),
+    "max_revenue_yoy": (-1e6, 1e6),
+    "min_revenue_qoq": (-1e6, 1e6),
+    "max_revenue_qoq": (-1e6, 1e6),
     "min_gap_pct": (0.0, 100.0),
     "min_amount_yuan": (0.0, 1e12),
     "min_listed_trade_days": (0, 5000),
@@ -76,6 +88,20 @@ CONFIG_NUMERIC_BOUNDS = {
 }
 CONFIG_BOOL_KEYS = ("require_bullish_close", "require_unsealed", "require_true_gap")
 INTEGER_CONFIG_KEYS = ("min_listed_trade_days", "amount_ratio_days")
+OPTIONAL_NUMERIC_CONFIG_KEYS = (
+    "min_profit_qoq",
+    "max_profit_qoq",
+    "min_revenue_yoy",
+    "max_revenue_yoy",
+    "min_revenue_qoq",
+    "max_revenue_qoq",
+)
+GROWTH_FILTERS = (
+    ("np_yoy", "min_profit_yoy", "max_profit_yoy", "净利同比"),
+    ("np_qoq", "min_profit_qoq", "max_profit_qoq", "净利环比"),
+    ("or_yoy", "min_revenue_yoy", "max_revenue_yoy", "营收同比"),
+    ("or_qoq", "min_revenue_qoq", "max_revenue_qoq", "营收环比"),
+)
 
 # 只在这段时间内找"最近一次业绩公告"，更早的说明公司已长期未披露，不再参与
 REPORT_LOOKBACK_DAYS = 420
@@ -111,6 +137,9 @@ def normalize_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         elif key in CONFIG_BOOL_KEYS:
             config[key] = bool(value)
         else:
+            if key in OPTIONAL_NUMERIC_CONFIG_KEYS and (value is None or value == ""):
+                config[key] = None
+                continue
             try:
                 number = float(value)
             except (TypeError, ValueError):
@@ -119,9 +148,23 @@ def normalize_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             if not low <= number <= high:
                 raise ValueError(f"{key} 必须在 {low} ~ {high} 之间")
             config[key] = int(number) if key in INTEGER_CONFIG_KEYS else number
-    if config["min_profit_yoy"] > config["max_profit_yoy"]:
-        raise ValueError("净利同比下限不能大于上限")
+    for _, min_key, max_key, label in GROWTH_FILTERS:
+        lower, upper = config[min_key], config[max_key]
+        if lower is not None and upper is not None and lower > upper:
+            raise ValueError(f"{label}下限不能大于上限")
     return config
+
+
+def growth_filter_mask(data: pd.DataFrame, config: Dict[str, Any]) -> pd.Series:
+    """按已启用的业绩增速上下限筛选；启用某指标后，缺失该指标的事件不视为达标。"""
+    mask = pd.Series(True, index=data.index, dtype=bool)
+    for column, min_key, max_key, _ in GROWTH_FILTERS:
+        lower, upper = config[min_key], config[max_key]
+        if lower is not None:
+            mask &= data[column].notna() & (data[column] >= float(lower))
+        if upper is not None:
+            mask &= data[column].notna() & (data[column] <= float(upper))
+    return mask
 
 
 def load_config() -> Dict[str, Any]:
@@ -706,10 +749,7 @@ def compute_earnings_gap(
             f"events_{source}": int((data["source"] == source).sum()) for source in config["sources"]
         })
 
-        data = data[
-            (data["np_yoy"] >= float(config["min_profit_yoy"]))
-            & (data["np_yoy"] <= float(config["max_profit_yoy"]))
-        ].copy()
+        data = data[growth_filter_mask(data, config)].copy()
         stats["growth_passed"] = int(len(data))
         if data.empty:
             stats.update({"pending": 0, "listed_passed": 0, "signals": 0})

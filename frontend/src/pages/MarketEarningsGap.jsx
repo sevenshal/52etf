@@ -22,6 +22,12 @@ const renderSignedPct = value => <span className={signedClass(value)}>{fmtSigned
 const numberSorter = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
 const stringSorter = key => (a, b) => String(a[key] || '').localeCompare(String(b[key] || ''));
 const fmtNumber = (value, digits = 2) => (isBlank(value) ? '-' : Number(value).toFixed(digits));
+const fmtCriteriaRange = (label, min, max) => {
+  if (isBlank(min) && isBlank(max)) return null;
+  if (isBlank(min)) return `${label} ≤ ${max}%`;
+  if (isBlank(max)) return `${label} ≥ ${min}%`;
+  return `${label} ${min}%～${max}%`;
+};
 
 const SOURCE_COLORS = { report: 'blue', express: 'purple', forecast: 'orange' };
 const GAP_FILTER_OPTIONS = [
@@ -112,7 +118,7 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
   return (
     <Drawer
       title="净利润断层参数"
-      width={420}
+      width={480}
       open={open}
       onClose={onClose}
       extra={(
@@ -143,6 +149,42 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
           <Col span={12}>
             <Form.Item name="max_profit_yoy" label="净利同比上限 %">
               <InputNumber className="earnings-gap-full" step={100} />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item name="min_profit_qoq" label="净利环比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="max_profit_qoq" label="净利环比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item name="min_revenue_yoy" label="营收同比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的预告">
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="max_revenue_yoy" label="营收同比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的预告">
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item name="min_revenue_qoq" label="营收环比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="max_revenue_qoq" label="营收环比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+              <InputNumber className="earnings-gap-full" step={5} />
             </Form.Item>
           </Col>
         </Row>
@@ -386,6 +428,11 @@ const MarketEarningsGap = () => {
   ], [data?.trade_date, data?.source_labels]);
 
   const criteria = data?.criteria;
+  const extraGrowthCriteria = criteria ? [
+    fmtCriteriaRange('净利环比', criteria.min_profit_qoq, criteria.max_profit_qoq),
+    fmtCriteriaRange('营收同比', criteria.min_revenue_yoy, criteria.max_revenue_yoy),
+    fmtCriteriaRange('营收环比', criteria.min_revenue_qoq, criteria.max_revenue_qoq),
+  ].filter(Boolean) : [];
 
   return (
     <div className="market-volume earnings-gap">
@@ -438,6 +485,7 @@ const MarketEarningsGap = () => {
           条件（可在「参数」里改）：事件源 {(criteria.sources || []).map(key => data?.source_labels?.[key] || key).join('/')}；
           全A上市满 {criteria.min_listed_trade_days} 个交易日；每只股票最新一个报告期的财报/快报/预告（同一报告期多个都触发时只留最早一条），
           净利同比 {criteria.min_profit_yoy}%～{criteria.max_profit_yoy}%（上限剔除基数效应，预告取变动下限）；
+          {extraGrowthCriteria.length > 0 ? `${extraGrowthCriteria.join('；')}；` : ''}
           公告后首个交易日 T+1 跳空高开 ≥ {criteria.min_gap_pct}%
           {criteria.require_bullish_close ? '、收盘 > 开盘' : ''}
           {criteria.require_unsealed ? '、收盘未封涨停' : ''}

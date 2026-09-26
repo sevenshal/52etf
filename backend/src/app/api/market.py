@@ -156,6 +156,12 @@ class EarningsGapConfigPayload(BaseModel):
     sources: Optional[List[str]] = None
     min_profit_yoy: Optional[float] = None
     max_profit_yoy: Optional[float] = None
+    min_profit_qoq: Optional[float] = None
+    max_profit_qoq: Optional[float] = None
+    min_revenue_yoy: Optional[float] = None
+    max_revenue_yoy: Optional[float] = None
+    min_revenue_qoq: Optional[float] = None
+    max_revenue_qoq: Optional[float] = None
     min_gap_pct: Optional[float] = None
     min_amount_yuan: Optional[float] = None
     min_listed_trade_days: Optional[int] = None
