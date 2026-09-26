@@ -422,6 +422,9 @@ def test_fetch_alerts_attaches_and_filters_by_industry_labels():
     assert [r["ts_code"] for r in fetch_alerts(today, l1_label="none")["rows"]] == ["600519.SH"]
     # 二级观望
     assert [r["ts_code"] for r in fetch_alerts(today, l2_label=LABEL_WATCH)["rows"]] == ["000001.SZ"]
+    # 多选：同组之间取并集
+    assert {r["ts_code"] for r in fetch_alerts(today, l1_label=f"{LABEL_STRONG},none")["rows"]} == {"000001.SZ", "600519.SH"}
+    assert {r["ts_code"] for r in fetch_alerts(today, label=f"{LABEL_ACTIVE},{LABEL_STRONG}")["rows"]} == {"000001.SZ", "600519.SH"}
 
     with get_db_ctx() as db:
         db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
@@ -622,3 +625,20 @@ def test_write_hits_no_longer_persists_returns():
         assert row.last_price is None and row.cum_pct is None and row.price == 10.0
         db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == day).delete()
         db.delete(row)
+
+def test_stock_label_matches_multi_select_and_upgraded_only():
+    """标签过滤支持多选；带 * 的只要当日升级上来的（change_count>0）。"""
+    from src.core.services.market_alerts import stock_label_matches
+
+    fresh = {"label": LABEL_STRONG, "change_count": 0}
+    upgraded = {"label": LABEL_STRONG, "change_count": 2}
+    active = {"label": LABEL_ACTIVE, "change_count": 0}
+
+    assert stock_label_matches(fresh, "") is True and stock_label_matches(fresh, None) is True
+    assert stock_label_matches(fresh, LABEL_STRONG) is True          # 不带 * 的包含升级上来的
+    assert stock_label_matches(upgraded, LABEL_STRONG) is True
+    assert stock_label_matches(upgraded, "强势*") is True
+    assert stock_label_matches(fresh, "强势*") is False               # 没升级过
+    assert stock_label_matches(active, "强势*") is False
+    assert stock_label_matches(active, "强势*,活跃") is True           # 并集
+    assert stock_label_matches(fresh, ["强势*", LABEL_ACTIVE]) is False

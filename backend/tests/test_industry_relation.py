@@ -150,6 +150,11 @@ def test_focus_matches_labels_and_boards():
     assert focus_matches(limit_third, "lb") is True and focus_matches(limit_first, "lb") is False
     assert focus_matches(limit_third, "st") is True and focus_matches(watch, "st") is False
     assert focus_matches(watch, "gw") is True
+    # 多选取并集；st_up / by_up 只要当日升级上来的
+    assert focus_matches(watch, "lu,gw") is True and focus_matches(limit_first, "lb,gw") is False
+    assert focus_matches({"label": LABEL_STRONG, "change_count": 1}, "st_up") is True
+    assert focus_matches({"label": LABEL_STRONG, "change_count": 0}, "st_up") is False
+    assert focus_matches({"label": LABEL_ACTIVE, "change_count": 3}, "st_up,by_up") is True
 
 
 def test_load_universe_codes_by_board_index_and_micro():

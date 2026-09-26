@@ -94,15 +94,16 @@ async def get_daily_amount(
 @router.get("/alerts")
 async def get_market_alerts(
     date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    label: Optional[str] = Query(None, max_length=8),
+    label: Optional[str] = Query(None, max_length=64),
     level: str = Query("l1", pattern="^(l1|l2|l3)$"),
-    l1_label: Optional[str] = Query(None, max_length=8),
-    l2_label: Optional[str] = Query(None, max_length=8),
+    l1_label: Optional[str] = Query(None, max_length=64),
+    l2_label: Optional[str] = Query(None, max_length=64),
     account_id: str = Depends(valid_market_viewer),
 ):
     """提示看板：某交易日的命中记录与命中后表现统计；行业分布按申万 level 级分组（默认一级）。
 
     l1_label / l2_label 按个股所属申万一级/二级行业的当日标签过滤（none=该行业无信号）。
+    三个过滤参数都可以传逗号分隔的多个值，同一组内取并集；个股还支持「强势*」「活跃*」= 当日升级上来的。
     """
     from datetime import date as date_cls
     trade_date = date_cls.fromisoformat(date) if date else None
@@ -118,15 +119,15 @@ async def trigger_alert_scan(account_id: str = Depends(valid_admin_account)):
 @router.get("/industry-relation")
 async def get_industry_relation(
     universe: str = Query("all", max_length=16),
-    focus: str = Query("", max_length=4),
-    l1_label: str = Query("", max_length=8),
-    l2_label: str = Query("", max_length=8),
+    focus: str = Query("", max_length=64),
+    l1_label: str = Query("", max_length=64),
+    l2_label: str = Query("", max_length=64),
     account_id: str = Depends(valid_market_viewer),
 ):
     """行业关联：申万一/二/三级行业的盘中聚合与成分股明细。
 
     focus 按个股自身标签/涨停状态过滤；l1_label / l2_label 按所属申万一级/二级行业的当日标签过滤
-    （none=该行业无信号），三者可以组合。
+    （none=该行业无信号），三者可以组合。三个参数都支持逗号分隔的多选，同一组内取并集。
     """
     try:
         return await run_in_threadpool(fetch_industry_relation, universe, focus, l1_label, l2_label)
