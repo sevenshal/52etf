@@ -185,7 +185,14 @@ const MarketAlerts = () => {
   );
 
   const columns = useMemo(() => [
-    { title: '命中时间', dataIndex: 'hit_time', width: 86, sorter: (a, b) => (a.hit_time || '').localeCompare(b.hit_time || '') },
+    {
+      // 时刻与命中价、命中后涨幅同一口径：当前标签生效的那一刻（升级过的就是升级时刻）
+      title: <Tooltip title="当前标签生效的时刻；当日升级过的取升级时刻">标签时刻</Tooltip>,
+      dataIndex: 'label_time',
+      width: 90,
+      render: (value, record) => value || record.hit_time,
+      sorter: (a, b) => (a.label_time || a.hit_time || '').localeCompare(b.label_time || b.hit_time || ''),
+    },
     {
       title: '名称',
       dataIndex: 'name',
@@ -261,7 +268,12 @@ const MarketAlerts = () => {
       align: 'right',
       render: (_, record) => (record.td_up ? `高${record.td_up}` : record.td_down ? `低${record.td_down}` : '-'),
     },
-    { title: '命中价', dataIndex: 'price', width: 84, align: 'right' },
+    {
+      title: <Tooltip title="当前标签生效那一刻的价格">标签价</Tooltip>,
+      dataIndex: 'price',
+      width: 84,
+      align: 'right',
+    },
     {
       title: <Tooltip title="全市场快照的最新价（盘后/休市为最近交易日收盘），30 秒刷新">最新价</Tooltip>,
       dataIndex: 'last_price',
@@ -272,7 +284,7 @@ const MarketAlerts = () => {
       )),
     },
     {
-      title: <Tooltip title="命中价 → 最新价；命中日与最新价不在同一天时按复权因子换算，送转分红不会被算成涨跌">命中后涨幅</Tooltip>,
+      title: <Tooltip title="标签价 → 最新价；命中日与最新价不在同一天时按复权因子换算，送转分红不会被算成涨跌">标签后涨幅</Tooltip>,
       dataIndex: 'cum_pct',
       width: 106,
       align: 'right',
@@ -303,7 +315,8 @@ const MarketAlerts = () => {
         </Space>
         <Text type="secondary">
           三组过滤都可多选，同组之间取并集，全不选=不限 · 当日标签只往更强的方向覆盖
-          （强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过，「强势*」「活跃*」只看升级上来的）· 命中价以首次命中为准
+          （强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过，「强势*」「活跃*」只看升级上来的）
+          · 标签价与表现都按当前标签生效的那一刻算
         </Text>
       </div>
 
@@ -320,7 +333,7 @@ const MarketAlerts = () => {
                 {LABEL_ORDER.map(name => items.filter(item => item.label === name).map(item => (
                   <Tooltip
                     key={item.ts_code}
-                    title={`${item.name} · ${fmtPct(item.pct)} · 首次 ${item.hit_time}${item.change_count ? ` · 变化 ${item.change_count} 次` : ''}`}
+                    title={`${item.name} · ${fmtPct(item.pct)} · 首次 ${item.hit_time}${item.change_count ? ` · 变化 ${item.change_count} 次，最近 ${item.last_change_time}` : ''}`}
                   >
                     <Tag color={LABEL_META[name]?.color}>{item.name}</Tag>
                   </Tooltip>
@@ -376,7 +389,7 @@ const MarketAlerts = () => {
                 </Card>
               </Col>
               <Col xs={24} xl={8}>
-                <Card size="small" title="按命中时段的平均涨幅" extra={<Text type="secondary">看什么时候的提示值得跟</Text>}>
+                <Card size="small" title="按标签时段的平均涨幅" extra={<Text type="secondary">看什么时候的提示值得跟</Text>}>
                   {timeOption ? <ReactECharts option={timeOption} style={{ height: 240 }} notMerge lazyUpdate /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
                 </Card>
               </Col>
@@ -416,13 +429,15 @@ const MarketAlerts = () => {
               <StockInlinePanel
                 stock={klineStock}
                 onClose={() => setKlineStock(null)}
-                highlightTime={klineStock.hit_time}
+                highlightTime={klineStock.label_time || klineStock.hit_time}
                 className="market-alerts__kline"
                 extraMeta={(
                   <>
                     <Tag color={LABEL_META[klineStock.label]?.color}>{klineStock.label}</Tag>
                     <Text type="secondary">
-                      命中 {klineStock.hit_time} · {fmtPct(klineStock.pct)} · 命中后 {fmtPct(klineStock.cum_pct)}
+                      {klineStock.label_time || klineStock.hit_time}
+                      {klineStock.change_count ? `（首次命中 ${klineStock.hit_time}）` : ''}
+                      {' · '}{fmtPct(klineStock.pct)} · 标签后 {fmtPct(klineStock.cum_pct)}
                     </Text>
                   </>
                 )}

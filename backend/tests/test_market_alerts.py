@@ -357,7 +357,7 @@ def _hit(code, label, *, price=10.0, pct=1.0, entity="stock", name="平安银行
 
 
 def test_write_hits_overwrites_latest_label_and_logs_every_change():
-    """标签盘中变化要覆盖成最新，但每次变化都在流水里留一条；命中价始终是首次命中的。"""
+    """标签盘中变化要覆盖成最新，每次变化在流水里留一条；价格快照跟着当前标签走。"""
     from datetime import date as date_cls
 
     from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
@@ -379,7 +379,7 @@ def test_write_hits_overwrites_latest_label_and_logs_every_change():
         assert row.label == LABEL_ACTIVE                        # 最新标签
         assert row.hit_time == "09:40"                          # 首次命中时刻不变
         assert row.last_change_time == "10:05" and row.change_count == 1
-        assert row.price == 10.0                                # 命中价以首次为准，事后打分不漂移
+        assert row.price == 10.5                                # 价格换成升级那一刻的，与最终标签同一时点
         events = db.query(MarketAlertEvent).filter_by(trade_date=today, ts_code="000001.SZ") \
             .order_by(MarketAlertEvent.id).all()
         assert [(e.event_time, e.prev_label, e.label) for e in events] == [
@@ -642,3 +642,44 @@ def test_stock_label_matches_multi_select_and_upgraded_only():
     assert stock_label_matches(active, "强势*") is False
     assert stock_label_matches(active, "强势*,活跃") is True           # 并集
     assert stock_label_matches(fresh, ["强势*", LABEL_ACTIVE]) is False
+
+
+def test_fetch_alerts_uses_current_label_moment_for_price_and_stats():
+    """升级过的记录：命中后涨幅与时段统计按当前标签生效那一刻算，老数据用流水表修正。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+    from src.core.services import market_alerts as module
+    from src.core.services.market_alerts import AlertScanner, fetch_alerts
+
+    today = date_cls(2000, 1, 6)
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
+
+    scanner = AlertScanner()
+    scanner._write_hits(today, "09:40", [_hit("000001.SZ", LABEL_WATCH, price=10.0, pct=-1.0)])
+    scanner._write_hits(today, "14:20", [_hit("000001.SZ", LABEL_ACTIVE, price=11.0, pct=9.0)])
+    # 模拟本次改动之前的历史行：升级了但价格还停在首次命中
+    with get_db_ctx() as db:
+        row = db.query(MarketAlertHit).filter_by(trade_date=today, ts_code="000001.SZ").one()
+        row.price, row.pct = 10.0, -1.0
+
+    module.latest_price_map = lambda: {"000001.SZ": (12.1, today)}
+    try:
+        result = fetch_alerts(today)
+    finally:
+        module.latest_price_map = lambda: {}
+
+    row = result["rows"][0]
+    assert row["label_time"] == "14:20" and row["hit_time"] == "09:40"
+    assert row["price"] == 11.0                      # 用流水表里当前标签那一条修正
+    assert row["cum_pct"] == 10.0                    # 12.1 / 11.0 - 1，不是从 10.0 算
+    # 时段按标签时刻归档：落在下午，不是上午
+    buckets = {item["label"]: item["count"] for item in result["summary"]["time_buckets"]}
+    assert sum(count for name, count in buckets.items() if name.startswith("09")) == 0
+    assert sum(buckets.values()) == 1
+
+    with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == today).delete()
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).delete()
