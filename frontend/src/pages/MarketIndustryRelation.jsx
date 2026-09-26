@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Card, Checkbox, Col, Empty, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
@@ -14,12 +14,15 @@ const LABEL_COLORS = { 强势: 'red', 活跃: 'volcano', 观望: 'green', 规避
 const LABEL_CLASS = { 强势: 'strong', 活跃: 'active', 观望: 'watch', 规避: 'avoid' };
 const LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
-// 行业自身信号过滤：全部 / 四档标签 / 无信号
+// 三组过滤都是多选，全不选 = 不限
+// 行业自身信号：四档标签 / 无信号
 const INDUSTRY_LABEL_OPTIONS = [
-  { label: '全部', value: '' },
   ...LABEL_ORDER.map(item => ({ label: item, value: item })),
   { label: '无信号', value: 'none' },
 ];
+const DEFAULT_INDUSTRY_LABELS = ['强势', '活跃', '观望', 'none'];
+// 个股焦点：默认只看当日升级上来的强势/活跃（后端 focus_options 里的 st_up / by_up）
+const DEFAULT_FOCUS = ['st_up', 'by_up'];
 
 /** 申万一/二级指数自身的当日信号；三级 tushare 没有行情，不显示 */
 const SignalDot = ({ value, prefix = '' }) => (value ? (
@@ -209,9 +212,9 @@ const MarketIndustryRelation = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [universe, setUniverse] = useState('all');
-  const [focus, setFocus] = useState('');
-  const [l1Label, setL1Label] = useState('');   // 按所属一级行业的当日信号过滤
-  const [l2Label, setL2Label] = useState('');   // 按所属二级行业的当日信号过滤
+  const [focus, setFocus] = useState(DEFAULT_FOCUS);           // 多选，空数组=不限
+  const [l1Label, setL1Label] = useState(DEFAULT_INDUSTRY_LABELS);   // 按所属一级行业的当日信号过滤
+  const [l2Label, setL2Label] = useState(DEFAULT_INDUSTRY_LABELS);   // 按所属二级行业的当日信号过滤
   const [selected, setSelected] = useState({ l1: null, l2: null, l3: null });
   const [history, setHistory] = useState(null);
   const [columnMode, setColumnMode] = useState('full');   // full=完整列 / compact=精简列
@@ -228,7 +231,12 @@ const MarketIndustryRelation = () => {
     if (!silent) setLoading(true);
     try {
       const response = await request.get('/api/market/industry-relation', {
-        params: { universe, focus, l1_label: l1Label, l2_label: l2Label },
+        params: {
+          universe,
+          focus: focus.join(','),
+          l1_label: l1Label.join(','),
+          l2_label: l2Label.join(','),
+        },
       });
       setData(response.data);
       setError('');
@@ -463,20 +471,21 @@ const MarketIndustryRelation = () => {
         </Space>
         <Space wrap size={[8, 6]}>
           <Text type="secondary">个股</Text>
-          <Segmented
-            size="small"
+          <Checkbox.Group
             value={focus}
             onChange={setFocus}
-            options={(data?.focus_options || [{ key: '', name: '全部' }]).map(item => ({ label: item.name, value: item.key }))}
+            options={(data?.focus_options || [])
+              .filter(item => item.key)
+              .map(item => ({ label: item.name, value: item.key }))}
           />
         </Space>
         <Space wrap size={[8, 6]}>
           <Text type="secondary">一级信号</Text>
-          <Segmented size="small" value={l1Label} onChange={setL1Label} options={INDUSTRY_LABEL_OPTIONS} />
+          <Checkbox.Group value={l1Label} onChange={setL1Label} options={INDUSTRY_LABEL_OPTIONS} />
         </Space>
         <Space wrap size={[8, 6]}>
           <Text type="secondary">二级信号</Text>
-          <Segmented size="small" value={l2Label} onChange={setL2Label} options={INDUSTRY_LABEL_OPTIONS} />
+          <Checkbox.Group value={l2Label} onChange={setL2Label} options={INDUSTRY_LABEL_OPTIONS} />
         </Space>
       </div>
 
@@ -486,7 +495,10 @@ const MarketIndustryRelation = () => {
             <Text strong>{breadcrumb || '全部行业'}</Text>
             {breadcrumb && <Text type="secondary">（再点同一行取消）</Text>}
             <Text type="secondary">
-              {data.universe_name}{data.focus ? ` · ${(data.focus_options || []).find(item => item.key === data.focus)?.name}` : ''}
+              {data.universe_name}
+              {data.focus ? ` · ${data.focus.split(',')
+                .map(key => (data.focus_options || []).find(item => item.key === key)?.name || key)
+                .join('/')}` : ''}
               {' · '}样本 {data.picked} 只 · 成分&lt;{data.min_rank_count} 不参与排名 · {data.fetched_at}
             </Text>
           </Space>

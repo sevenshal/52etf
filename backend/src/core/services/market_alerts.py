@@ -1033,26 +1033,56 @@ def sw_label_maps(rows: List[MarketAlertHit]) -> Tuple[Dict[str, str], Dict[str,
     return l1, l2
 
 
-def industry_label_matches(actual: Optional[str], wanted: Optional[str]) -> bool:
-    """行业标签过滤：空=不限；none=该行业当日无信号；其余按标签精确匹配。"""
-    if not wanted:
+UPGRADED_SUFFIX = "*"      # 「强势*」「活跃*」：当日由更弱的标签升级上来的那部分
+
+
+def parse_label_filter(value: Any) -> List[str]:
+    """过滤参数统一成列表：接受逗号分隔字符串或列表，空值表示不限。"""
+    if value is None or value == "":
+        return []
+    items = value if isinstance(value, (list, tuple, set)) else str(value).split(",")
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def stock_label_matches(item: Dict[str, Any], wanted: Any) -> bool:
+    """个股标签过滤：空=不限；多个取并集；带 * 的只要当日升级过的那部分。
+
+    「强势」包含升级上来的，「强势*」只要升级上来的（change_count>0）。
+    """
+    options = parse_label_filter(wanted)
+    if not options:
         return True
-    if wanted == "none":
-        return not actual
-    return actual == wanted
+    label = item.get("label")
+    upgraded = bool(item.get("change_count"))
+    for option in options:
+        if option.endswith(UPGRADED_SUFFIX):
+            if label == option[:-1] and upgraded:
+                return True
+        elif label == option:
+            return True
+    return False
+
+
+def industry_label_matches(actual: Optional[str], wanted: Any) -> bool:
+    """行业标签过滤：空=不限；多个取并集；none=该行业当日无信号；其余按标签精确匹配。"""
+    options = parse_label_filter(wanted)
+    if not options:
+        return True
+    return any((not actual) if option == "none" else actual == option for option in options)
 
 
 def fetch_alerts(
     trade_date: Optional[date] = None,
-    label: Optional[str] = None,
+    label: Any = None,
     level: str = "l1",
-    l1_label: Optional[str] = None,
-    l2_label: Optional[str] = None,
+    l1_label: Any = None,
+    l2_label: Any = None,
 ) -> Dict[str, Any]:
     """读取某个交易日的命中记录与事后统计。
 
     列表只放个股，每只附上所属申万一级/二级行业当日的最新标签（l1_label / l2_label），
     可以与个股标签组合过滤，例如「个股活跃 + 一级强势 + 二级活跃」。
+    三个过滤参数都支持逗号分隔的多选（同一组内取并集），个股还支持「强势*」「活跃*」= 当日升级上来的。
     """
     with get_db_ctx() as db:
         dates = [
@@ -1072,7 +1102,7 @@ def fetch_alerts(
                     continue
                 item["l1_label"] = l1_map.get(item["industry_l1"])
                 item["l2_label"] = l2_map.get(item["industry_l2"])
-                if label and item["label"] != label:
+                if not stock_label_matches(item, label):
                     continue
                 if not industry_label_matches(item["l1_label"], l1_label):
                     continue

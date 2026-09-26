@@ -22,6 +22,7 @@ import pandas as pd
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .market_alerts import (
     STOCK_DAILY_VOL_TO_SHARES,
+    parse_label_filter,
     LABEL_ACTIVE,
     LABEL_AVOID,
     LABEL_STRONG,
@@ -72,6 +73,8 @@ FOCUS_OPTIONS: Tuple[Dict[str, str], ...] = (
     {"key": "lb", "name": "多板"},
     {"key": "st", "name": "强势"},
     {"key": "by", "name": "活跃"},
+    {"key": "st_up", "name": "强势*"},      # 当日由更弱的标签升级上来的强势
+    {"key": "by_up", "name": "活跃*"},
     {"key": "gw", "name": "观望"},
     {"key": "av", "name": "规避"},
     {"key": "ld", "name": "跌停"},
@@ -297,9 +300,19 @@ def load_recent_labels(connection, today: date, days: int = RECENT_LABEL_DAYS) -
     return results
 
 
-def focus_matches(stock: Dict[str, Any], focus: str) -> bool:
-    if not focus:
+FOCUS_LABELS = {"st": LABEL_STRONG, "by": LABEL_ACTIVE, "gw": LABEL_WATCH, "av": LABEL_AVOID}
+FOCUS_UPGRADED = {"st_up": LABEL_STRONG, "by_up": LABEL_ACTIVE}   # 只要当日升级上来的那部分
+
+
+def focus_matches(stock: Dict[str, Any], focus: Any) -> bool:
+    """个股焦点过滤：空=不限；支持逗号分隔多选，同组取并集。"""
+    options = parse_label_filter(focus)
+    if not options:
         return True
+    return any(_focus_match_one(stock, option) for option in options)
+
+
+def _focus_match_one(stock: Dict[str, Any], focus: str) -> bool:
     if focus == "lu":
         return bool(stock.get("limit_up"))
     if focus == "ld":
@@ -310,8 +323,9 @@ def focus_matches(stock: Dict[str, Any], focus: str) -> bool:
         return bool(stock.get("limit_up")) and (stock.get("boards") or 0) == 2
     if focus == "lb":
         return bool(stock.get("limit_up")) and (stock.get("boards") or 0) >= 3
-    label_map = {"st": LABEL_STRONG, "by": LABEL_ACTIVE, "gw": LABEL_WATCH, "av": LABEL_AVOID}
-    return stock.get("label") == label_map.get(focus)
+    if focus in FOCUS_UPGRADED:
+        return stock.get("label") == FOCUS_UPGRADED[focus] and bool(stock.get("change_count"))
+    return stock.get("label") == FOCUS_LABELS.get(focus)
 
 
 def sentiment_score(row: Dict[str, Any]) -> float:
@@ -512,6 +526,7 @@ def _load_relation(
         hit = hits.get(stock["ts_code"])
         stock["hit_time"] = hit["hit_time"] if hit else None
         stock["last_change_time"] = hit["last_change_time"] if hit else None
+        stock["change_count"] = hit["change_count"] if hit else 0
         if hit and hit.get("label"):
             # 命中记录优先：与提示看板保持同一口径
             stock["live_label"] = stock.get("label")
@@ -586,6 +601,7 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
                     "hit_time": str(row.hit_time),
                     "last_change_time": str(row.last_change_time or row.hit_time),
                     "label": str(row.label),
+                    "change_count": row.change_count or 0,   # >0 = 当日升级上来的（强势*/活跃*）
                 }
                 for row in rows
                 if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK

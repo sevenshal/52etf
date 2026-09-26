@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Radio, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Card, Checkbox, Col, Empty, Row, Segmented, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
@@ -20,12 +20,20 @@ const LABEL_META = {
 };
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
-// 行业自身信号的过滤：全部 / 四档标签 / 无信号
+// 三组过滤都是多选，全不选 = 不限
+// 个股：四档标签，外加「强势*」「活跃*」= 当日由更弱的标签升级上来的
+const STOCK_LABEL_OPTIONS = [
+  ...LABEL_ORDER.map(item => ({ label: item, value: item })),
+  { label: '强势*', value: '强势*' },
+  { label: '活跃*', value: '活跃*' },
+];
+// 行业自身信号：四档标签 / 无信号
 const INDUSTRY_LABEL_OPTIONS = [
-  { label: '全部', value: '' },
   ...LABEL_ORDER.map(item => ({ label: item, value: item })),
   { label: '无信号', value: 'none' },
 ];
+const DEFAULT_STOCK_LABELS = ['强势*', '活跃*'];
+const DEFAULT_INDUSTRY_LABELS = ['强势', '活跃', '观望', 'none'];
 
 /** 行业信号小标签：一级/二级申万指数自身的当日最新标签 */
 const IndustrySignal = ({ value }) => (value
@@ -51,11 +59,11 @@ const MarketAlerts = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [tradeDate, setTradeDate] = useState(null);
-  const [label, setLabel] = useState('');
+  const [labels, setLabels] = useState(DEFAULT_STOCK_LABELS);   // 多选，空数组=不限
   const [industry, setIndustry] = useState(null);     // 点击行业柱筛选
   const [industryLevel, setIndustryLevel] = useState('l1'); // 申万级别，默认一级（与行业关联同一口径）
-  const [l1Label, setL1Label] = useState('');   // 按所属申万一级行业的当日标签过滤
-  const [l2Label, setL2Label] = useState('');   // 按所属申万二级行业的当日标签过滤
+  const [l1Labels, setL1Labels] = useState(DEFAULT_INDUSTRY_LABELS);   // 按所属申万一级行业的当日标签过滤
+  const [l2Labels, setL2Labels] = useState(DEFAULT_INDUSTRY_LABELS);   // 按所属申万二级行业的当日标签过滤
   // 分页必须受控：只传 pageSize 常量而不接 onChange 时，antd 会把切换器的改动丢掉（点了没反应）
   const [tablePage, setTablePage] = useState({ current: 1, pageSize: 50 });
   const [klineStock, setKlineStock] = useState(null); // 内嵌K线面板（点名称打开，不弹窗）
@@ -63,16 +71,16 @@ const MarketAlerts = () => {
   // 筛选条件变了回到第 1 页，否则停在第 5 页时切个行业会看到空表
   useEffect(() => {
     setTablePage(prev => ({ ...prev, current: 1 }));
-  }, [industry, label, tradeDate, industryLevel, l1Label, l2Label]);
+  }, [industry, labels, tradeDate, industryLevel, l1Labels, l2Labels]);
 
   const load = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
       const params = {};
       if (tradeDate) params.date = tradeDate;
-      if (label) params.label = label;
-      if (l1Label) params.l1_label = l1Label;
-      if (l2Label) params.l2_label = l2Label;
+      if (labels.length) params.label = labels.join(',');
+      if (l1Labels.length) params.l1_label = l1Labels.join(',');
+      if (l2Labels.length) params.l2_label = l2Labels.join(',');
       params.level = industryLevel;
       const response = await request.get('/api/market/alerts', { params });
       setData(response.data);
@@ -82,7 +90,7 @@ const MarketAlerts = () => {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [tradeDate, label, industryLevel, l1Label, l2Label]);
+  }, [tradeDate, labels, industryLevel, l1Labels, l2Labels]);
 
   useEffect(() => {
     load();
@@ -287,32 +295,15 @@ const MarketAlerts = () => {
             placeholder="最新交易日"
           />
           <Text type="secondary">个股</Text>
-          <Radio.Group
-            size="small"
-            value={label}
-            onChange={event => setLabel(event.target.value)}
-            optionType="button"
-            options={[{ label: '全部', value: '' }, ...LABEL_ORDER.map(item => ({ label: item, value: item }))]}
-          />
+          <Checkbox.Group value={labels} onChange={setLabels} options={STOCK_LABEL_OPTIONS} />
           <Text type="secondary">一级</Text>
-          <Radio.Group
-            size="small"
-            value={l1Label}
-            onChange={event => setL1Label(event.target.value)}
-            optionType="button"
-            options={INDUSTRY_LABEL_OPTIONS}
-          />
+          <Checkbox.Group value={l1Labels} onChange={setL1Labels} options={INDUSTRY_LABEL_OPTIONS} />
           <Text type="secondary">二级</Text>
-          <Radio.Group
-            size="small"
-            value={l2Label}
-            onChange={event => setL2Label(event.target.value)}
-            optionType="button"
-            options={INDUSTRY_LABEL_OPTIONS}
-          />
+          <Checkbox.Group value={l2Labels} onChange={setL2Labels} options={INDUSTRY_LABEL_OPTIONS} />
         </Space>
         <Text type="secondary">
-          当日标签只往更强的方向覆盖（强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过）· 命中价以首次命中为准
+          三组过滤都可多选，同组之间取并集，全不选=不限 · 当日标签只往更强的方向覆盖
+          （强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过，「强势*」「活跃*」只看升级上来的）· 命中价以首次命中为准
         </Text>
       </div>
 
