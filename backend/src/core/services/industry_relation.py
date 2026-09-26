@@ -167,6 +167,56 @@ def load_board_counts(connection, today: date, lookback_days: int = 20) -> Dict[
     return counts
 
 
+def load_latest_daily_limit_states(
+    connection,
+    today: date,
+    lookback_days: int = 20,
+) -> Tuple[Optional[date], Dict[str, Tuple[bool, bool, int]]]:
+    """盘外 stk_limit 不可用时，回退到分析库最近收盘的涨跌停/连板状态。
+
+    ``stk_limit`` 给的是当日精确涨跌停价，盘中优先使用它；非交易日、盘后日线尚未同步或
+    接口暂时返回空时，行情快照本身也是最近收盘口径，此处用同一天的 ``limit_status`` 才不会
+    把行业关联的涨停、跌停和连板信息全部丢掉。
+    """
+    latest_row = connection.execute(
+        "SELECT max(trade_date) FROM a_stock_market_daily WHERE trade_date <= ?",
+        [today],
+    ).fetchone()
+    latest_date = latest_row[0] if latest_row else None
+    if latest_date is None:
+        return None, {}
+
+    frame = connection.execute(
+        """
+        SELECT ts_code, trade_date, limit_status
+        FROM a_stock_market_daily
+        WHERE trade_date >= ? AND trade_date <= ?
+        ORDER BY ts_code, trade_date
+        """,
+        [latest_date - timedelta(days=lookback_days * 2), latest_date],
+    ).fetchdf()
+    if frame.empty:
+        return latest_date, {}
+
+    latest_text = str(latest_date)[:10]
+    states: Dict[str, Tuple[bool, bool, int]] = {}
+    for ts_code, group in frame.groupby("ts_code", sort=False):
+        # 停牌等原因导致最新交易日没有日线的股票不应假装有收盘状态。
+        if str(group["trade_date"].iloc[-1])[:10] != latest_text:
+            continue
+        statuses = [int(value) if pd.notna(value) else None for value in group["limit_status"].tolist()]
+        status = statuses[-1]
+        limit_up = status in LIMIT_UP_STATUS
+        boards = 0
+        if limit_up:
+            for value in reversed(statuses):
+                if value not in LIMIT_UP_STATUS:
+                    break
+                boards += 1
+        states[str(ts_code).strip().upper()] = (limit_up, status in LIMIT_DOWN_STATUS, boards)
+    return latest_date, states
+
+
 def load_universe_codes(connection, universe: str, today: date) -> Optional[set]:
     """市场范围 → 股票代码集合；返回 None 表示全A（不过滤）。"""
     option = UNIVERSE_BY_KEY.get(universe or "all")
@@ -472,6 +522,7 @@ def build_stock_rows(
     limits: Dict[str, Tuple[Optional[float], Optional[float]]],
     boards: Dict[str, int],
     thresholds: AlertThresholds = DEFAULT_THRESHOLDS,
+    fallback_limit_states: Optional[Dict[str, Tuple[bool, bool, int]]] = None,
 ) -> List[Dict[str, Any]]:
     """把快照拼成带行业归属与四档标签的个股行。"""
     member_map = {
@@ -505,7 +556,17 @@ def build_stock_rows(
                 thresholds=thresholds,
             )
         prior_boards = boards.get(ts_code, 0)
-        limit_up = bool(up_limit and price >= up_limit - 1e-4)
+        fallback_state = (fallback_limit_states or {}).get(ts_code)
+        limit_up = (
+            fallback_state[0]
+            if fallback_state is not None
+            else bool(up_limit and price >= up_limit - 1e-4)
+        )
+        limit_down = (
+            fallback_state[1]
+            if fallback_state is not None
+            else bool(down_limit and price <= down_limit + 1e-4)
+        )
         rows.append({
             "ts_code": ts_code,
             "code": ts_code.split(".")[0],
@@ -516,8 +577,11 @@ def build_stock_rows(
             "amount_yi": round((safe_float(getattr(quote, "amount", None)) or 0.0) / 1e8, 2),
             "label": label,
             "limit_up": limit_up,
-            "limit_down": bool(down_limit and price <= down_limit + 1e-4),
-            "boards": prior_boards + 1 if limit_up else prior_boards,
+            "limit_down": limit_down,
+            "boards": (
+                fallback_state[2] if fallback_state is not None and limit_up
+                else (prior_boards + 1 if limit_up else prior_boards)
+            ),
         })
     return rows
 
@@ -541,27 +605,35 @@ def _load_relation(
     hits, l1_labels, l2_labels, label_date = _load_today_hits(today)
     # 休市日时当前标签回退到最近有命中的交易日，历史也要以那天为锚点，避免拿当天标签和自己比较。
     history_as_of = label_date or today
+    baseline = state.get("baseline")
+    limits = state.get("limits") or {}
     connection = connect_analytics_db()
     try:
         members = load_members(connection)
         boards = load_board_counts(connection, today)
         universe_codes = load_universe_codes(connection, universe, today)
         recent_labels = _cached_recent_labels(connection, history_as_of)
+        fallback_limit_date, fallback_limit_states = (
+            load_latest_daily_limit_states(connection, today) if not limits else (None, {})
+        )
     finally:
         connection.close()
 
     warnings: List[str] = []
-    baseline = state.get("baseline")
-    limits = state.get("limits") or {}
     if baseline is None or getattr(baseline, "empty", True):
         warnings.append("盘前数据未就绪，强势/活跃暂不可用")
     if not limits:
-        warnings.append("涨跌停价(stk_limit)未取到，涨停/跌停与连板统计暂不可用")
+        if fallback_limit_states:
+            warnings.append(
+                f"涨跌停价(stk_limit)未取到，涨停/跌停与连板按 {str(fallback_limit_date)[:10]} 收盘状态显示"
+            )
+        else:
+            warnings.append("涨跌停价(stk_limit)未取到，涨停/跌停与连板统计暂不可用")
 
     minute_label = now.strftime("%H:%M")
     stocks = build_stock_rows(
         quotes, members, state.get("structures") or {},
-        baseline_at(baseline, minute_label), limits, boards, thresholds,
+        baseline_at(baseline, minute_label), limits, boards, thresholds, fallback_limit_states,
     )
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")

@@ -83,6 +83,44 @@ def test_build_stock_rows_joins_industry_label_and_boards():
     assert row["pct"] == 10.0
 
 
+def test_build_stock_rows_uses_latest_close_limit_state_when_stk_limit_is_missing():
+    quotes = pd.DataFrame([
+        {"ts_code": "000001.SZ", "close": 11.0, "pre_close": 10.0, "open": 10.2, "vol": 2_000_000, "amount": 1.5e8},
+    ])
+    members = pd.DataFrame([{"ts_code": "000001.SZ", "l1_name": "银行", "l2_name": "国有大型银行", "l3_name": "国有大型银行Ⅲ"}])
+    rows = build_stock_rows(
+        quotes, members, {}, baseline_minute={}, limits={}, boards={"000001.SZ": 2},
+        fallback_limit_states={"000001.SZ": (True, False, 3)},
+    )
+
+    assert rows[0]["limit_up"] is True and rows[0]["limit_down"] is False
+    assert rows[0]["boards"] == 3   # 收盘口径直接给出完整连板数，不能再在旧计数上加一
+
+
+def test_load_latest_daily_limit_states_uses_latest_available_trading_day():
+    import duckdb
+
+    from src.core.services.industry_relation import load_latest_daily_limit_states
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, limit_status INTEGER)")
+    con.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?)", [
+        ("000001.SZ", date(2026, 9, 22), 2),
+        ("000001.SZ", date(2026, 9, 23), 3),
+        ("000001.SZ", date(2026, 9, 24), 2),
+        ("000002.SZ", date(2026, 9, 24), 5),
+        ("000003.SZ", date(2026, 9, 24), None),
+    ])
+
+    latest_date, states = load_latest_daily_limit_states(con, date(2026, 9, 26))
+
+    assert latest_date == date(2026, 9, 24)
+    assert states["000001.SZ"] == (True, False, 3)
+    assert states["000002.SZ"] == (False, True, 0)
+    assert states["000003.SZ"] == (False, False, 0)
+    con.close()
+
+
 def test_small_industries_are_listed_but_not_ranked():
     """只有两三只成分股的小行业不参与排名，否则一只涨停就能顶到榜首。"""
     stocks = [
