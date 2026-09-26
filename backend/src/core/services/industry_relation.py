@@ -264,7 +264,9 @@ def load_recent_labels(
         closes = [safe_float(v) for v in group["close"].tolist()]
         opens = [safe_float(v) for v in group["open"].tolist()]
         vols = [safe_float(v) or 0.0 for v in group["vol"].tolist()]
-        statuses = group["limit_status"].tolist()
+        # DuckDB/Pandas 会把缺失的涨跌停状态表示成 pd.NA；先归一为 None，不能直接做
+        # ``pd.NA in (...)``，否则会因 pd.NA 的布尔值不确定而让整个行业关联接口 500。
+        statuses = [int(value) if pd.notna(value) else None for value in group["limit_status"].tolist()]
         up_runs, down_runs = [], []
         up = down = 0
         for index in range(len(closes)):
@@ -280,7 +282,8 @@ def load_recent_labels(
             up_runs.append(up)
             down_runs.append(down)
 
-        name = str(group["name"].iloc[-1] or "")
+        raw_name = group["name"].iloc[-1]
+        name = "" if pd.isna(raw_name) else str(raw_name)
         history: List[Dict[str, Any]] = []
         for index in range(len(group)):
             row = group.iloc[index]

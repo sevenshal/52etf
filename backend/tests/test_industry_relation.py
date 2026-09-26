@@ -203,7 +203,7 @@ def test_load_recent_labels_returns_last_labeled_days_with_boards(monkeypatch):
         day = date(2026, 8, 1) + timedelta(days=i)
         prev = price
         price = round(price * 1.02, 2)          # 持续上涨 → 九转高计数累积
-        status = 2 if i >= 28 else 1            # 最后两天涨停
+        status = None if i == 26 else (2 if i >= 28 else 1)  # 缺失状态不能让历史标签接口 500
         rows.append(("000001.SZ", day, prev, price, prev, 1_000_000, 200_000, status))
     con.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
     con.execute("CREATE TABLE a_stock_basic (ts_code VARCHAR, name VARCHAR)")

@@ -103,7 +103,8 @@ async def get_market_alerts(
     """提示看板：某交易日的命中记录与命中后表现统计；行业分布按申万 level 级分组（默认一级）。
 
     l1_label / l2_label 按个股所属申万一级/二级行业的当日标签过滤（none=该行业无信号）。
-    三个过滤参数都可以传逗号分隔的多个值，同一组内取并集；个股还支持「强势*」「活跃*」= 当日升级上来的。
+    三个过滤参数都可以传逗号分隔的多个值，同一组内取并集；个股「强势*」「活跃*」表示当前
+    标签强于此前 5 个交易日内最近一次实际标签。
     """
     from datetime import date as date_cls
     trade_date = date_cls.fromisoformat(date) if date else None

@@ -627,12 +627,12 @@ def test_write_hits_no_longer_persists_returns():
         db.delete(row)
 
 def test_stock_label_matches_multi_select_and_upgraded_only():
-    """标签过滤支持多选；带 * 的只要当日升级上来的（change_count>0）。"""
+    """标签过滤支持多选；带 * 的只取强于最近一次标签的部分。"""
     from src.core.services.market_alerts import stock_label_matches
 
-    fresh = {"label": LABEL_STRONG, "change_count": 0}
-    upgraded = {"label": LABEL_STRONG, "change_count": 2}
-    active = {"label": LABEL_ACTIVE, "change_count": 0}
+    fresh = {"label": LABEL_STRONG, "upgraded": False}
+    upgraded = {"label": LABEL_STRONG, "upgraded": True}
+    active = {"label": LABEL_ACTIVE, "upgraded": False}
 
     assert stock_label_matches(fresh, "") is True and stock_label_matches(fresh, None) is True
     assert stock_label_matches(fresh, LABEL_STRONG) is True          # 不带 * 的包含升级上来的
@@ -642,6 +642,37 @@ def test_stock_label_matches_multi_select_and_upgraded_only():
     assert stock_label_matches(active, "强势*") is False
     assert stock_label_matches(active, "强势*,活跃") is True           # 并集
     assert stock_label_matches(fresh, ["强势*", LABEL_ACTIVE]) is False
+
+
+def test_fetch_alerts_compares_star_filters_with_most_recent_prior_label(monkeypatch):
+    """强势*/活跃* 比最近一次实际标签，不再受当天 change_count 影响。"""
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertHit, get_db_ctx
+    from src.core.services import market_alerts as module
+    from src.core.services.market_alerts import fetch_alerts
+
+    previous_day, today = date_cls(2000, 1, 3), date_cls(2000, 1, 4)
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ")
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([previous_day, today])).delete()
+        db.add_all([
+            MarketAlertHit(trade_date=previous_day, ts_code=codes[0], entity_type="stock", hit_time="09:40", label=LABEL_WATCH),
+            MarketAlertHit(trade_date=previous_day, ts_code=codes[1], entity_type="stock", hit_time="09:40", label=LABEL_STRONG),
+            # 第一只当天没有盘中变化，仍应因观望→强势命中；第二只当天有变化但强势→活跃不是升级。
+            MarketAlertHit(trade_date=today, ts_code=codes[0], entity_type="stock", hit_time="09:40", label=LABEL_STRONG, change_count=0),
+            MarketAlertHit(trade_date=today, ts_code=codes[1], entity_type="stock", hit_time="09:40", label=LABEL_ACTIVE, change_count=2),
+            MarketAlertHit(trade_date=today, ts_code=codes[2], entity_type="stock", hit_time="09:40", label=LABEL_ACTIVE, change_count=5),
+        ])
+    monkeypatch.setattr(module, "_recent_trading_dates", lambda target: [previous_day])
+
+    result = fetch_alerts(today, label="强势*,活跃*")
+    assert [row["ts_code"] for row in result["rows"]] == [codes[0]]
+    assert result["rows"][0]["previous_label"] == LABEL_WATCH
+    assert result["rows"][0]["upgraded"] is True
+
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([previous_day, today])).delete()
 
 
 def test_fetch_alerts_uses_current_label_moment_for_price_and_stats():

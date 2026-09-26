@@ -21,7 +21,7 @@ const LABEL_META = {
 const LABEL_ORDER = ['强势', '活跃', '观望', '规避'];
 const INDUSTRY_LEVEL_TITLE = { l1: '一级行业', l2: '二级行业', l3: '细分行业' };
 // 三组过滤都是多选，全不选 = 不限
-// 个股：四档标签，外加「强势*」「活跃*」= 当日由更弱的标签升级上来的
+// 个股：四档标签，外加「强势*」「活跃*」= 强于最近一次标签（最多回看 5 个交易日）
 const STOCK_LABEL_OPTIONS = [
   ...LABEL_ORDER.map(item => ({ label: item, value: item })),
   { label: '强势*', value: '强势*' },
@@ -186,8 +186,8 @@ const MarketAlerts = () => {
 
   const columns = useMemo(() => [
     {
-      // 时刻与命中价、命中后涨幅同一口径：当前标签生效的那一刻（升级过的就是升级时刻）
-      title: <Tooltip title="当前标签生效的时刻；当日升级过的取升级时刻">标签时刻</Tooltip>,
+      // 时刻与命中价、命中后涨幅同一口径：当前标签生效的那一刻（当日变更后取变更时刻）
+      title: <Tooltip title="当前标签生效的时刻；当日标签变更后取变更时刻">标签时刻</Tooltip>,
       dataIndex: 'label_time',
       width: 90,
       render: (value, record) => value || record.hit_time,
@@ -227,11 +227,12 @@ const MarketAlerts = () => {
         <Tooltip title={(
           <span>
             首次命中 {record.hit_time}
-            {record.change_count ? ` · 当日升级 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
+            {record.upgraded ? ` · 相比上次标签（${record.previous_label}）升级` : ''}
+            {record.change_count ? ` · 当日标签变化 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
           </span>
         )}
         >
-          <Tag color={LABEL_META[value]?.color}>{value}{record.change_count ? '*' : ''}</Tag>
+          <Tag color={LABEL_META[value]?.color}>{value}{record.upgraded ? '*' : ''}</Tag>
         </Tooltip>
       ),
       sorter: (a, b) => LABEL_ORDER.indexOf(a.label) - LABEL_ORDER.indexOf(b.label),
@@ -315,7 +316,7 @@ const MarketAlerts = () => {
         </Space>
         <Text type="secondary">
           三组过滤都可多选，同组之间取并集，全不选=不限 · 当日标签只往更强的方向覆盖
-          （强势 &gt; 活跃 &gt; 规避 &gt; 观望，带 * 表示被覆盖过，「强势*」「活跃*」只看升级上来的）
+          （强势 &gt; 活跃 &gt; 规避 &gt; 观望；「强势*」「活跃*」表示强于最近一次标签，最多回看5个交易日）
           · 标签价与表现都按当前标签生效的那一刻算
         </Text>
       </div>

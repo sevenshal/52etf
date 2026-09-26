@@ -1042,7 +1042,8 @@ def sw_label_maps(rows: List[MarketAlertHit]) -> Tuple[Dict[str, str], Dict[str,
     return l1, l2
 
 
-UPGRADED_SUFFIX = "*"      # 「强势*」「活跃*」：当日由更弱的标签升级上来的那部分
+UPGRADED_SUFFIX = "*"      # 「强势*」「活跃*」：强于最近一次标签的那部分
+RECENT_LABEL_LOOKBACK_DAYS = 5
 
 
 def parse_label_filter(value: Any) -> List[str]:
@@ -1054,15 +1055,15 @@ def parse_label_filter(value: Any) -> List[str]:
 
 
 def stock_label_matches(item: Dict[str, Any], wanted: Any) -> bool:
-    """个股标签过滤：空=不限；多个取并集；带 * 的只要当日升级过的那部分。
+    """个股标签过滤：空=不限；多个取并集；带 * 的只取相对最近标签升级的部分。
 
-    「强势」包含升级上来的，「强势*」只要升级上来的（change_count>0）。
+    「强势」包含升级上来的，「强势*」要求当前标签强于此前 5 个交易日内最近一次实际标签。
     """
     options = parse_label_filter(wanted)
     if not options:
         return True
     label = item.get("label")
-    upgraded = bool(item.get("change_count"))
+    upgraded = bool(item.get("upgraded"))
     for option in options:
         if option.endswith(UPGRADED_SUFFIX):
             if label == option[:-1] and upgraded:
@@ -1070,6 +1071,67 @@ def stock_label_matches(item: Dict[str, Any], wanted: Any) -> bool:
         elif label == option:
             return True
     return False
+
+
+def _recent_trading_dates(target: date, days: int = RECENT_LABEL_LOOKBACK_DAYS) -> List[date]:
+    """取目标日前最近 N 个实际交易日；分析库不可用时由调用方用命中日期保底。"""
+    connection = None
+    try:
+        connection = connect_analytics_db()
+        return [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT trade_date
+                FROM a_stock_market_daily
+                WHERE trade_date < ?
+                ORDER BY trade_date DESC
+                LIMIT ?
+                """,
+                [target, days],
+            ).fetchall()
+        ]
+    except Exception as exc:  # noqa: BLE001  标签筛选不可因分析库短暂故障而整体失败
+        logger.warning("读取最近交易日失败，提示看板标签比较将回退到命中日期: %s", exc)
+        return []
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _attach_previous_labels(db, target: date, items: List[Dict[str, Any]]) -> None:
+    """为当前个股补上此前 5 个交易日内最近一次实际标签与升级标志。"""
+    codes = {item["ts_code"] for item in items if item.get("ts_code")}
+    if not codes:
+        return
+    dates = _recent_trading_dates(target)
+    if not dates:
+        # 旧部署可能暂未同步分析库；仍以提示看板已有的交易日尽力维持筛选可用。
+        dates = [
+            row[0] for row in db.query(MarketAlertHit.trade_date)
+            .filter(MarketAlertHit.trade_date < target)
+            .distinct().order_by(MarketAlertHit.trade_date.desc())
+            .limit(RECENT_LABEL_LOOKBACK_DAYS).all()
+        ]
+    if not dates:
+        for item in items:
+            item["previous_label"] = None
+            item["upgraded"] = False
+        return
+
+    previous: Dict[str, str] = {}
+    history = db.query(MarketAlertHit).filter(
+        MarketAlertHit.entity_type == ENTITY_STOCK,
+        MarketAlertHit.ts_code.in_(codes),
+        MarketAlertHit.trade_date.in_(dates),
+    ).order_by(MarketAlertHit.trade_date.desc()).all()
+    for row in history:
+        # 倒序的第一条就是该股票最近一次实际标签；无标签日不会覆盖它。
+        previous.setdefault(row.ts_code, row.label)
+    for item in items:
+        previous_label = previous.get(item["ts_code"])
+        item["previous_label"] = previous_label
+        item["upgraded"] = bool(previous_label) and can_override(previous_label, item.get("label"))
 
 
 def industry_label_matches(actual: Optional[str], wanted: Any) -> bool:
@@ -1117,7 +1179,8 @@ def fetch_alerts(
 
     列表只放个股，每只附上所属申万一级/二级行业当日的最新标签（l1_label / l2_label），
     可以与个股标签组合过滤，例如「个股活跃 + 一级强势 + 二级活跃」。
-    三个过滤参数都支持逗号分隔的多选（同一组内取并集），个股还支持「强势*」「活跃*」= 当日升级上来的。
+    三个过滤参数都支持逗号分隔的多选（同一组内取并集）；个股「强势*」「活跃*」表示当前
+    标签强于此前 5 个交易日内最近一次实际标签。
     """
     with get_db_ctx() as db:
         dates = [
@@ -1131,11 +1194,19 @@ def fetch_alerts(
             all_rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == target).all()
             l1_map, l2_map = sw_label_maps(all_rows)
             keep: Dict[str, Dict[str, Any]] = {}
+            stock_items = [
+                _row_to_dict(row) for row in all_rows
+                if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK
+            ]
+            _attach_previous_labels(db, target, stock_items)
+            stock_by_code = {item["ts_code"]: item for item in stock_items}
             for row in sorted(all_rows, key=lambda item: item.hit_time or "", reverse=True):
-                item = _row_to_dict(row)
-                if item["entity_type"] != ENTITY_STOCK:
+                entity_type = row.entity_type or ENTITY_STOCK
+                if entity_type != ENTITY_STOCK:
+                    item = _row_to_dict(row)
                     sw_rows.append(item)
                     continue
+                item = stock_by_code[row.ts_code]
                 item["l1_label"] = l1_map.get(item["industry_l1"])
                 item["l2_label"] = l2_map.get(item["industry_l2"])
                 if not stock_label_matches(item, label):
