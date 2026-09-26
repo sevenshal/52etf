@@ -1134,6 +1134,49 @@ def _attach_previous_labels(db, target: date, items: List[Dict[str, Any]]) -> No
         item["upgraded"] = bool(previous_label) and can_override(previous_label, item.get("label"))
 
 
+def _attach_today_labels(db, target: date, items: List[Dict[str, Any]]) -> None:
+    """补上当天实际出现过的全部标签，按发生时间由早到晚排列。
+
+    ``market_alert_hits`` 只存当天最终标签，变化轨迹在 ``market_alert_events``。首个
+    标签与前一交易日最近标签比较；其后的标签与当天紧邻的上一标签比较。这样表格既能
+    看出完整盘中过程，也能保留升级标签的星号。
+    """
+    codes = {item["ts_code"] for item in items if item.get("ts_code")}
+    if not codes:
+        return
+    events_by_code: Dict[str, List[MarketAlertEvent]] = {}
+    events = db.query(MarketAlertEvent).filter(
+        MarketAlertEvent.trade_date == target,
+        MarketAlertEvent.entity_type == ENTITY_STOCK,
+        MarketAlertEvent.ts_code.in_(codes),
+    ).order_by(MarketAlertEvent.ts_code, MarketAlertEvent.event_time, MarketAlertEvent.id).all()
+    for event in events:
+        events_by_code.setdefault(event.ts_code, []).append(event)
+
+    for item in items:
+        code = item.get("ts_code")
+        previous_label = item.get("previous_label")
+        events_for_code = events_by_code.get(code, [])
+        labels: List[Dict[str, Any]] = []
+        for index, event in enumerate(events_for_code):
+            compared_label = event.prev_label if event.prev_label is not None else (previous_label if index == 0 else None)
+            labels.append({
+                "label": event.label,
+                "time": event.event_time,
+                "previous_label": compared_label,
+                "upgraded": bool(compared_label) and can_override(compared_label, event.label),
+            })
+        # 旧数据没有流水时仍至少展示当天最终标签，兼容已存记录。
+        if not labels and item.get("label"):
+            labels.append({
+                "label": item["label"],
+                "time": item.get("label_time") or item.get("last_change_time") or item.get("hit_time"),
+                "previous_label": previous_label,
+                "upgraded": bool(item.get("upgraded")),
+            })
+        item["today_labels"] = labels
+
+
 def industry_label_matches(actual: Optional[str], wanted: Any) -> bool:
     """行业标签过滤：空=不限；多个取并集；none=该行业当日无信号；其余按标签精确匹配。"""
     options = parse_label_filter(wanted)
@@ -1199,6 +1242,7 @@ def fetch_alerts(
                 if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK
             ]
             _attach_previous_labels(db, target, stock_items)
+            _attach_today_labels(db, target, stock_items)
             stock_by_code = {item["ts_code"]: item for item in stock_items}
             for row in sorted(all_rows, key=lambda item: item.hit_time or "", reverse=True):
                 entity_type = row.entity_type or ENTITY_STOCK

@@ -32,6 +32,7 @@ from .market_alerts import (
     DEFAULT_THRESHOLDS,
     StockStructure,
     baseline_at,
+    can_override,
     classify,
 )
 
@@ -649,6 +650,21 @@ def _load_relation(
             # 命中记录优先：与提示看板保持同一口径
             stock["live_label"] = stock.get("label")
             stock["label"] = hit["label"]
+            today_labels = [dict(item) for item in hit.get("today_labels", [])]
+            if not today_labels:
+                today_labels = [{
+                    "label": hit["label"],
+                    "time": hit.get("last_change_time") or hit.get("hit_time"),
+                    "previous_label": stock["previous_label"],
+                    "upgraded": bool(stock["previous_label"]) and can_override(stock["previous_label"], hit["label"]),
+                }]
+            # 当天首个标签的“前一个”是此前 5 个交易日内最近一次实际标签；后续标签
+            # 已由流水的 prev_label 标出，和提示看板展示完全一致。
+            if today_labels and today_labels[0].get("previous_label") is None:
+                previous_label = stock["previous_label"]
+                today_labels[0]["previous_label"] = previous_label
+                today_labels[0]["upgraded"] = bool(previous_label) and can_override(previous_label, today_labels[0].get("label"))
+            stock["today_labels"] = today_labels
         stock["l1_label"] = l1_labels.get(stock["l1_name"])
         stock["l2_label"] = l2_labels.get(stock["l2_name"])
 
@@ -715,7 +731,7 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
     **不晚于今天的最近一个有记录的交易日**，与快照口径保持一致。
     """
     try:
-        from ..database import MarketAlertHit, get_db_ctx
+        from ..database import MarketAlertEvent, MarketAlertHit, get_db_ctx
         from .market_alerts import ENTITY_STOCK, sw_label_maps
 
         with get_db_ctx() as db:
@@ -726,12 +742,25 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
                 return {}, {}, {}, None
             rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == label_date).all()
             l1_map, l2_map = sw_label_maps(rows)
+            events_by_code: Dict[str, List[Dict[str, Any]]] = {}
+            events = db.query(MarketAlertEvent).filter(
+                MarketAlertEvent.trade_date == label_date,
+                MarketAlertEvent.entity_type == ENTITY_STOCK,
+            ).order_by(MarketAlertEvent.ts_code, MarketAlertEvent.event_time, MarketAlertEvent.id).all()
+            for event in events:
+                events_by_code.setdefault(str(event.ts_code), []).append({
+                    "label": str(event.label),
+                    "time": str(event.event_time),
+                    "previous_label": str(event.prev_label) if event.prev_label else None,
+                    "upgraded": bool(event.prev_label) and can_override(event.prev_label, event.label),
+                })
             stocks = {
                 str(row.ts_code): {
                     "hit_time": str(row.hit_time),
                     "last_change_time": str(row.last_change_time or row.hit_time),
                     "label": str(row.label),
                     "change_count": row.change_count or 0,   # 盘中标签变化次数，仅供详情展示
+                    "today_labels": events_by_code.get(str(row.ts_code), []),
                 }
                 for row in rows
                 if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK

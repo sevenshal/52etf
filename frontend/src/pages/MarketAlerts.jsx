@@ -220,21 +220,33 @@ const MarketAlerts = () => {
       ),
     },
     {
-      title: '标签',
+      title: '今日标签',
       dataIndex: 'label',
-      width: 86,
-      render: (value, record) => (
-        <Tooltip title={(
-          <span>
-            首次命中 {record.hit_time}
-            {record.upgraded ? ` · 相比上次标签（${record.previous_label}）升级` : ''}
-            {record.change_count ? ` · 当日标签变化 ${record.change_count} 次，最近 ${record.last_change_time}` : ''}
-          </span>
-        )}
-        >
-          <Tag color={LABEL_META[value]?.color}>{value}{record.upgraded ? '*' : ''}</Tag>
-        </Tooltip>
-      ),
+      width: 156,
+      render: (value, record) => {
+        const labels = record.today_labels?.length
+          ? record.today_labels
+          : [{
+            label: value,
+            time: record.label_time || record.hit_time,
+            previous_label: record.previous_label,
+            upgraded: record.upgraded,
+          }];
+        return (
+          <Space size={[2, 2]} wrap>
+            {labels.map((item, index) => (
+              <Tooltip
+                key={`${item.time || ''}-${item.label}-${index}`}
+                title={`${item.time || '当日'} ${item.upgraded
+                  ? `· 相比前一标签（${item.previous_label}）升级`
+                  : item.previous_label ? `· 前一标签：${item.previous_label}` : '· 首次出现'}`}
+              >
+                <Tag color={LABEL_META[item.label]?.color}>{item.label}{item.upgraded ? '*' : ''}</Tag>
+              </Tooltip>
+            ))}
+          </Space>
+        );
+      },
       sorter: (a, b) => LABEL_ORDER.indexOf(a.label) - LABEL_ORDER.indexOf(b.label),
     },
     {

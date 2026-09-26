@@ -706,6 +706,10 @@ def test_fetch_alerts_uses_current_label_moment_for_price_and_stats():
     assert row["label_time"] == "14:20" and row["hit_time"] == "09:40"
     assert row["price"] == 11.0                      # 用流水表里当前标签那一条修正
     assert row["cum_pct"] == 10.0                    # 12.1 / 11.0 - 1，不是从 10.0 算
+    assert row["today_labels"] == [
+        {"label": LABEL_WATCH, "time": "09:40", "previous_label": None, "upgraded": False},
+        {"label": LABEL_ACTIVE, "time": "14:20", "previous_label": LABEL_WATCH, "upgraded": True},
+    ]
     # 时段按标签时刻归档：落在下午，不是上午
     buckets = {item["label"]: item["count"] for item in result["summary"]["time_buckets"]}
     assert sum(count for name, count in buckets.items() if name.startswith("09")) == 0

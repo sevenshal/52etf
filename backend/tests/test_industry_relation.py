@@ -287,12 +287,13 @@ def test_load_today_hits_falls_back_to_last_trading_day_when_market_closed():
     """
     from datetime import date as date_cls
 
-    from src.core.database import MarketAlertHit, get_db_ctx
+    from src.core.database import MarketAlertEvent, MarketAlertHit, get_db_ctx
     from src.core.services.industry_relation import _load_today_hits
-    from src.core.services.market_alerts import LABEL_STRONG
+    from src.core.services.market_alerts import LABEL_STRONG, LABEL_WATCH
 
     friday, sunday = date_cls(2000, 2, 4), date_cls(2000, 2, 6)
     with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date.in_([friday, sunday])).delete()
         db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([friday, sunday])).delete()
         db.add(MarketAlertHit(
             trade_date=friday, ts_code="000001.SZ", entity_type="stock", hit_time="09:40",
@@ -300,11 +301,20 @@ def test_load_today_hits_falls_back_to_last_trading_day_when_market_closed():
             industry_l1="银行", industry_l2="股份制银行Ⅱ", industry_l3="",
             label=LABEL_STRONG, score=50.0, price=10.0, pct=1.0,
         ))
+        db.add_all([
+            MarketAlertEvent(trade_date=friday, ts_code="000001.SZ", entity_type="stock", event_time="09:40", label=LABEL_WATCH),
+            MarketAlertEvent(trade_date=friday, ts_code="000001.SZ", entity_type="stock", event_time="10:05", label=LABEL_STRONG, prev_label=LABEL_WATCH),
+        ])
 
     stocks, _, _, label_date = _load_today_hits(sunday)
     assert label_date == friday
     assert stocks["000001.SZ"]["label"] == LABEL_STRONG
     assert stocks["000001.SZ"]["change_count"] == 1      # 升级过的记录在休市日也认得出来
+    assert stocks["000001.SZ"]["today_labels"] == [
+        {"label": LABEL_WATCH, "time": "09:40", "previous_label": None, "upgraded": False},
+        {"label": LABEL_STRONG, "time": "10:05", "previous_label": LABEL_WATCH, "upgraded": True},
+    ]
 
     with get_db_ctx() as db:
+        db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == friday).delete()
         db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == friday).delete()

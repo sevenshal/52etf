@@ -393,20 +393,33 @@ const MarketIndustryRelation = () => {
     {
       title: '今日标签',
       dataIndex: 'label',
-      width: 96,
-      render: (value, record) => (
-        <Space size={2}>
-          {value && (
-            <Tooltip title={record.hit_time
-              ? `${record.hit_time} 命中（与提示看板同一条记录）${record.live_label && record.live_label !== value ? ` · 此刻实时状态：${record.live_label}` : ''}`
-              : '按此刻快照实时判定'}>
-              <Tag color={LABEL_COLORS[value]}>{value}</Tag>
+      width: 168,
+      render: (value, record) => {
+        const labels = record.today_labels?.length
+          ? record.today_labels
+          : value ? [{
+            label: value,
+            time: record.last_change_time || record.hit_time,
+            previous_label: record.previous_label,
+            upgraded: Boolean(record.previous_label) && record.upgraded,
+          }] : [];
+        return (
+          <Space size={[2, 2]} wrap>
+          {labels.map((item, index) => (
+            <Tooltip
+              key={`${item.time || ''}-${item.label}-${index}`}
+              title={item.time
+                ? `${item.time} 命中${item.upgraded ? ` · 相比前一标签（${item.previous_label}）升级` : item.previous_label ? ` · 前一标签：${item.previous_label}` : ''}${record.live_label && record.live_label !== value ? ` · 此刻实时状态：${record.live_label}` : ''}`
+                : '按此刻快照实时判定'}
+            >
+              <Tag color={LABEL_COLORS[item.label]}>{item.label}{item.upgraded ? '*' : ''}</Tag>
             </Tooltip>
-          )}
+          ))}
           {record.limit_up && <Tag color="red">{record.boards > 1 ? `${record.boards}板` : '涨停'}</Tag>}
           {record.limit_down && <Tag color="green">跌停</Tag>}
-        </Space>
-      ),
+          </Space>
+        );
+      },
     },
     {
       title: '最近3标签',
