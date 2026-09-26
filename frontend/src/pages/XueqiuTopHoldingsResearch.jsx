@@ -100,6 +100,13 @@ const XUEQIU_DIRECTION_COLORS = {
   '减仓': 'red',
 };
 const THS_BOARD_TYPE_LABELS = { I: '行业', N: '概念', TH: '主题' };
+const SW_LEVEL_LABELS = { L1: '申万一级', L2: '申万二级', L3: '申万三级' };
+const BOARD_SOURCE_OPTIONS = [
+  { key: 'ths', label: '同花顺板块' },
+  { key: 'sw_l1', label: '申万一级' },
+  { key: 'sw_l2', label: '申万二级' },
+  { key: 'sw_l3', label: '申万三级' },
+];
 
 const xueqiuDirectionOf = record => {
   if (record?.direction) return record.direction;
@@ -544,6 +551,7 @@ const XueqiuTopHoldingsResearch = () => {
   const [detailData, setDetailData] = useState(null);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [selectedHistoryDate, setSelectedHistoryDate] = useState('');
+  const [boardSource, setBoardSource] = useState('ths');
   const [selectedBoard, setSelectedBoard] = useState(null);
   const [boardHistoryData, setBoardHistoryData] = useState(null);
   const [boardHoldingsLoading, setBoardHoldingsLoading] = useState(false);
@@ -836,8 +844,14 @@ const XueqiuTopHoldingsResearch = () => {
   };
 
   const latestItems = useMemo(() => latestData?.items || [], [latestData]);
-  const boardItems = useMemo(() => latestData?.board_items || [], [latestData]);
-  const contrarianBoards = useMemo(() => latestData?.contrarian_boards || [], [latestData]);
+  const boardItems = useMemo(
+    () => latestData?.board_items?.[boardSource] || [],
+    [latestData, boardSource],
+  );
+  const contrarianBoards = useMemo(
+    () => latestData?.contrarian_boards?.[boardSource] || [],
+    [latestData, boardSource],
+  );
   const ratioStats = useMemo(() => {
     const values = latestItems
       .map(item => weightMomentumRatioNumber(item.weight_price_ratio_5d))
@@ -947,13 +961,13 @@ const XueqiuTopHoldingsResearch = () => {
       const [holdingsResult, historyResult] = await Promise.allSettled([
         request.get('/api/factor-lab/xueqiu-top-holdings/board-holdings', {
           params: {
-            ths_code: board.ths_code,
+            code: board.code,
             active_only: activeOnly,
             snapshot_date: snapshotDate || undefined,
           },
         }),
         request.get('/api/factor-lab/xueqiu-top-holdings/board-history', {
-          params: { ths_code: board.ths_code, active_only: activeOnly, limit: 800 },
+          params: { code: board.code, active_only: activeOnly, limit: 800 },
         }),
       ]);
       if (boardHoldingsRequestRef.current !== requestId) return;
@@ -961,7 +975,7 @@ const XueqiuTopHoldingsResearch = () => {
       const response = holdingsResult.value;
       const stockSymbols = response.data?.stock_symbols || [];
       setSelectedBoard({
-        thsCode: board.ths_code,
+        code: board.code,
         name: board.name,
         stockSymbols,
       });
@@ -981,6 +995,11 @@ const XueqiuTopHoldingsResearch = () => {
       if (boardHistoryRequestRef.current === historyRequestId) setBoardHistoryLoading(false);
     }
   }, [activeOnly, latestItems, snapshotDate]);
+
+  const changeBoardSource = useCallback(source => {
+    setBoardSource(source);
+    clearBoardSelection();
+  }, [clearBoardSelection]);
 
   const fetchLatest = useCallback(async () => {
     const requestId = latestRequestRef.current + 1;
@@ -1279,7 +1298,11 @@ const XueqiuTopHoldingsResearch = () => {
       render: (value, record) => (
         <Space size={6}>
           <Text strong>{value}</Text>
-          <Tag>{THS_BOARD_TYPE_LABELS[record.board_type] || record.board_type}</Tag>
+          <Tag color={record.level ? 'purple' : undefined}>
+            {record.level
+              ? SW_LEVEL_LABELS[record.level] || record.level
+              : (THS_BOARD_TYPE_LABELS[record.board_type] || record.board_type)}
+          </Tag>
         </Space>
       ),
     },
@@ -1513,6 +1536,13 @@ const XueqiuTopHoldingsResearch = () => {
         </Col>
       </Row>
 
+      <Tabs
+        activeKey={boardSource}
+        onChange={changeBoardSource}
+        items={BOARD_SOURCE_OPTIONS.map(option => ({ key: option.key, label: option.label }))}
+        style={{ marginBottom: 4 }}
+      />
+
       <Card
         bordered={false}
         title={(
@@ -1526,7 +1556,7 @@ const XueqiuTopHoldingsResearch = () => {
           <Space size={[8, 8]} wrap>
             {contrarianBoards.map(board => (
               <Tooltip
-                key={board.ths_code}
+                key={board.code}
                 title={`逆势吸筹 ${board.contrarian_stock_count} / ${board.stock_count} 只；雪球综合权重 ${percentFormatter(board.composite_weight_pct)}`}
               >
                 <Tag color="cyan">
@@ -1559,14 +1589,14 @@ const XueqiuTopHoldingsResearch = () => {
             extra={selectedBoard ? <Button size="small" onClick={clearBoardSelection}>查看全部持仓</Button> : null}
           >
             <Table
-              rowKey="ths_code"
+              rowKey="code"
               size="small"
               columns={boardColumns}
               dataSource={boardItems}
               loading={boardHoldingsLoading}
               pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
               scroll={{ x: 900 }}
-              rowClassName={record => (record.ths_code === selectedBoard?.thsCode ? 'xueqiu-holdings-row-selected' : '')}
+              rowClassName={record => (record.code === selectedBoard?.code ? 'xueqiu-holdings-row-selected' : '')}
               onRow={record => ({ onClick: () => selectBoard(record) })}
               locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
             />

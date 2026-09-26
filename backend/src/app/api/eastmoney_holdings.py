@@ -21,6 +21,16 @@ from ...core.database import (
     SystemServiceCredential,
     get_db_ctx,
 )
+from ...core.services.board_momentum import (
+    BOARD_SOURCES,
+    SW_DAILY_TABLE,
+    THS_DAILY_TABLE,
+    aggregate_board_rows as _aggregate_board_rows,
+    is_sw_board_code,
+    load_all_board_catalogs,
+    membership_source,
+    top_contrarian_boards,
+)
 from ...core.services.duckdb_analytics import (
     SYMBOL_PATTERN,
     connect_analytics_db,
@@ -237,8 +247,8 @@ def _empty_eastmoney_top_holdings_latest(active_only: bool, limit: int, reason: 
         "active_cube_count": 0,
         "active_rebalance_days": None,
         "index_options": [],
-        "board_items": [],
-        "contrarian_boards": [],
+        "board_items": {source: [] for source in BOARD_SOURCES},
+        "contrarian_boards": {source: [] for source in BOARD_SOURCES},
         "items": [],
     }
 
@@ -674,26 +684,25 @@ def _load_eastmoney_board_momentum(
     active_only: bool,
     snapshot_date: Any,
     compare_snapshot_date: Any,
-) -> List[Dict[str, Any]]:
-    """Aggregate holdings into THS boards with an equal-weight intraday price proxy."""
-    required = ("a_stock_ths_member",)
-    if not snapshot_date or not compare_snapshot_date or not all(
-        _duckdb_table_exists(connection, table) for table in required
-    ):
-        return []
+) -> Dict[str, List[Dict[str, Any]]]:
+    """把持仓聚合到板块：同花顺概念/行业/主题板块 + 申万一/二/三级行业，各算一遍。
+
+    逐股方向/日内涨跌代理只算一次（写进两张临时表），四套板块目录各自按板块分组汇总一次。
+    """
+    if not snapshot_date or not compare_snapshot_date:
+        return {source: [] for source in BOARD_SOURCES}
 
     # ORM values are copied before the short session closes (expire_on_commit=True).
     with DBSession() as db:
-        catalog = {
+        ths_catalog = {
             row.ts_code: {
-                "ths_code": row.ts_code,
+                "code": row.ts_code,
                 "name": row.name,
                 "board_type": row.index_type,
             }
             for row in db.query(AIStockTHSIndexCache).all()
         }
-    if not catalog:
-        return []
+    catalogs = load_all_board_catalogs(connection, ths_catalog)
 
     cte = _eastmoney_top_holdings_snapshot_cte(active_only)
     stock_rows = _duckdb_query_dicts(
@@ -802,166 +811,44 @@ def _load_eastmoney_board_momentum(
             "INSERT INTO eastmoney_stock_intraday_prices VALUES (?, ?)",
             intraday_price_rows,
         )
-    rows = _duckdb_query_dicts(
-        connection,
-        f"""
-        {cte},
-        current_holdings AS (
-            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
-        ),
-        compare_holdings AS (
-            SELECT * FROM filtered_holdings WHERE snapshot_date = CAST(? AS DATE)
-        ),
-        current_cube_count AS (
-            SELECT COUNT(DISTINCT cube_symbol) AS value FROM current_holdings
-        ),
-        compare_cube_count AS (
-            SELECT COUNT(DISTINCT cube_symbol) AS value FROM compare_holdings
-        ),
-        current_stocks AS (
-            SELECT
-                stock_symbol,
-                AVG(current_price) AS current_price,
-                SUM(weight_pct) / NULLIF(MAX(current_cube_count.value), 0) AS composite_weight_pct,
-                COUNT(DISTINCT cube_symbol) AS holding_cube_count
-            FROM current_holdings CROSS JOIN current_cube_count
-            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
-            GROUP BY stock_symbol
-        ),
-        compare_stocks AS (
-            SELECT
-                stock_symbol,
-                SUM(weight_pct) / NULLIF(MAX(compare_cube_count.value), 0) AS composite_weight_pct
-            FROM compare_holdings CROSS JOIN compare_cube_count
-            WHERE stock_symbol NOT IN ('CASH', 'CN_CASH')
-            GROUP BY stock_symbol
-        ),
-        normalized_members AS (
-            SELECT
-                ths_code,
-                con_code,
-                CASE
-                    WHEN con_code LIKE '%.SH' THEN 'SH.' || LEFT(con_code, 6)
-                    WHEN con_code LIKE '%.SZ' THEN 'SZ.' || LEFT(con_code, 6)
-                    WHEN con_code LIKE '%.BJ' THEN 'BJ.' || LEFT(con_code, 6)
-                    ELSE con_code
-                END AS stock_symbol,
-                in_date,
-                out_date
-            FROM a_stock_ths_member
-        ),
-        current_board_weights AS (
-            SELECT
-                members.ths_code,
-                COUNT(DISTINCT current_stocks.stock_symbol) AS stock_count,
-                COUNT(DISTINCT CASE
-                    WHEN directions.direction = '逆势吸筹'
-                         AND directions.holding_cube_count >= 3
-                    THEN current_stocks.stock_symbol
-                END) AS contrarian_stock_count,
-                SUM(current_stocks.composite_weight_pct) AS composite_weight_pct,
-                SUM(current_stocks.holding_cube_count) AS stock_cube_links,
-                AVG(intraday_prices.price_multiple_5d) AS price_multiple_5d,
-                COUNT(intraday_prices.price_multiple_5d) AS priced_stock_count
-            FROM normalized_members members
-            JOIN current_stocks ON current_stocks.stock_symbol = members.stock_symbol
-            LEFT JOIN eastmoney_stock_directions directions
-              ON directions.stock_symbol = current_stocks.stock_symbol
-            LEFT JOIN eastmoney_stock_intraday_prices intraday_prices
-              ON intraday_prices.stock_symbol = current_stocks.stock_symbol
-            WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
-              AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
-            GROUP BY members.ths_code
-        ),
-        compare_board_weights AS (
-            SELECT
-                members.ths_code,
-                SUM(compare_stocks.composite_weight_pct) AS weight_5d_ago
-            FROM normalized_members members
-            JOIN compare_stocks ON compare_stocks.stock_symbol = members.stock_symbol
-            WHERE (members.in_date IS NULL OR members.in_date <= CAST(? AS DATE))
-              AND (members.out_date IS NULL OR members.out_date > CAST(? AS DATE))
-            GROUP BY members.ths_code
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for source in BOARD_SOURCES:
+        membership_table, code_column = membership_source(source)
+        result[source] = _aggregate_board_rows(
+            connection,
+            cte,
+            snapshot_date,
+            compare_snapshot_date,
+            membership_table=membership_table,
+            code_column=code_column,
+            catalog=catalogs.get(source) or {},
+            min_stocks=EASTMONEY_BOARD_MIN_STOCKS,
+            stock_directions_table="eastmoney_stock_directions",
+            stock_intraday_prices_table="eastmoney_stock_intraday_prices",
+            direction_fn=_eastmoney_direction,
         )
-        SELECT
-            current_board_weights.*,
-            compare_board_weights.weight_5d_ago
-        FROM current_board_weights
-        JOIN compare_board_weights USING (ths_code)
-        WHERE current_board_weights.stock_count >= {EASTMONEY_BOARD_MIN_STOCKS}
-          AND current_board_weights.priced_stock_count > 0
-        """,
-        [
-            snapshot_date,
-            compare_snapshot_date,
-            snapshot_date,
-            snapshot_date,
-            compare_snapshot_date,
-            compare_snapshot_date,
-        ],
-    )
-    items: List[Dict[str, Any]] = []
-    for row in rows:
-        meta = catalog.get(str(row.get("ths_code") or "").upper())
-        current_weight = _safe_float(row.get("composite_weight_pct"))
-        old_weight = _safe_float(row.get("weight_5d_ago"))
-        price_multiple = _safe_float(row.get("price_multiple_5d"))
-        if not meta or not current_weight or not old_weight or not price_multiple:
-            continue
-        weight_multiple = current_weight / old_weight
-        ratio = weight_multiple / price_multiple if price_multiple > 0 else None
-        direction = _eastmoney_direction(weight_multiple, price_multiple, ratio)
-        items.append(
-            {
-                **meta,
-                "stock_count": int(row.get("stock_count") or 0),
-                "contrarian_stock_count": int(row.get("contrarian_stock_count") or 0),
-                "contrarian_stock_ratio_pct": round(
-                    int(row.get("contrarian_stock_count") or 0)
-                    * 100.0
-                    / int(row.get("stock_count") or 1),
-                    2,
-                ),
-                "stock_cube_links": int(row.get("stock_cube_links") or 0),
-                "priced_stock_count": int(row.get("priced_stock_count") or 0),
-                "price_source": "held_constituent_equal_weight_intraday",
-                "composite_weight_pct": round(current_weight, 4),
-                "weight_5d_ago": round(old_weight, 4),
-                "weight_change_5d": round(current_weight - old_weight, 4),
-                "weight_multiple_5d": round(weight_multiple, 3),
-                "momentum_5d": round((price_multiple - 1.0) * 100.0, 2),
-                "momentum_multiple_5d": round(price_multiple, 3),
-                "weight_price_ratio_5d": round(ratio, 2) if ratio is not None else None,
-                "direction": direction,
-            }
-        )
-    return sorted(
-        items,
-        key=lambda item: (
-            item["direction"] != "逆势吸筹",
-            -(item.get("weight_price_ratio_5d") or 0),
-            -item["composite_weight_pct"],
-        ),
-    )
+    return result
 
 
 def load_eastmoney_board_holding_symbols(
-    ths_code: str,
+    code: str,
     active_only: bool = True,
     snapshot_date: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Return Eastmoney-held stocks for one board at the requested snapshot."""
-    normalized_code = str(ths_code or "").strip().upper()
+    """Return Eastmoney-held stocks for one board (同花顺板块或申万一/二/三级行业) at the requested snapshot."""
+    normalized_code = str(code or "").strip().upper()
     if not normalized_code or len(normalized_code) > 24:
-        raise HTTPException(status_code=400, detail="无效的同花顺板块代码")
+        raise HTTPException(status_code=400, detail="无效的板块代码")
+    is_sw = is_sw_board_code(normalized_code)
+    membership_table, code_column = membership_source("sw_l1" if is_sw else "ths")
     connection = _connect_duckdb()
     try:
         if not all(
             _duckdb_table_exists(connection, table)
-            for table in (EASTMONEY_TOP_HOLDINGS_SNAPSHOT_TABLE, "a_stock_ths_member")
+            for table in (EASTMONEY_TOP_HOLDINGS_SNAPSHOT_TABLE, membership_table)
         ):
             return {
-                "ths_code": normalized_code,
+                "code": normalized_code,
                 "name": None,
                 "snapshot_date": None,
                 "stock_symbols": [],
@@ -990,8 +877,8 @@ def load_eastmoney_board_holding_symbols(
                     END AS stock_symbol,
                     in_date,
                     out_date
-                FROM a_stock_ths_member
-                WHERE ths_code = ?
+                FROM {membership_table}
+                WHERE {code_column} = ?
             )
             SELECT DISTINCT holdings.stock_symbol, latest_snapshot.snapshot_date
             FROM filtered_holdings holdings
@@ -1004,13 +891,20 @@ def load_eastmoney_board_holding_symbols(
             """,
             [*query_params, normalized_code],
         )
-        with DBSession() as db:
-            catalog_row = db.query(AIStockTHSIndexCache).filter(
-                AIStockTHSIndexCache.ts_code == normalized_code
-            ).first()
-            board_name = catalog_row.name if catalog_row else None
+        if is_sw:
+            name_row = connection.execute(
+                "SELECT industry_name FROM a_stock_sw_industry WHERE index_code = ?",
+                [normalized_code],
+            ).fetchone()
+            board_name = name_row[0] if name_row else None
+        else:
+            with DBSession() as db:
+                catalog_row = db.query(AIStockTHSIndexCache).filter(
+                    AIStockTHSIndexCache.ts_code == normalized_code
+                ).first()
+                board_name = catalog_row.name if catalog_row else None
         return {
-            "ths_code": normalized_code,
+            "code": normalized_code,
             "name": board_name,
             "snapshot_date": rows[0].get("snapshot_date") if rows else None,
             "stock_symbols": [row["stock_symbol"] for row in rows],
@@ -1020,24 +914,28 @@ def load_eastmoney_board_holding_symbols(
 
 
 def load_eastmoney_board_history(
-    ths_code: str,
+    code: str,
     active_only: bool = True,
     limit: int = 500,
 ) -> Dict[str, Any]:
-    """Aggregate one board's Eastmoney weight on every snapshot and attach board price."""
-    normalized_code = str(ths_code or "").strip().upper()
+    """Aggregate one board's Eastmoney weight on every snapshot and attach board price.
+
+    板块自身的点位（同花顺板块行情或申万行业指数日线）只用来画历史曲线，跟"细分板块"
+    表里 5日权价比用的持仓个股等权代理是两套独立的价格来源。
+    """
+    normalized_code = str(code or "").strip().upper()
     normalized_limit = max(1, min(int(limit or 500), 2000))
     if not normalized_code or len(normalized_code) > 24:
-        raise HTTPException(status_code=400, detail="无效的同花顺板块代码")
+        raise HTTPException(status_code=400, detail="无效的板块代码")
+    is_sw = is_sw_board_code(normalized_code)
+    membership_table, code_column = membership_source("sw_l1" if is_sw else "ths")
+    daily_table = SW_DAILY_TABLE if is_sw else THS_DAILY_TABLE
+    daily_code_column = "ts_code" if is_sw else "ths_code"
     connection = _connect_duckdb()
     try:
-        required = (
-            EASTMONEY_TOP_HOLDINGS_SNAPSHOT_TABLE,
-            "a_stock_ths_member",
-            "a_stock_ths_daily",
-        )
+        required = (EASTMONEY_TOP_HOLDINGS_SNAPSHOT_TABLE, membership_table, daily_table)
         if not all(_duckdb_table_exists(connection, table) for table in required):
-            return {"ths_code": normalized_code, "name": None, "history": []}
+            return {"code": normalized_code, "name": None, "history": []}
         cte = _eastmoney_top_holdings_snapshot_cte(active_only)
         rows = _duckdb_query_dicts(
             connection,
@@ -1058,8 +956,8 @@ def load_eastmoney_board_history(
                     END AS stock_symbol,
                     in_date,
                     out_date
-                FROM a_stock_ths_member
-                WHERE ths_code = ?
+                FROM {membership_table}
+                WHERE {code_column} = ?
             ),
             board_weights AS (
                 SELECT
@@ -1088,8 +986,8 @@ def load_eastmoney_board_history(
             FROM selected
             ASOF LEFT JOIN (
                 SELECT trade_date, open, high, low, close
-                FROM a_stock_ths_daily
-                WHERE ths_code = ?
+                FROM {daily_table}
+                WHERE {daily_code_column} = ?
             ) prices
               ON selected.snapshot_date >= prices.trade_date
             ORDER BY selected.snapshot_date
@@ -1103,13 +1001,20 @@ def load_eastmoney_board_history(
                 row[field] = round(price, 3) if price is not None else None
             row["composite_weight_pct"] = round(weight, 4) if weight is not None else None
             row["stock_count"] = int(row.get("stock_count") or 0)
-        with DBSession() as db:
-            catalog_row = db.query(AIStockTHSIndexCache).filter(
-                AIStockTHSIndexCache.ts_code == normalized_code
-            ).first()
-            board_name = catalog_row.name if catalog_row else None
+        if is_sw:
+            name_row = connection.execute(
+                "SELECT industry_name FROM a_stock_sw_industry WHERE index_code = ?",
+                [normalized_code],
+            ).fetchone()
+            board_name = name_row[0] if name_row else None
+        else:
+            with DBSession() as db:
+                catalog_row = db.query(AIStockTHSIndexCache).filter(
+                    AIStockTHSIndexCache.ts_code == normalized_code
+                ).first()
+                board_name = catalog_row.name if catalog_row else None
         return {
-            "ths_code": normalized_code,
+            "code": normalized_code,
             "name": board_name,
             "active_only": active_only,
             "history": rows,
@@ -1399,20 +1304,12 @@ def load_eastmoney_top_holdings_latest(
             "active_rebalance_days": metadata.get("active_rebalance_days"),
             "index_options": index_options,
             "board_items": board_items,
-            "contrarian_boards": sorted(
-                [
-                    item
-                    for item in board_items
-                    if item.get("direction") == "逆势吸筹"
-                    and int(item.get("stock_count") or 0) >= EASTMONEY_CONTRARIAN_BOARD_MIN_STOCKS
-                    and float(item.get("contrarian_stock_ratio_pct") or 0) > 0
-                ],
-                key=lambda item: (
-                    -float(item.get("contrarian_stock_ratio_pct") or 0),
-                    -int(item.get("contrarian_stock_count") or 0),
-                    -float(item.get("composite_weight_pct") or 0),
-                ),
-            )[:15],
+            "contrarian_boards": {
+                source: top_contrarian_boards(
+                    items, min_stocks=EASTMONEY_CONTRARIAN_BOARD_MIN_STOCKS
+                )
+                for source, items in board_items.items()
+            },
             "items": item_rows,
         }
     finally:
@@ -1765,13 +1662,13 @@ def get_eastmoney_top_holdings_latest(
 
 @router.get("/eastmoney-top-holdings/board-holdings")
 def get_eastmoney_board_holding_symbols(
-    ths_code: str = Query(..., min_length=1, max_length=24),
+    code: str = Query(..., min_length=1, max_length=24, description="同花顺板块代码或申万行业代码"),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     snapshot_date: Optional[date] = Query(None, description="指定持仓快照日期；为空时取最新日期"),
     _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_board_holding_symbols(
-        ths_code=ths_code,
+        code=code,
         active_only=active_only,
         snapshot_date=snapshot_date,
     )
@@ -1779,13 +1676,13 @@ def get_eastmoney_board_holding_symbols(
 
 @router.get("/eastmoney-top-holdings/board-history")
 def get_eastmoney_board_history(
-    ths_code: str = Query(..., min_length=1, max_length=24),
+    code: str = Query(..., min_length=1, max_length=24, description="同花顺板块代码或申万行业代码"),
     active_only: bool = Query(True, description="只统计主理人榜单组合"),
     limit: int = Query(500, ge=1, le=2000),
     _: str = Depends(valid_market_viewer),
 ):
     return load_eastmoney_board_history(
-        ths_code=ths_code,
+        code=code,
         active_only=active_only,
         limit=limit,
     )

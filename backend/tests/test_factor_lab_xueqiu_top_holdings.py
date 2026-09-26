@@ -980,20 +980,22 @@ class FactorLabXueqiuTopHoldingsTest(TestCase):
                     active_only=True,
                 )
 
-        self.assertEqual(1, len(result["board_items"]))
-        self.assertEqual(3, result["board_items"][0]["priced_stock_count"])
+        self.assertEqual(1, len(result["board_items"]["ths"]))
+        self.assertEqual(3, result["board_items"]["ths"][0]["priced_stock_count"])
         self.assertEqual(
             "held_constituent_equal_weight_intraday",
-            result["board_items"][0]["price_source"],
+            result["board_items"]["ths"][0]["price_source"],
         )
-        board = result["board_items"][0]
+        board = result["board_items"]["ths"][0]
         self.assertEqual("测试细分板块", board["name"])
         self.assertEqual("逆势吸筹", board["direction"])
         self.assertEqual(3, board["stock_count"])
         self.assertEqual(2, board["contrarian_stock_count"])
         self.assertEqual(66.67, board["contrarian_stock_ratio_pct"])
         self.assertGreater(board["weight_price_ratio_5d"], 1.05)
-        self.assertEqual(["885001.TI"], [item["ths_code"] for item in result["contrarian_boards"]])
+        self.assertEqual(
+            ["885001.TI"], [item["code"] for item in result["contrarian_boards"]["ths"]]
+        )
         self.assertEqual("测试细分板块", board_holdings["name"])
         self.assertEqual(
             ["SH.600001", "SH.600002", "SH.600003"],
