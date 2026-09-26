@@ -659,8 +659,11 @@ class AlertScanner:
         覆盖规则见 can_override：强势 > 活跃 > 规避 > 观望，只有更强的能覆盖更弱的。
         往弱的方向变（如 活跃→观望、规避→观望、强势→活跃）一律忽略，不改标签、不记流水。
         覆盖只在当天内判断，隔日各自独立。
-        命中价/首次命中时刻始终以首次命中为准。现价与命中后涨幅不落库，读取时用最新快照现算
-        （见 attach_latest_returns），省掉每分钟对当天全部命中行的写库，读到的也总是最新价。
+        hit_time 始终是当天首次命中的时刻；**价格快照跟着当前标签走**：升级时把 price/pct 等
+        换成新标签生效那一刻的值，这样「命中后涨幅」和事后统计与最终标签是同一时点，不会出现
+        「标签是 10:05 升上来的强势、涨幅却从 09:40 的观望价算起」。首次命中的价格在流水表里保留。
+        现价与命中后涨幅不落库，读取时用最新快照现算（见 attach_latest_returns），
+        省掉每分钟对当天全部命中行的写库，读到的也总是最新价。
         """
         recorded = self._recorded_today(today)
         inserted = changed = 0
@@ -709,6 +712,11 @@ class AlertScanner:
                     row.volume_ratio = hit["volume_ratio"]
                     row.td_up = hit["td_up"]
                     row.td_down = hit["td_down"]
+                    # 价格快照跟着当前标签走，事后表现按新标签生效那一刻算
+                    row.price = hit["price"]
+                    row.pct = hit["pct"]
+                    row.amount_yi = hit["amount_yi"]
+                    row.speed5 = hit["speed5"]
                     changed += 1
                 recorded[code] = row.label
 
@@ -857,7 +865,7 @@ def load_adj_ratios(codes: List[str], hit_date: date, quote_date: date) -> Dict[
 
 def attach_latest_returns(rows: List[Dict[str, Any]], hit_date: date,
                           prices: Optional[Dict[str, Tuple[float, date]]] = None) -> List[Dict[str, Any]]:
-    """给命中行补上最新价与命中后涨幅（命中价 → 最新价，跨日按复权换算）。"""
+    """给命中行补上最新价与命中后涨幅（当前标签生效时的价格 → 最新价，跨日按复权换算）。"""
     prices = latest_price_map() if prices is None else prices
     stock_codes_by_date: Dict[date, List[str]] = {}
     for row in rows:
@@ -978,7 +986,8 @@ def summarize_hits(rows: List[Dict[str, Any]], level: str = "l1") -> Dict[str, A
 
     buckets = []
     for name, start, end in TIME_BUCKETS:
-        group = [row["cum_pct"] for row in scored if start <= (row["hit_time"] or "") < end]
+        # 时段按「当前标签生效的那一刻」分，与命中后涨幅同一时点
+        group = [row["cum_pct"] for row in scored if start <= (row.get("label_time") or row["hit_time"] or "") < end]
         buckets.append({"label": name, "count": len(group), "avg": _avg(group)})
 
     distribution = []
@@ -1071,6 +1080,32 @@ def industry_label_matches(actual: Optional[str], wanted: Any) -> bool:
     return any((not actual) if option == "none" else actual == option for option in options)
 
 
+def _apply_label_snapshot(db, target: date, items: Dict[str, Dict[str, Any]]) -> None:
+    """把每行的价格快照与时刻对齐到「当前标签生效的那一刻」。
+
+    新数据在写入时已经对齐（见 AlertScanner._write_hits），这里主要修正本次改动之前写下的
+    历史记录：那时升级不换价格快照，命中后涨幅会从更早的弱标签价算起，偏乐观或偏悲观。
+    流水表每次标签变化都有一条，取当前标签的最后一条即可还原。
+    """
+    if not items:
+        return
+    events = db.query(MarketAlertEvent).filter(MarketAlertEvent.trade_date == target).all()
+    latest: Dict[str, MarketAlertEvent] = {}
+    for event in events:
+        current = latest.get(event.ts_code)
+        if current is None or (event.event_time or "") >= (current.event_time or ""):
+            latest[event.ts_code] = event
+    for code, item in items.items():
+        event = latest.get(code)
+        item["label_time"] = item["hit_time"]
+        if event is None or event.label != item["label"]:
+            continue
+        item["label_time"] = event.event_time or item["hit_time"]
+        if event.price:
+            item["price"] = event.price
+            item["pct"] = event.pct
+
+
 def fetch_alerts(
     trade_date: Optional[date] = None,
     label: Any = None,
@@ -1095,6 +1130,7 @@ def fetch_alerts(
         if target:
             all_rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == target).all()
             l1_map, l2_map = sw_label_maps(all_rows)
+            keep: Dict[str, Dict[str, Any]] = {}
             for row in sorted(all_rows, key=lambda item: item.hit_time or "", reverse=True):
                 item = _row_to_dict(row)
                 if item["entity_type"] != ENTITY_STOCK:
@@ -1109,6 +1145,11 @@ def fetch_alerts(
                 if not industry_label_matches(item["l2_label"], l2_label):
                     continue
                 rows.append(item)
+                keep[item["ts_code"]] = item
+            _apply_label_snapshot(db, target, keep)
+            for item in sw_rows:
+                item["label_time"] = item["hit_time"]
+            rows.sort(key=lambda item: item.get("label_time") or "", reverse=True)
     if target:
         # 命中后涨幅不落库，读取时用最新价现算（统计也基于它）
         attach_latest_returns(rows + sw_rows, target)
