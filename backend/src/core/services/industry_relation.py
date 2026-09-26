@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from sqlalchemy import func
 
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .market_alerts import (
@@ -520,7 +521,7 @@ def _load_relation(
     if not stocks:
         raise IndustryRelationDataError("快照与申万成分股没有交集")
 
-    hits, l1_labels, l2_labels = _load_today_hits(today)
+    hits, l1_labels, l2_labels, label_date = _load_today_hits(today)
     for stock in stocks:
         stock["labels_3d"] = recent_labels.get(stock["ts_code"], [])
         hit = hits.get(stock["ts_code"])
@@ -550,6 +551,7 @@ def _load_relation(
             "date": today.isoformat(),
             "fetched_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "universe": universe, "focus": focus,
+            "label_date": label_date.isoformat() if label_date else None,
             "universe_name": UNIVERSE_BY_KEY.get(universe or "all", {}).get("name", "全A"),
             "picked": 0, "min_rank_count": MIN_RANK_COUNT,
             "universe_options": list(UNIVERSE_OPTIONS), "focus_options": list(FOCUS_OPTIONS),
@@ -562,6 +564,8 @@ def _load_relation(
         "source": "申万三级行业（SW2021）· 盘中快照复用提示看板",
         "universe": universe or "all",
         "universe_name": UNIVERSE_BY_KEY.get(universe or "all", {}).get("name", "全A"),
+        # 标签取自哪个交易日：休市时是最后一个有记录的交易日，与行情快照一致
+        "label_date": label_date.isoformat() if label_date else None,
         "focus": focus or "",
         "picked": len(stocks),
         "min_rank_count": MIN_RANK_COUNT,
@@ -583,18 +587,27 @@ def _with_industry_labels(rows: List[Dict[str, Any]], labels: Dict[str, str]) ->
     return rows
 
 
-def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str], Dict[str, str]]:
-    """今日提示看板的记录：(个股 {代码: {标签, 首次时刻}}, 一级 {行业名: 标签}, 二级 {行业名: 标签})。
+def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str], Dict[str, str], Optional[date]]:
+    """提示看板的记录：(个股 {代码: {标签, 首次时刻}}, 一级 {行业名: 标签}, 二级 {行业名: 标签}, 标签日期)。
 
     行业关联的「今日标签」以命中记录为准（最新标签，盘中变化会覆盖），与提示看板同一口径；
     申万一/二级自己的信号也来自同一张表，用来给行业行打标签、按行业标签过滤成分股。
+
+    休市日（周末、节假日）当天不会有任何命中，而行情快照用的是最后一个交易日，两边对不上会
+    让全部个股都没有标签——加上「强势*/活跃*」这类默认过滤，页面会直接空掉。所以取
+    **不晚于今天的最近一个有记录的交易日**，与快照口径保持一致。
     """
     try:
         from ..database import MarketAlertHit, get_db_ctx
         from .market_alerts import ENTITY_STOCK, sw_label_maps
 
         with get_db_ctx() as db:
-            rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == today).all()
+            label_date = db.query(func.max(MarketAlertHit.trade_date)).filter(
+                MarketAlertHit.trade_date <= today
+            ).scalar()
+            if label_date is None:
+                return {}, {}, {}, None
+            rows = db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == label_date).all()
             l1_map, l2_map = sw_label_maps(rows)
             stocks = {
                 str(row.ts_code): {
@@ -606,10 +619,10 @@ def _load_today_hits(today: date) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, 
                 for row in rows
                 if (row.entity_type or ENTITY_STOCK) == ENTITY_STOCK
             }
-        return stocks, l1_map, l2_map
+        return stocks, l1_map, l2_map, label_date
     except Exception as exc:  # noqa: BLE001  命中记录只是附加信息
         logger.warning("读取当日命中记录失败: %s", exc)
-        return {}, {}, {}
+        return {}, {}, {}, None
 
 
 def _cached_recent_labels(connection, today: date) -> Dict[str, List[Dict[str, Any]]]:
