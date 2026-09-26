@@ -226,3 +226,33 @@ def test_cache_ttl_short_in_session_long_off_hours():
     assert cache_ttl_seconds(dt(2026, 9, 22, 12, 0)) == OFF_HOURS_CACHE_TTL_SECONDS   # 午休
     assert cache_ttl_seconds(dt(2026, 9, 22, 0, 50)) == OFF_HOURS_CACHE_TTL_SECONDS   # 半夜
     assert cache_ttl_seconds(dt(2026, 9, 26, 10, 0)) == OFF_HOURS_CACHE_TTL_SECONDS   # 周六
+
+
+def test_load_today_hits_falls_back_to_last_trading_day_when_market_closed():
+    """休市日没有命中记录，要回退到最近一个有记录的交易日，与行情快照口径一致。
+
+    否则周末打开行业关联，所有个股都没有标签，默认的「强势*/活跃*」过滤会把页面清空。
+    """
+    from datetime import date as date_cls
+
+    from src.core.database import MarketAlertHit, get_db_ctx
+    from src.core.services.industry_relation import _load_today_hits
+    from src.core.services.market_alerts import LABEL_STRONG
+
+    friday, sunday = date_cls(2000, 2, 4), date_cls(2000, 2, 6)
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date.in_([friday, sunday])).delete()
+        db.add(MarketAlertHit(
+            trade_date=friday, ts_code="000001.SZ", entity_type="stock", hit_time="09:40",
+            last_change_time="10:05", change_count=1, name="平安银行", industry="银行",
+            industry_l1="银行", industry_l2="股份制银行Ⅱ", industry_l3="",
+            label=LABEL_STRONG, score=50.0, price=10.0, pct=1.0,
+        ))
+
+    stocks, _, _, label_date = _load_today_hits(sunday)
+    assert label_date == friday
+    assert stocks["000001.SZ"]["label"] == LABEL_STRONG
+    assert stocks["000001.SZ"]["change_count"] == 1      # 升级过的记录在休市日也认得出来
+
+    with get_db_ctx() as db:
+        db.query(MarketAlertHit).filter(MarketAlertHit.trade_date == friday).delete()

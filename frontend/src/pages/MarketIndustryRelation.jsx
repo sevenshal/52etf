@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Checkbox, Col, Empty, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Checkbox, Col, Empty, Row, Segmented, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
 import StockDetailLink from '../components/StockDetailLink';
@@ -253,6 +253,19 @@ const MarketIndustryRelation = () => {
     return () => clearInterval(timer);
   }, [load]);
 
+  // 过滤条件全部清掉（默认只看升级上来的强势/活跃，休市或盘前很可能一只都没有）
+  const hasFilters = focus.length > 0 || l1Label.length > 0 || l2Label.length > 0;
+  const clearFilters = useCallback(() => {
+    setFocus([]);
+    setL1Label([]);
+    setL2Label([]);
+  }, []);
+  const filterSummary = useMemo(() => [
+    focus.length ? `个股 ${focus.map(key => (data?.focus_options || []).find(item => item.key === key)?.name || key).join('/')}` : '',
+    l1Label.length ? `一级 ${l1Label.map(item => (item === 'none' ? '无信号' : item)).join('/')}` : '',
+    l2Label.length ? `二级 ${l2Label.map(item => (item === 'none' ? '无信号' : item)).join('/')}` : '',
+  ].filter(Boolean).join(' · '), [focus, l1Label, l2Label, data]);
+
   // 关联结构：选中的最深一级行业的指数走势
   const deepest = selected.l3 ? { level: 'l3', name: selected.l3 }
     : selected.l2 ? { level: 'l2', name: selected.l2 }
@@ -499,7 +512,9 @@ const MarketIndustryRelation = () => {
               {data.focus ? ` · ${data.focus.split(',')
                 .map(key => (data.focus_options || []).find(item => item.key === key)?.name || key)
                 .join('/')}` : ''}
-              {' · '}样本 {data.picked} 只 · 成分&lt;{data.min_rank_count} 不参与排名 · {data.fetched_at}
+              {' · '}样本 {data.picked} 只 · 成分&lt;{data.min_rank_count} 不参与排名
+              {data.label_date && data.label_date !== data.date ? ` · 标签取自 ${data.label_date}（休市，与行情快照同一天）` : ''}
+              {' · '}{data.fetched_at}
             </Text>
           </Space>
         </div>
@@ -602,7 +617,13 @@ const MarketIndustryRelation = () => {
           !loading && (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={data ? `${data.universe_name}${data.focus ? ' · 当前焦点' : ''}下没有符合条件的个股` : '暂无数据'}
+              description={data ? (
+                <Space direction="vertical" size={4}>
+                  <Text>{data.universe_name} + 当前过滤条件下没有个股</Text>
+                  <Text type="secondary">{filterSummary || '没有勾选任何过滤条件'}</Text>
+                  {hasFilters && <Button size="small" onClick={clearFilters}>清空过滤</Button>}
+                </Space>
+              ) : '暂无数据'}
             />
           )
         )}
