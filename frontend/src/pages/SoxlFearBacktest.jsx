@@ -79,6 +79,16 @@ const SOXL_SELL_MODE_OPTIONS = [
   { value: 'valuation_ma5', label: '贪婪+高估后等待 SOXX 跌破 MA5' },
   { value: 'valuation_trailing', label: '贪婪+高估后启动移动止盈' },
 ];
+const getSoxlSellModeLabel = (params) => {
+  if (!params) return '-';
+  if (params.effective_soxl_sell_mode === 'valuation_ma5') return '贪婪+高估后等待 SOXX 跌破 MA5';
+  if (params.effective_soxl_sell_mode === 'valuation_trailing') return '贪婪+高估后启动移动止盈';
+  if (params.sell_ma5_confirm === 'all') return '贪婪+高估后等待 SOXX 跌破 MA5';
+  if (params.valuation_sell_min != null && Number(params.trailing_stop_pct || 0) > 0) {
+    return '贪婪+高估后启动移动止盈';
+  }
+  return '移动止盈';
+};
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
 );
@@ -1888,6 +1898,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="恐贪来源">{detailedResult.meta?.fear_source_label || getFearSourceLabel(detailedResult.params?.fear_source || 'cnn')}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_symbol || detailedResult.params?.volume_signal_symbol || '自身'}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital ?? '-'}</Descriptions.Item>
+              {isSoxlMode && <Descriptions.Item label="SOXL卖出模式">{getSoxlSellModeLabel(detailedResult.params)}</Descriptions.Item>}
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
               {!isSoxlMode && <>
                 <Descriptions.Item label="买入顶底信号">{getTurnSignalModeLabel(detailedResult.params?.buy_turn_signal_mode)}</Descriptions.Item>

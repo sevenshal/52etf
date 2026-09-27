@@ -1702,6 +1702,15 @@ def _valuation_reason(params: SOXLFearStrategyParams, valuation: float) -> str:
     return f"，估值点位 {valuation:.1f}"
 
 
+def _effective_soxl_sell_mode(params: SOXLFearStrategyParams) -> str:
+    """Return the effective SOXL exit mode encoded by the strategy parameters."""
+    if params.sell_ma5_confirm == SELL_MA5_CONFIRM_ALL and params.valuation_sell_min is not None:
+        return "valuation_ma5"
+    if params.valuation_sell_min is not None and float(params.trailing_stop_pct) > 0:
+        return "valuation_trailing"
+    return "trailing"
+
+
 def _latest_confirmed_valuation_position(
     valuation_positions: Dict[date, Dict[int, Optional[float]]],
     signal_date: Optional[date],
@@ -2202,8 +2211,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         item["buy_count"] = int(stats.get("buy_count", 0))
         item["sell_count"] = int(stats.get("sell_count", 0))
 
+    result_params = params.dict()
+    result_params["effective_soxl_sell_mode"] = _effective_soxl_sell_mode(params)
     result = {
-        "params": params.dict(),
+        "params": result_params,
         **strategy_metrics,
         "trade_win_rate": trade_win_rate,
         "trade_profit_loss_ratio": trade_profit_loss_ratio,
