@@ -464,7 +464,9 @@ const SoxlFearBacktest = () => {
     buy_threshold: record.buy_threshold,
     greed_threshold: record.greed_threshold,
     volume_ratio_threshold: record.volume_ratio_threshold,
-    volume_z_threshold: record.volume_z_threshold === undefined ? 1.25 : record.volume_z_threshold,
+    // 搜索结果里的 null 明确代表旧量比逻辑。详情回放必须原样带回，不能把
+    // 缺省值替换为 1.25 而意外切换到 log-z 策略。
+    volume_z_threshold: record.volume_z_threshold ?? null,
     sell_shrink_z: record.sell_shrink_z ?? -1,
     volume_ratio_consecutive_days: record.volume_ratio_consecutive_days ?? 1,
     buy_position_pct: record.buy_position_pct,

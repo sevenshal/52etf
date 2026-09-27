@@ -189,3 +189,9 @@ def test_search_counts_valuation_candidates():
     base = SOXLFearSearchParams()
     widened = SOXLFearSearchParams(valuation_sell_min_values=[None, 70, 80], valuation_window_values=[252, 504])
     assert _count_search_params(widened) == _count_search_params(base) * 6
+
+
+def test_search_count_deduplicates_repeated_candidate_values():
+    single = SOXLFearSearchParams(buy_threshold_values=[30])
+    repeated = SOXLFearSearchParams(buy_threshold_values=[30, 30])
+    assert _count_search_params(repeated) == _count_search_params(single)

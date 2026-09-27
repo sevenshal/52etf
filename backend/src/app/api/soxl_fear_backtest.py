@@ -2947,9 +2947,8 @@ def _run_seesaw_backtest(
     return result
 
 
-def _count_search_params(payload: SOXLFearSearchParams) -> int:
-    value_groups = [
-        payload.fear_source_values,
+def _search_value_groups(payload: SOXLFearSearchParams) -> Tuple[List[Any], ...]:
+    return (
         payload.buy_threshold_values,
         payload.greed_threshold_values,
         payload.volume_ratio_threshold_values,
@@ -2986,13 +2985,26 @@ def _count_search_params(payload: SOXLFearSearchParams) -> int:
         payload.valuation_buy_max_values,
         payload.valuation_sell_min_values,
         payload.valuation_force_sell_greed_values,
-    ]
-    total = 1
-    for values in value_groups:
-        if not values:
-            return 0
-        total *= len(values)
-    return total
+    )
+
+
+def _iter_unique_search_combinations(payload: SOXLFearSearchParams) -> Iterator[Tuple[str, Tuple[Any, ...]]]:
+    """Yield each effective grid point once, even when a client sends duplicate values."""
+    value_groups = _search_value_groups(payload)
+    if not payload.fear_source_values or any(not values for values in value_groups):
+        return
+    seen = set()
+    for fear_source in payload.fear_source_values:
+        for values in product(*value_groups):
+            key = (fear_source, values)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield fear_source, values
+
+
+def _count_search_params(payload: SOXLFearSearchParams) -> int:
+    return sum(1 for _ in _iter_unique_search_combinations(payload))
 
 
 def _evaluate_search_candidates(
@@ -3028,51 +3040,15 @@ def _evaluate_search_candidates(
 
     def iter_value_batches() -> Iterator[Tuple[str, List[Tuple[int, Tuple]]]]:
         index = 0
-        for fear_source in payload.fear_source_values:
-            batch = []
-            for values in product(
-                payload.buy_threshold_values,
-                payload.greed_threshold_values,
-                payload.volume_ratio_threshold_values,
-                payload.volume_ratio_consecutive_days_values,
-                payload.buy_position_pct_values,
-                payload.cooldown_days_values,
-                payload.trailing_stop_pct_values,
-                payload.sell_position_pct_values,
-                payload.sell_reduction_basis_values,
-                payload.sell_price_above_avg_cost_values,
-                payload.max_take_profit_sells_per_cycle_values,
-                payload.min_position_pct_after_take_profit_values,
-                payload.execute_next_open_values,
-                payload.sub_buy_threshold_values,
-                payload.sub_volume_ratio_threshold_values,
-                payload.swap_threshold_values,
-                payload.sub2_buy_threshold_values,
-                payload.sub2_volume_ratio_threshold_values,
-                payload.sub3_buy_threshold_values,
-                payload.sub3_volume_ratio_threshold_values,
-                payload.volume_z_threshold_values,
-                payload.sell_shrink_z_values,
-                payload.buy_turn_signal_mode_values,
-                payload.sell_turn_signal_mode_values,
-                payload.ma5_bottom_score_values,
-                payload.ma5_top_score_values,
-                payload.ma5_lookback_days_values,
-                payload.volume_bottom_score_values,
-                payload.volume_top_score_values,
-                payload.volume_expand_std_values,
-                payload.volume_shrink_std_values,
-                payload.turn_signal_cooldown_days_values,
-                payload.valuation_window_values,
-                payload.valuation_buy_max_values,
-                payload.valuation_sell_min_values,
-                payload.valuation_force_sell_greed_values,
-            ):
-                index += 1
-                batch.append((index, values))
-                if len(batch) >= eval_batch_size:
-                    yield fear_source, batch
-                    batch = []
+        batches: Dict[str, List[Tuple[int, Tuple]]] = {}
+        for fear_source, values in _iter_unique_search_combinations(payload):
+            batch = batches.setdefault(fear_source, [])
+            index += 1
+            batch.append((index, values))
+            if len(batch) >= eval_batch_size:
+                yield fear_source, batch
+                batches[fear_source] = []
+        for fear_source, batch in batches.items():
             if batch:
                 yield fear_source, batch
 
