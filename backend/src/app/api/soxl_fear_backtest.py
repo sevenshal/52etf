@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import threading
@@ -839,6 +840,22 @@ def _round_or_none(value, digits: int = 4):
     if numeric is None:
         return None
     return round(numeric, digits)
+
+
+def _json_safe(value):
+    """Replace non-finite floats before FastAPI JSON encoding."""
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_json_safe(item) for item in value)
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
 
 
 def _floor_share_count(value: float) -> int:
@@ -3869,7 +3886,7 @@ def run_soxl_fear_backtest(
             "sub3_meta": sub3_meta,
         }
         result["fear_series"] = _build_fear_series_payload(base_dfs)
-        return result
+        return _json_safe(result)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
