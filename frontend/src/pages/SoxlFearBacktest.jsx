@@ -271,6 +271,15 @@ const SoxlFearBacktest = () => {
     const soxlValuationSellMin = Number.isFinite(Number(values.soxl_valuation_sell_min))
       ? Number(values.soxl_valuation_sell_min)
       : 80;
+    const soxlBuyThresholdValues = parseNumberList(values.buy_threshold_values);
+    const soxlGreedThresholdValues = parseNumberList(values.greed_threshold_values);
+    const soxlVolumeRatioThresholdValues = parseNumberList(values.volume_ratio_threshold_values);
+    const soxlBuyPositionValues = parseNumberList(values.buy_position_pct_values);
+    const soxlCooldownValues = parseNumberList(values.cooldown_days_values, true);
+    const soxlSellPositionValues = parseNumberList(values.sell_position_pct_values);
+    const soxlTrailingValues = parseNumberList(values.trailing_stop_pct_values);
+    const soxlMaxSellValues = parseNumberList(values.max_take_profit_sells_per_cycle_values, true);
+    const soxlMinPositionValues = parseNumberList(values.min_position_pct_after_take_profit_values);
     return {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
@@ -364,17 +373,18 @@ const SoxlFearBacktest = () => {
         sub3_buy_threshold_values: [20],
         sub3_volume_ratio_threshold_values: [1.3],
         // SOXL 模式不依赖页面上隐藏的 A 股/顶底信号候选，全部固定为一组有效值。
-        buy_threshold_values: [40],
-        greed_threshold_values: [41],
-        volume_ratio_threshold_values: [1.37],
+        buy_threshold_values: soxlBuyThresholdValues.length ? soxlBuyThresholdValues : [40],
+        greed_threshold_values: soxlGreedThresholdValues.length ? soxlGreedThresholdValues : [41],
+        volume_ratio_threshold_values: soxlVolumeRatioThresholdValues.length ? soxlVolumeRatioThresholdValues : [1.37],
         volume_ratio_consecutive_days_values: [1],
-        buy_position_pct_values: [50],
-        cooldown_days_values: [10],
-        sell_position_pct_values: [50],
-        sell_reduction_basis_values: ['portfolio'],
-        sell_price_above_avg_cost_values: [true],
-        max_take_profit_sells_per_cycle_values: [2],
-        min_position_pct_after_take_profit_values: [5],
+        buy_position_pct_values: soxlBuyPositionValues.length ? soxlBuyPositionValues : [50],
+        cooldown_days_values: soxlCooldownValues.length ? soxlCooldownValues : [10],
+        sell_position_pct_values: soxlSellPositionValues.length ? soxlSellPositionValues : [50],
+        sell_reduction_basis_values: values.sell_reduction_basis_values?.length
+          ? values.sell_reduction_basis_values : ['portfolio'],
+        sell_price_above_avg_cost_values: sellPriceAboveAvgCostValues.length ? sellPriceAboveAvgCostValues : [true],
+        max_take_profit_sells_per_cycle_values: soxlMaxSellValues.length ? soxlMaxSellValues : [2],
+        min_position_pct_after_take_profit_values: soxlMinPositionValues.length ? soxlMinPositionValues : [5],
         volume_z_threshold_values: [null],
         sell_shrink_z_values: [-1],
         buy_turn_signal_mode_values: ['legacy'],
@@ -392,7 +402,9 @@ const SoxlFearBacktest = () => {
         valuation_buy_max_values: [null],
         valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [soxlValuationSellMin] : [null],
         valuation_force_sell_greed_values: [null],
-        trailing_stop_pct_values: soxlSellMode === 'valuation_ma5' ? [0] : parseNumberList(values.trailing_stop_pct_values),
+        trailing_stop_pct_values: soxlSellMode === 'valuation_ma5'
+          ? [0]
+          : (soxlTrailingValues.length ? soxlTrailingValues : [10]),
         execute_next_open_values: [true],
       } : {}),
     };
