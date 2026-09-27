@@ -269,9 +269,7 @@ const SoxlFearBacktest = () => {
     const executeNextOpenValues = parseBooleanList(values.execute_next_open_values);
     const soxlSellMode = values.soxl_sell_mode || 'valuation_ma5';
     const soxlValuationWindow = Number(values.soxl_valuation_window) || 252;
-    const soxlValuationSellMin = Number.isFinite(Number(values.soxl_valuation_sell_min))
-      ? Number(values.soxl_valuation_sell_min)
-      : 80;
+    const soxlValuationSellMinValues = parseOptionalThresholdList(values.soxl_valuation_sell_min_values);
     const soxlValuationBuyMaxValues = parseOptionalThresholdList(values.soxl_valuation_buy_max_values);
     const soxlBuyThresholdValues = parseNumberList(values.buy_threshold_values);
     const soxlGreedThresholdValues = parseNumberList(values.greed_threshold_values);
@@ -402,7 +400,7 @@ const SoxlFearBacktest = () => {
         sell_ma5_confirm: soxlSellMode === 'valuation_ma5' ? 'all' : 'off',
         valuation_window_values: [soxlValuationWindow],
         valuation_buy_max_values: soxlValuationBuyMaxValues,
-        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [soxlValuationSellMin] : [null],
+        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? soxlValuationSellMinValues : [null],
         valuation_force_sell_greed_values: [null],
         trailing_stop_pct_values: soxlSellMode === 'valuation_ma5'
           ? [0]
@@ -592,7 +590,7 @@ const SoxlFearBacktest = () => {
         soxl_sell_mode: 'valuation_ma5',
         soxl_valuation_window: 252,
         soxl_valuation_buy_max_values: 'none',
-        soxl_valuation_sell_min: 80,
+        soxl_valuation_sell_min_values: '80',
         sub_symbol: undefined,
         sub2_symbol: undefined,
         sub3_symbol: undefined,
@@ -680,6 +678,9 @@ const SoxlFearBacktest = () => {
     { title: '买入顶底信号', dataIndex: 'buy_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
     { title: '卖出顶底信号', dataIndex: 'sell_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
     { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
+    { title: '买入估值上限(≤)', dataIndex: 'valuation_buy_max', width: 125, render: value => value == null ? '关闭' : value },
+    { title: '卖出估值下限(≥)', dataIndex: 'valuation_sell_min', width: 125, render: value => value == null ? '关闭' : value },
+    { title: '估值窗口', dataIndex: 'valuation_window', width: 90, render: value => value ? `${value}日` : '-' },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
     { title: '连续量比天数', dataIndex: 'volume_ratio_consecutive_days', width: 110 },
     { title: '买入仓位%', dataIndex: 'buy_position_pct', width: 90 },
@@ -1349,7 +1350,7 @@ const SoxlFearBacktest = () => {
             soxl_sell_mode: 'valuation_ma5',
             soxl_valuation_window: 252,
             soxl_valuation_buy_max_values: 'none',
-            soxl_valuation_sell_min: 80,
+            soxl_valuation_sell_min_values: '80',
             valuation_window_values: [252],
             valuation_buy_max_values: 'none',
             valuation_sell_min_values: '80',
@@ -1644,8 +1645,12 @@ const SoxlFearBacktest = () => {
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
-                <Form.Item name="soxl_valuation_sell_min" label="SOXX 高估分位阈值(≥)">
-                  <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                <Form.Item
+                  name="soxl_valuation_sell_min_values"
+                  label="SOXX 高估分位阈值(≥)候选"
+                  tooltip="CNN 贪婪后，SOXX 估值分位达到此阈值才进入等待卖出；可填 none,70,80,90"
+                >
+                  <Input placeholder="例如 70,80,90" />
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
@@ -1829,12 +1834,19 @@ const SoxlFearBacktest = () => {
 
           <Card title="参数明细" style={{ marginBottom: 24 }} loading={detailLoading}>
             <Descriptions column={{ xs: 1, md: 2, lg: 3 }} bordered size="small">
+              <Descriptions.Item label="回测标的">{detailedResult.meta?.symbol || detailedResult.params?.symbol || selectedSymbol}</Descriptions.Item>
+              <Descriptions.Item label="回测区间">{detailedResult.meta?.effective_start_date || '-'} ~ {detailedResult.meta?.effective_end_date || '-'}</Descriptions.Item>
+              <Descriptions.Item label="恐贪来源">{detailedResult.meta?.fear_source_label || getFearSourceLabel(detailedResult.params?.fear_source || 'cnn')}</Descriptions.Item>
+              <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_symbol || detailedResult.params?.volume_signal_symbol || '自身'}</Descriptions.Item>
+              <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
               <Descriptions.Item label="买入顶底信号">{getTurnSignalModeLabel(detailedResult.params?.buy_turn_signal_mode)}</Descriptions.Item>
               <Descriptions.Item label="卖出顶底信号">{getTurnSignalModeLabel(detailedResult.params?.sell_turn_signal_mode)}</Descriptions.Item>
               <Descriptions.Item label="MA5底/顶阈值">{detailedResult.params?.ma5_bottom_score} / {detailedResult.params?.ma5_top_score}</Descriptions.Item>
               <Descriptions.Item label="量能底/顶阈值">{detailedResult.params?.volume_bottom_score} / {detailedResult.params?.volume_top_score}</Descriptions.Item>
               <Descriptions.Item label="量能放量/缩量σ">{detailedResult.params?.volume_expand_std} / {detailedResult.params?.volume_shrink_std}</Descriptions.Item>
+              <Descriptions.Item label="MA5回看天数">{detailedResult.params?.ma5_lookback_days}</Descriptions.Item>
+              <Descriptions.Item label="顶底信号冷却天数">{detailedResult.params?.turn_signal_cooldown_days}</Descriptions.Item>
               <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
               <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>
@@ -1849,6 +1861,10 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="同轮止盈最多卖出次数">{detailedResult.params?.max_take_profit_sells_per_cycle}</Descriptions.Item>
               <Descriptions.Item label="止盈后最低保留仓位%">{detailedResult.params?.min_position_pct_after_take_profit}</Descriptions.Item>
               <Descriptions.Item label="次日开盘成交">{detailedResult.params?.execute_next_open ? '开启（信号日收盘决策，次日开盘成交）' : '关闭（信号日收盘价成交）'}</Descriptions.Item>
+              <Descriptions.Item label="估值窗口">{detailedResult.params?.valuation_window ?? 252} 日</Descriptions.Item>
+              <Descriptions.Item label="买入估值上限(≤)">{detailedResult.params?.valuation_buy_max ?? '关闭'}</Descriptions.Item>
+              <Descriptions.Item label="卖出估值下限(≥)">{detailedResult.params?.valuation_sell_min ?? '关闭'}</Descriptions.Item>
+              <Descriptions.Item label="贪恐兜底直接卖出(≥)">{detailedResult.params?.valuation_force_sell_greed ?? '关闭'}</Descriptions.Item>
               {detailedResult.params?.sub_symbol && (
                 <>
                   <Descriptions.Item label="跷跷板候补">{detailedResult.params.sub_symbol}</Descriptions.Item>
@@ -1881,6 +1897,8 @@ const SoxlFearBacktest = () => {
               )}
               <Descriptions.Item label="估值闸门">{formatValuationGate(detailedResult.params)}</Descriptions.Item>
               <Descriptions.Item label="调仓阈值%">{detailedResult.params?.rebalance_threshold_pct}</Descriptions.Item>
+              <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="卖出印花税%">{detailedResult.params?.stamp_duty_pct ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="滑点%">{detailedResult.params?.slippage_pct === -2 ? '-2（最乐观：买最低卖最高）' : detailedResult.params?.slippage_pct === -1 ? '-1（最悲观：买最高卖最低）' : `${detailedResult.params?.slippage_pct ?? 0}%`}</Descriptions.Item>
               <Descriptions.Item label="印花税%(卖出)">{detailedResult.params?.stamp_duty_pct ?? 0}%</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
