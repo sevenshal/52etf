@@ -293,6 +293,8 @@ class SOXLFearStrategyParams(BaseModel):
     # off=关闭；all=所有标的都等；non_main=只有候补等，主标的到贪婪即卖。
     # 卖出信号一旦出现会一直挂着，直到跌破 MA5 成交；挂单期间不再发起换仓。
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
+    # 卖出 MA5 确认的独立来源。默认沿用量比来源，SOXL 专用策略设为 SOXX.US。
+    sell_ma5_signal_symbol: Optional[str] = None
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
     # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
     swap_threshold: Optional[float] = None
@@ -327,6 +329,15 @@ class SOXLFearStrategyParams(BaseModel):
         if value not in SELL_MA5_CONFIRM_MODES:
             raise ValueError("卖出MA5确认仅支持 off、all、non_main")
         return value
+
+    @validator("sell_ma5_signal_symbol")
+    def validate_sell_ma5_signal_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("sell_ma5_signal_symbol 格式不正确")
+        return symbol
 
     @validator("sub3_buy_threshold")
     def validate_sub3_buy_threshold(cls, value):
@@ -530,6 +541,7 @@ class SOXLFearSearchParams(BaseModel):
     sub3_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
     # 卖出跌破 MA5 确认（不参与网格）
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
+    sell_ma5_signal_symbol: Optional[str] = None
     # 估值点位闸门候选（参与组合搜索；None=关闭）
     valuation_window_values: List[int] = Field(default_factory=lambda: [VALUATION_POSITION_SHORT_WINDOW])
     valuation_buy_max_values: List[Optional[float]] = Field(default_factory=lambda: [None])
@@ -594,6 +606,15 @@ class SOXLFearSearchParams(BaseModel):
         if value not in SELL_MA5_CONFIRM_MODES:
             raise ValueError("卖出MA5确认仅支持 off、all、non_main")
         return value
+
+    @validator("sell_ma5_signal_symbol")
+    def validate_search_sell_ma5_signal_symbol(cls, value):
+        if not value:
+            return None
+        symbol = _normalize_symbol(value)
+        if not SYMBOL_PATTERN.match(symbol):
+            raise ValueError("sell_ma5_signal_symbol 格式不正确")
+        return symbol
 
     @validator("sub2_symbol")
     def validate_sub2_symbol(cls, value):
@@ -1026,9 +1047,11 @@ def _prepare_base_dataframe(
     end_date: date,
     fear_source: str = "cnn",
     volume_signal_symbol: Optional[str] = None,
+    sell_ma5_signal_symbol: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
     symbol = _normalize_symbol(symbol)
     signal_symbol = _normalize_symbol(volume_signal_symbol or symbol)
+    ma5_signal_symbol = _normalize_symbol(sell_ma5_signal_symbol or signal_symbol)
     lookback_start_date = start_date - timedelta(days=SIGNAL_LOOKBACK_DAYS)
     price_df = _fetch_price_history(symbol, lookback_start_date, end_date)
     fear_df, fear_meta = _fetch_fear_history(fear_source, lookback_start_date, end_date)
@@ -1054,10 +1077,31 @@ def _prepare_base_dataframe(
     signal_price_df["signal_volume"] = pd.to_numeric(signal_price_df["volume"], errors="coerce")
     # 卖出 MA5 确认：量比来源标的当日收盘是否跌破自身 5 日均线（样本不足时视为未跌破）
     signal_close = pd.to_numeric(signal_price_df["close"], errors="coerce")
-    signal_ma5 = signal_close.rolling(MA5_WINDOW, min_periods=MA5_WINDOW).mean()
-    signal_price_df[SIGNAL_BELOW_MA5_COLUMN] = (
-        (signal_close < signal_ma5).where(signal_ma5.notna(), False).astype(bool)
-    )
+    if ma5_signal_symbol == signal_symbol:
+        ma5_close = signal_close
+    else:
+        ma5_price_df = _fetch_signal_price_history(
+            ma5_signal_symbol, lookback_start_date, end_date,
+        )[["date", "close"]].copy()
+        ma5_price_df = _normalize_price_dates(ma5_price_df)
+        ma5_close = pd.to_numeric(ma5_price_df["close"], errors="coerce")
+        ma5_price_df[SIGNAL_BELOW_MA5_COLUMN] = (
+            (ma5_close < ma5_close.rolling(MA5_WINDOW, min_periods=MA5_WINDOW).mean())
+            .where(ma5_close.rolling(MA5_WINDOW, min_periods=MA5_WINDOW).mean().notna(), False)
+            .astype(bool)
+        )
+        signal_price_df = signal_price_df.merge(
+            ma5_price_df[["date", SIGNAL_BELOW_MA5_COLUMN]],
+            on="date",
+            how="left",
+        )
+    if SIGNAL_BELOW_MA5_COLUMN not in signal_price_df:
+        signal_ma5 = ma5_close.rolling(MA5_WINDOW, min_periods=MA5_WINDOW).mean()
+        signal_price_df[SIGNAL_BELOW_MA5_COLUMN] = (
+            (signal_close < signal_ma5).where(signal_ma5.notna(), False).astype(bool)
+        )
+    else:
+        signal_price_df[SIGNAL_BELOW_MA5_COLUMN] = signal_price_df[SIGNAL_BELOW_MA5_COLUMN].fillna(False).astype(bool)
     signal_price_df["volume_ma20"] = signal_price_df["signal_volume"].shift(1).rolling(VOLUME_LOOKBACK_DAYS).mean()
     signal_price_df["volume_ratio"] = np.where(
         signal_price_df["volume_ma20"] > 0,
@@ -1198,6 +1242,8 @@ def _prepare_base_dataframe(
         "price_points": int(len(price_df)),
         "volume_signal_symbol": signal_symbol,
         "volume_signal_label": _symbol_label(signal_symbol),
+        "sell_ma5_signal_symbol": ma5_signal_symbol,
+        "sell_ma5_signal_label": _symbol_label(ma5_signal_symbol),
         "volume_signal_points": int(len(signal_price_df)),
         "valuation_points": int(base_df[_valuation_column(VALUATION_POSITION_SHORT_WINDOW)].notna().sum()),
         "execution_price_type": "same_day_close",
@@ -1209,6 +1255,8 @@ def _prepare_base_dataframe(
     base_df.attrs["symbol"] = symbol
     base_df.attrs["volume_signal_symbol"] = signal_symbol
     base_df.attrs["volume_signal_label"] = _symbol_label(signal_symbol)
+    base_df.attrs["sell_ma5_signal_symbol"] = ma5_signal_symbol
+    base_df.attrs["sell_ma5_signal_label"] = _symbol_label(ma5_signal_symbol)
     base_df.attrs["execution_price_label"] = "信号日收盘价"
     return base_df, meta
 
@@ -1228,6 +1276,7 @@ def _prepare_search_dataframes(
     sub3_symbol: Optional[str] = None,
     sub3_fear_source: Optional[str] = None,
     sub3_volume_signal_symbol: Optional[str] = None,
+    sell_ma5_signal_symbol: Optional[str] = None,
 ) -> Tuple[
     Dict[str, pd.DataFrame], Dict[str, Dict], Dict,
     Optional[pd.DataFrame], Optional[Dict],
@@ -1245,6 +1294,7 @@ def _prepare_search_dataframes(
             end_date,
             fear_source,
             volume_signal_symbol,
+            sell_ma5_signal_symbol=sell_ma5_signal_symbol,
         )
         base_dfs[fear_source] = base_df
         source_metas[fear_source] = meta
@@ -1309,6 +1359,7 @@ def _prepare_search_dataframes(
         "trading_days": sum(int(item["trading_days"]) for item in summary_meta_items),
         "price_points": max(int(item["price_points"]) for item in meta_items),
         "volume_signal_symbol": meta_items[0].get("volume_signal_symbol"),
+        "sell_ma5_signal_symbol": meta_items[0].get("sell_ma5_signal_symbol"),
         "volume_signal_label": meta_items[0].get("volume_signal_label"),
         "volume_signal_points": max(int(item.get("volume_signal_points") or 0) for item in meta_items),
         "execution_price_type": meta_items[0].get("execution_price_type"),
@@ -2967,6 +3018,7 @@ def _evaluate_search_candidates(
                         sub3_fear_source=payload.sub3_fear_source,
                         sub3_volume_signal_symbol=payload.sub3_volume_signal_symbol,
                         sell_ma5_confirm=payload.sell_ma5_confirm,
+                        sell_ma5_signal_symbol=payload.sell_ma5_signal_symbol,
                     )
                     consume_batch_result(batch_result)
                 except Exception as fallback_exc:
@@ -3010,6 +3062,7 @@ def _evaluate_search_candidates(
                 payload.sub3_fear_source,
                 payload.sub3_volume_signal_symbol,
                 payload.sell_ma5_confirm,
+                payload.sell_ma5_signal_symbol,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -3072,6 +3125,7 @@ def _evaluate_search_batch(
     sub3_fear_source: Optional[str] = None,
     sub3_volume_signal_symbol: Optional[str] = None,
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF,
+    sell_ma5_signal_symbol: Optional[str] = None,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -3151,6 +3205,7 @@ def _evaluate_search_batch(
                 sub3_buy_threshold=float(sub3_buy_threshold if sub3_buy_threshold is not None else 20.0),
                 sub3_volume_ratio_threshold=float(sub3_volume_ratio_threshold if sub3_volume_ratio_threshold is not None else 1.3),
                 sell_ma5_confirm=str(sell_ma5_confirm or SELL_MA5_CONFIRM_OFF),
+                sell_ma5_signal_symbol=sell_ma5_signal_symbol,
                 volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
                 sell_shrink_z=float(sell_shrink_z),
                 buy_turn_signal_mode=str(buy_turn_signal_mode),
@@ -3267,6 +3322,7 @@ def _build_search_response(payload: SOXLFearSearchParams) -> Dict:
         sub3_symbol=payload.sub3_symbol,
         sub3_fear_source=payload.sub3_fear_source,
         sub3_volume_signal_symbol=payload.sub3_volume_signal_symbol,
+        sell_ma5_signal_symbol=payload.sell_ma5_signal_symbol,
     )
     logger.info(
         "Starting SOXL fear parameter search, symbol=%s, volume_signal_symbol=%s, fear_sources=%s, combinations=%s, top_n=%s, sub_symbol=%s, sub2_symbol=%s",
@@ -3430,6 +3486,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
             sub3_symbol=payload.sub3_symbol,
             sub3_fear_source=payload.sub3_fear_source,
             sub3_volume_signal_symbol=payload.sub3_volume_signal_symbol,
+            sell_ma5_signal_symbol=payload.sell_ma5_signal_symbol,
         )
 
         def progress_callback(index: int, total: int, skipped: int):
@@ -3709,6 +3766,7 @@ def run_soxl_fear_backtest(
             sub3_symbol=payload.params.sub3_symbol,
             sub3_fear_source=payload.params.sub3_fear_source,
             sub3_volume_signal_symbol=payload.params.sub3_volume_signal_symbol,
+            sell_ma5_signal_symbol=payload.params.sell_ma5_signal_symbol,
         )
         base_df = base_dfs[payload.fear_source]
         meta = source_metas[payload.fear_source]

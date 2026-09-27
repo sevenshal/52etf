@@ -119,6 +119,14 @@ export const adminRouteDescriptors = [
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/SoxlFearBacktest')),
   },
   {
+    path: '/soxl-fear-backtest',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/SoxlFearBacktest')),
+  },
+  {
+    path: '/a-stock-fear-volume-backtest',
+    Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/SoxlFearBacktest')),
+  },
+  {
     path: '/a-stock-fear-etf-backtest',
     Component: lazy(() => import(/* webpackChunkName: "admin" */ '../pages/AStockFearEtfBacktest')),
   },

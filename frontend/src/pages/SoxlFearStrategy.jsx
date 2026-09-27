@@ -473,16 +473,17 @@ const SoxlFearStrategy = ({ embedded = false }) => {
       ...defaultValues,
       ...form.getFieldsValue(),
     };
-    navigate('/fear-volume-backtest', {
+    navigate('/soxl-fear-backtest', {
       state: {
         autoRunBacktest: true,
+        backtestMode: 'soxl',
         presetValues: {
           symbol: values.symbol || 'SOXL.US',
-          // 回测页默认是 A股 三标的那套（红利+半导体+纳指、上证红利贪恐、估值闸门）。
-          // 美股实盘配置跳过去时必须整套清掉，否则会拿 A股 的候补和贪恐来源回测 SOXL。
+          // 清掉 A股候补和估值条件，避免两套实盘配置串用。
           a_stock_pair: undefined,
           fear_source_values: ['cnn'],
-          volume_signal_symbol: undefined,
+          volume_signal_symbol: 'SOXL.US',
+          sell_ma5_signal_symbol: 'SOXX.US',
           sub_symbol: undefined,
           sub2_symbol: undefined,
           sub3_symbol: undefined,
@@ -491,26 +492,25 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           valuation_sell_min_values: 'none',
           valuation_force_sell_greed_values: 'none',
           // 传字符串：history state 会被 structuredClone，dayjs 实例会丢原型方法导致回测页白屏
-          date_range: ['2021-01-01', dayjs().format('YYYY-MM-DD')],
+          date_range: ['2025-02-10', dayjs().format('YYYY-MM-DD')],
           initial_capital: 100000,
           top_n: 1,
           objective: 'annualized_return',
           eval_workers: 1,
           fit_rebalance_threshold_pct: values.rebalance_threshold_pct,
-          buy_threshold_values: String(values.buy_threshold ?? defaultValues.buy_threshold),
-          greed_threshold_values: String(values.greed_threshold ?? defaultValues.greed_threshold),
-          volume_ratio_threshold_values: String(values.volume_ratio_threshold ?? defaultValues.volume_ratio_threshold),
-          buy_position_pct_values: String(values.buy_position_pct ?? defaultValues.buy_position_pct),
-          cooldown_days_values: String(values.cooldown_days ?? defaultValues.cooldown_days),
-          trailing_stop_pct_values: String(values.trailing_stop_pct ?? defaultValues.trailing_stop_pct),
-          sell_position_pct_values: String(values.sell_position_pct ?? defaultValues.sell_position_pct),
-          sell_reduction_basis_values: [values.sell_reduction_basis || defaultValues.sell_reduction_basis],
-          max_take_profit_sells_per_cycle_values: String(
-            values.max_take_profit_sells_per_cycle ?? defaultValues.max_take_profit_sells_per_cycle
-          ),
-          min_position_pct_after_take_profit_values: String(
-            values.min_position_pct_after_take_profit ?? defaultValues.min_position_pct_after_take_profit
-          ),
+          buy_threshold_values: '40',
+          greed_threshold_values: '41',
+          volume_ratio_threshold_values: '1.37',
+          buy_position_pct_values: '50',
+          cooldown_days_values: '10',
+          trailing_stop_pct_values: '0',
+          sell_position_pct_values: '50',
+          sell_reduction_basis_values: ['portfolio'],
+          sell_price_above_avg_cost_values: ['true'],
+          max_take_profit_sells_per_cycle_values: '2',
+          min_position_pct_after_take_profit_values: '5',
+          execute_next_open_values: ['false'],
+          sell_ma5_confirm: 'all',
         },
       },
     });

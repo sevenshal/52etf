@@ -17,6 +17,7 @@ from src.app.api.soxl_fear_backtest import (
     SOXLFearStrategyParams,
     _run_backtest,
     _run_seesaw_backtest,
+    _prepare_base_dataframe,
     _valuation_column,
 )
 
@@ -86,6 +87,48 @@ def test_sell_ma5_all_waits_for_ma5_break():
     )
     # 贪婪日（03-07）价格还在 MA5 上方，等到 03-13 跌破才卖
     assert _sell_dates(result) == ["2025-03-13"]
+
+
+def test_sell_ma5_source_can_be_independent_from_volume_source():
+    dates = list(pd.bdate_range("2025-01-02", periods=30).date)
+
+    def price_frame(symbol):
+        close = [100.0 + index for index in range(30)]
+        if symbol == "SOXX.US":
+            close[-1] = 90.0
+        return pd.DataFrame({
+            "date": dates,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": [100.0] * 30,
+            "turnover": [1000.0] * 30,
+        })
+
+    fear = pd.DataFrame({"date": dates, "fear_greed": [50.0] * 30})
+    with patch(
+        "src.app.api.soxl_fear_backtest._fetch_price_history",
+        side_effect=lambda symbol, start, end: price_frame(symbol),
+    ), patch(
+        "src.app.api.soxl_fear_backtest._fetch_fear_history",
+        return_value=(fear, {"fear_source": "cnn", "fear_source_label": "CNN贪恐", "fear_points": 30}),
+    ), patch(
+        "src.app.api.soxl_fear_backtest._fetch_valuation_positions",
+        return_value={},
+    ):
+        base_df, meta = _prepare_base_dataframe(
+            "SOXL.US",
+            dates[20],
+            dates[-1],
+            "cnn",
+            "SOXL.US",
+            sell_ma5_signal_symbol="SOXX.US",
+        )
+
+    assert meta["volume_signal_symbol"] == "SOXL.US"
+    assert meta["sell_ma5_signal_symbol"] == "SOXX.US"
+    assert base_df[SIGNAL_BELOW_MA5_COLUMN].iloc[-1]
 
 
 def test_sell_signal_stays_pending_after_fear_falls_back():

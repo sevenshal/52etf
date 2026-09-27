@@ -136,8 +136,13 @@ const Profile = () => {
           arrow: true
         },
         {
-          title: '情绪量能回测',
-          onClick: () => navigate('/fear-volume-backtest'),
+          title: 'A股情绪量能回测',
+          onClick: () => navigate('/a-stock-fear-volume-backtest'),
+          arrow: true
+        },
+        {
+          title: 'SOXL情绪量能回测',
+          onClick: () => navigate('/soxl-fear-backtest'),
           arrow: true
         },
         {

@@ -30,6 +30,8 @@ const PROFILE_ROUTES = [
   '/all-weather-backtest',
   '/fear/backtest',
   '/fear-volume-backtest',
+  '/soxl-fear-backtest',
+  '/a-stock-fear-volume-backtest',
   '/a-stock-fear-etf-backtest',
   '/monthly-analysis',
   '/scheduled-tasks',

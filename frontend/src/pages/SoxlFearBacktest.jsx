@@ -164,6 +164,9 @@ const SoxlFearBacktest = () => {
   const [form] = Form.useForm();
   const location = useLocation();
   const navigate = useNavigate();
+  const [backtestMode, setBacktestMode] = useState(
+    location.pathname === '/soxl-fear-backtest' ? 'soxl' : 'a_stock',
+  );
   const [backtestOptions, setBacktestOptions] = useState({
     symbol_options: DEFAULT_SYMBOL_OPTIONS,
     volume_signal_symbol_options: DEFAULT_SYMBOL_OPTIONS,
@@ -260,6 +263,7 @@ const SoxlFearBacktest = () => {
     return {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
+      sell_ma5_signal_symbol: values.sell_ma5_signal_symbol || undefined,
       fear_source_values: values.fear_source_values?.length ? values.fear_source_values : ['cnn'],
       initial_capital: values.initial_capital,
       start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
@@ -372,6 +376,7 @@ const SoxlFearBacktest = () => {
     sub3_buy_threshold: record.sub3_buy_threshold ?? 20,
     sub3_volume_ratio_threshold: record.sub3_volume_ratio_threshold ?? 1.3,
     sell_ma5_confirm: record.sell_ma5_confirm ?? 'off',
+    sell_ma5_signal_symbol: record.sell_ma5_signal_symbol ?? undefined,
     valuation_window: record.valuation_window ?? 252,
     valuation_buy_max: record.valuation_buy_max ?? null,
     valuation_sell_min: record.valuation_sell_min ?? null,
@@ -479,6 +484,39 @@ const SoxlFearBacktest = () => {
   useEffect(() => {
     const autoRunBacktest = location.state?.autoRunBacktest;
     const presetValues = location.state?.presetValues;
+    if (location.state?.backtestMode) {
+      setBacktestMode(location.state.backtestMode);
+    }
+    if (location.pathname === '/soxl-fear-backtest' && !autoRunBacktest && !hasAutoRunRef.current) {
+      setBacktestMode('soxl');
+      form.setFieldsValue({
+        symbol: 'SOXL.US',
+        volume_signal_symbol: 'SOXL.US',
+        sell_ma5_signal_symbol: 'SOXX.US',
+        fear_source_values: ['cnn'],
+        date_range: [dayjs('2025-02-10'), dayjs()],
+        buy_threshold_values: '40',
+        greed_threshold_values: '41',
+        volume_ratio_threshold_values: '1.37',
+        buy_position_pct_values: '50',
+        cooldown_days_values: '10',
+        trailing_stop_pct_values: '0',
+        sell_position_pct_values: '50',
+        sell_reduction_basis_values: ['portfolio'],
+        sell_price_above_avg_cost_values: ['true'],
+        max_take_profit_sells_per_cycle_values: '2',
+        min_position_pct_after_take_profit_values: '5',
+        execute_next_open_values: ['false'],
+        sell_ma5_confirm: 'all',
+        sub_symbol: undefined,
+        sub2_symbol: undefined,
+        sub3_symbol: undefined,
+        swap_threshold_values: 'none',
+        valuation_buy_max_values: 'none',
+        valuation_sell_min_values: 'none',
+        valuation_force_sell_greed_values: 'none',
+      });
+    }
     if (!autoRunBacktest || !presetValues || hasAutoRunRef.current) {
       return;
     }
@@ -1150,13 +1188,15 @@ const SoxlFearBacktest = () => {
 
   return (
     <div style={{ padding: 24 }}>
-      <Card title={`${selectedSymbol} 情绪 + 量能 超参数回测`} style={{ marginBottom: 24 }} loading={optionsLoading}>
+      <Card title={backtestMode === 'soxl' ? 'SOXL 专用情绪量能回测' : 'A股情绪量能回测'} style={{ marginBottom: 24 }} loading={optionsLoading}>
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
           message="策略假设"
-          description={`使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的信号日量比；当贪恐分数低于等于买入触发阈值，且量比放大满足连续天数要求时买入；连续 N 天量比使用最近 N 个交易日成交量对比再往前 20 个交易日均量；成交模式可选信号日收盘价成交，或信号日收盘决策、下一交易日开盘价成交；当贪恐分数高于等于进入止盈区阈值后，若移动止盈回撤% 设为 0，则到达贪恐阈值当天即卖出；否则按收盘价较止盈区内最高价回撤的规则移动止盈；均价保护开启时，卖出价必须高于当前持仓均价；止盈减仓口径可选按总资产或按持仓股票；同时不会把仓位卖穿最低保留仓位；同一轮止盈区可限制最多卖出次数；买卖后按交易日冷却 n 天。可选估值点位闸门：买入可要求贪恐来源指数足够低估，卖出可要求足够高估（贪婪但还不贵就继续拿），贪恐达到兜底阈值时不看估值直接卖。`}
+          description={backtestMode === 'soxl'
+            ? 'SOXL专用口径：CNN恐慌且SOXL放量买入SOXL；CNN进入贪婪区后挂起卖出，等待SOXX收盘跌破5日均线再卖出SOXL。该模式使用独立的SOXL参数预设。'
+            : `A股专用口径：使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的信号日量比；当贪恐分数低于等于买入触发阈值，且量比放大满足连续天数要求时买入；成交模式可选信号日收盘价成交，或信号日收盘决策、下一交易日开盘价成交；可选估值点位闸门和候补轮动。`}
         />
         <Form
           form={form}
@@ -1248,6 +1288,17 @@ const SoxlFearBacktest = () => {
                   showSearch
                   optionFilterProp="label"
                   placeholder="默认使用标的自身"
+                  options={volumeSignalSymbolOptions}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sell_ma5_signal_symbol" label="卖出MA5来源标的">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="默认使用量比来源"
                   options={volumeSignalSymbolOptions}
                 />
               </Form.Item>
