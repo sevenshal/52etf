@@ -995,6 +995,10 @@ class SoxlFearStrategyConfig(Base):
     max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
     min_position_pct_after_take_profit = Column(Float, nullable=False, default=10.0)
     rebalance_threshold_pct = Column(Float, nullable=False, default=5.0)
+    # SOXL 专用卖出模式：trailing=移动止盈；valuation_ma5=贪婪且高估后等待 SOXX 跌破 MA5
+    sell_mode = Column(String, nullable=False, default="trailing")
+    valuation_window = Column(Integer, nullable=False, default=252)
+    valuation_sell_min = Column(Float, nullable=False, default=80.0)
     last_run_at = Column(DateTime)
     last_run_status = Column(String(16))
     last_run_message = Column(String(500))
@@ -2322,6 +2326,9 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                     max_take_profit_sells_per_cycle INTEGER NOT NULL DEFAULT 2,
                     min_position_pct_after_take_profit FLOAT NOT NULL DEFAULT 10.0,
                     rebalance_threshold_pct FLOAT NOT NULL DEFAULT 5.0,
+                    sell_mode VARCHAR NOT NULL DEFAULT 'trailing',
+                    valuation_window INTEGER NOT NULL DEFAULT 252,
+                    valuation_sell_min FLOAT NOT NULL DEFAULT 80.0,
                     last_run_at DATETIME,
                     last_run_status VARCHAR(16),
                     last_run_message VARCHAR(500),
@@ -2392,6 +2399,9 @@ def ensure_soxl_fear_strategy_multi_config_schema():
         soxl_config_column_ddls = {
             "external_trading_account_id": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN external_trading_account_id INTEGER",
             "live_sub_account_id": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN live_sub_account_id INTEGER",
+            "sell_mode": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN sell_mode VARCHAR NOT NULL DEFAULT 'trailing'",
+            "valuation_window": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN valuation_window INTEGER NOT NULL DEFAULT 252",
+            "valuation_sell_min": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN valuation_sell_min FLOAT NOT NULL DEFAULT 80.0",
         }
         for column_name, ddl in soxl_config_column_ddls.items():
             if column_name not in config_columns:

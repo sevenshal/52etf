@@ -31,7 +31,7 @@ from ...robot.a_stock_base_data_config import (
     A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
     A_STOCK_INDEX_FEAR_GREED_TARGETS,
 )
-from ...robot.cnn_fear_index import CNN_HISTORY_SYMBOL
+from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 from .account import valid_admin_account
 
 router = APIRouter(prefix="/api/fear-volume-backtest", tags=["Fear Volume Backtest"])
@@ -49,7 +49,14 @@ TURN_SIGNAL_MODES = {"legacy", "volume", "ma5", "any", "all"}
 SELL_MA5_CONFIRM_OFF = "off"
 SELL_MA5_CONFIRM_ALL = "all"
 SELL_MA5_CONFIRM_NON_MAIN = "non_main"
-SELL_MA5_CONFIRM_MODES = {SELL_MA5_CONFIRM_OFF, SELL_MA5_CONFIRM_ALL, SELL_MA5_CONFIRM_NON_MAIN}
+# any=贪婪且通过估值后，MA5 跌破或移动止盈任一条件满足即可卖出（SOXL 专用）。
+SELL_MA5_CONFIRM_ANY = "any"
+SELL_MA5_CONFIRM_MODES = {
+    SELL_MA5_CONFIRM_OFF,
+    SELL_MA5_CONFIRM_ALL,
+    SELL_MA5_CONFIRM_NON_MAIN,
+    SELL_MA5_CONFIRM_ANY,
+}
 MA5_WINDOW = 5
 SIGNAL_BELOW_MA5_COLUMN = "signal_below_ma5"
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
@@ -290,7 +297,8 @@ class SOXLFearStrategyParams(BaseModel):
     sub3_buy_threshold: float = 20.0
     sub3_volume_ratio_threshold: float = 1.3
     # 卖出跌破 MA5 确认：贪婪（且过估值闸门）后不立刻卖，等量比来源标的收盘跌破 5 日均线再卖。
-    # off=关闭；all=所有标的都等；non_main=只有候补等，主标的到贪婪即卖。
+    # off=关闭；all=所有标的都等；non_main=只有候补等，主标的到贪婪即卖；
+    # any=MA5 跌破或移动止盈任一满足即可卖（SOXL 专用）。
     # 卖出信号一旦出现会一直挂着，直到跌破 MA5 成交；挂单期间不再发起换仓。
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
     # 卖出 MA5 确认的独立来源。默认沿用量比来源，SOXL 专用策略设为 SOXX.US。
@@ -327,7 +335,7 @@ class SOXLFearStrategyParams(BaseModel):
     @validator("sell_ma5_confirm")
     def validate_sell_ma5_confirm(cls, value):
         if value not in SELL_MA5_CONFIRM_MODES:
-            raise ValueError("卖出MA5确认仅支持 off、all、non_main")
+            raise ValueError("卖出MA5确认仅支持 off、all、non_main、any")
         return value
 
     @validator("sell_ma5_signal_symbol")
@@ -604,7 +612,7 @@ class SOXLFearSearchParams(BaseModel):
     @validator("sell_ma5_confirm")
     def validate_search_sell_ma5_confirm(cls, value):
         if value not in SELL_MA5_CONFIRM_MODES:
-            raise ValueError("卖出MA5确认仅支持 off、all、non_main")
+            raise ValueError("卖出MA5确认仅支持 off、all、non_main、any")
         return value
 
     @validator("sell_ma5_signal_symbol")
@@ -863,33 +871,22 @@ def _normalize_price_dates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fetch_cnn_history(start_date: date, end_date: date) -> pd.DataFrame:
-    db = Session()
-    try:
-        rows = (
-            db.query(ETFFearGreedCloneHistory)
-            .filter(
-                ETFFearGreedCloneHistory.symbol == CNN_HISTORY_SYMBOL,
-                ETFFearGreedCloneHistory.date >= start_date,
-                ETFFearGreedCloneHistory.date <= end_date,
-            )
-            .order_by(ETFFearGreedCloneHistory.date.asc())
-            .all()
-        )
-        records = [
-            {
-                "date": row.date,
-                "cnn_fear_greed": float(row.score),
-            }
-            for row in rows
-            if row.score is not None
-        ]
-    finally:
-        Session.remove()
+    # CNN 官方接口可以直接返回从指定日期开始的完整历史；回测不依赖本地
+    # ETFFearGreedCloneHistory，避免生产库只同步到近期时截断 2021 年数据。
+    data = CNNFearGreedIndexScraper().fetch_data(start_date)
+    rows = (data.get("fear_and_greed_historical") or {}).get("data") or []
+    records = []
+    for item in rows:
+        item_date = CNNFearGreedIndexScraper._parse_cnn_date(item.get("x"))
+        score = _safe_float(item.get("y"))
+        if item_date is None or score is None or item_date < start_date or item_date > end_date:
+            continue
+        records.append({"date": item_date, "cnn_fear_greed": score})
 
     df = pd.DataFrame(records)
     if df.empty:
         raise ValueError(
-            "指定区间内没有 CNN 恐贪数据，请先执行 CNN Fear & Greed 抓取任务"
+            "CNN 官方历史接口在指定区间内没有返回恐贪数据"
         )
     return df.drop_duplicates(subset=["date"], keep="last").sort_values("date")
 
@@ -956,6 +953,7 @@ def _fetch_fear_history(
         "fear_source": fear_source,
         "fear_source_label": source_config["label"],
         "fear_points": int(len(df)),
+        "fear_data_source": "cnn_official_api" if fear_source == "cnn" else "local_history",
     }
 
 
@@ -1031,11 +1029,17 @@ def _fetch_signal_price_history(symbol: str, start_date: date, end_date: date) -
         raise
 
 
-def _fetch_valuation_positions(fear_source: str, end_date: date) -> Dict[date, Dict[int, Optional[float]]]:
+def _fetch_valuation_positions(
+    fear_source: str,
+    end_date: date,
+    valuation_signal_symbol: Optional[str] = None,
+) -> Dict[date, Dict[int, Optional[float]]]:
     """贪恐来源对应指数的逐日估值点位：A股指数用成分一致预期，美股指数ETF（QQQ/SPY/SOXX/DIA）用
     美股ETF估值分析；CNN 等没有对应指数的来源返回空（回测里不设估值闸）。"""
     source_config = FEAR_SOURCE_OPTIONS.get(fear_source) or {}
-    symbol = source_config.get("symbol")
+    # CNN 本身没有对应的 ETF 估值序列。SOXL 专用模式使用 SOXX 的估值，
+    # 由独立的 MA5 来源标的传入，A股及其它恐贪来源仍沿用原有来源标的。
+    symbol = valuation_signal_symbol or source_config.get("symbol")
     if not symbol:
         return {}
     return load_index_valuation_position_history(symbol, end_date=end_date)
@@ -1197,12 +1201,20 @@ def _prepare_base_dataframe(
     existing_signal_columns = [column for column in signal_columns if column in merged_df.columns]
     merged_df[existing_signal_columns] = merged_df[existing_signal_columns].ffill()
     merged_df[SIGNAL_BELOW_MA5_COLUMN] = merged_df[SIGNAL_BELOW_MA5_COLUMN].fillna(False).astype(bool)
-    # 估值点位按贪恐数据所在日期对齐（同一天收盘后可得）；没有估值的日期为 NaN，回测里不设闸
-    valuation_positions = _fetch_valuation_positions(fear_source, end_date)
+    # 估值点位使用截至信号日期最近一个已确认的值；估值数据可能滞后于行情，
+    # 不能因为当天尚未生成估值就把估值闸门错误地视为关闭。
+    valuation_positions = _fetch_valuation_positions(
+        fear_source,
+        end_date,
+        valuation_signal_symbol=ma5_signal_symbol if fear_source == "cnn" else None,
+    )
     for window in VALUATION_POSITION_WINDOWS:
         merged_df[_valuation_column(window)] = pd.to_numeric(
             pd.Series(
-                [(valuation_positions.get(day) or {}).get(window) for day in merged_df["fear_date"]],
+                [
+                    _latest_confirmed_valuation_position(valuation_positions, day, window)
+                    for day in merged_df["fear_date"]
+                ],
                 index=merged_df.index,
                 dtype=object,
             ),
@@ -1687,6 +1699,21 @@ def _valuation_reason(params: SOXLFearStrategyParams, valuation: float) -> str:
     return f"，估值点位 {valuation:.1f}"
 
 
+def _latest_confirmed_valuation_position(
+    valuation_positions: Dict[date, Dict[int, Optional[float]]],
+    signal_date: Optional[date],
+    window: int,
+) -> Optional[float]:
+    """Use the most recent valuation row confirmed by the signal date."""
+    if signal_date is None or not valuation_positions:
+        return None
+    confirmed_dates = [item_date for item_date in valuation_positions if item_date <= signal_date]
+    if not confirmed_dates:
+        return None
+    value = (valuation_positions[max(confirmed_dates)] or {}).get(window)
+    return float(value) if value is not None else None
+
+
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
     dates = base_df["date"].tolist()
     date_strings = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
@@ -1800,7 +1827,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     )
 
     # 单标的即主标的，只有"所有标的都等"才需要跌破 MA5 确认
-    ma5_confirm_active = str(params.sell_ma5_confirm or SELL_MA5_CONFIRM_OFF) == SELL_MA5_CONFIRM_ALL
+    ma5_confirm_mode = str(params.sell_ma5_confirm or SELL_MA5_CONFIRM_OFF)
+    ma5_confirm_active = ma5_confirm_mode in {SELL_MA5_CONFIRM_ALL, SELL_MA5_CONFIRM_ANY}
     pending_sell = False
 
     cash = float(initial_capital)
@@ -1930,7 +1958,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 drawdown_reached = drawdown_from_peak >= params.trailing_stop_pct
                 trailing_reason = f"回撤 {drawdown_from_peak:.2f}% 触发移动止盈"
             sell_price_guard_passed = (not params.sell_price_above_avg_cost) or decision_price > float(avg_cost)
-            if drawdown_reached and sell_price_guard_passed and sell_ma5_ok:
+            exit_triggered = (
+                (drawdown_reached or sell_ma5_ok)
+                if ma5_confirm_mode == SELL_MA5_CONFIRM_ANY
+                else (drawdown_reached and sell_ma5_ok)
+            )
+            if exit_triggered and sell_price_guard_passed:
                 execution_price = sell_fill_price
                 portfolio_value = cash + shares * execution_price
                 current_position_pct = (shares * execution_price / portfolio_value * 100) if portfolio_value > 0 else 0.0

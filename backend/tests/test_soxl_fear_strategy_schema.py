@@ -61,12 +61,14 @@ def test_schema_upgrade_adds_pending_sell_signal_date(tmp_path, state_table_sql)
     _run_schema_upgrade(engine)
 
     with engine.connect() as conn:
+        config_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(soxl_fear_strategy_configs)"))}
         columns = {row[1] for row in conn.execute(text("PRAGMA table_info(soxl_fear_strategy_states)"))}
         row = conn.execute(text(
             "SELECT config_id, take_profit_cycle_sell_count, pending_sell_signal_date "
             "FROM soxl_fear_strategy_states"
         )).one()
     assert "pending_sell_signal_date" in columns
+    assert {"sell_mode", "valuation_window", "valuation_sell_min"}.issubset(config_columns)
     # 存量状态保留，补列后没有挂起的卖出信号
     assert tuple(row) == (2, 1, None)
 

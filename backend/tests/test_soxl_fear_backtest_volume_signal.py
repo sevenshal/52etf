@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.app.api.soxl_fear_backtest import (
     SOXLFearStrategyParams,
+    _fetch_fear_history,
     _prepare_base_dataframe,
     _run_backtest,
     _run_seesaw_backtest,
@@ -12,6 +13,29 @@ from src.app.api.soxl_fear_backtest import (
 
 
 class SoxlFearBacktestVolumeSignalTest(TestCase):
+    def test_cnn_history_uses_official_api_instead_of_local_database(self):
+        official_rows = [
+            {"x": 1609718400000.0, "y": 50.0},  # 2021-01-04
+            {"x": 1609804800000.0, "y": 35.0},  # 2021-01-05
+        ]
+        with patch(
+            "src.app.api.soxl_fear_backtest.CNNFearGreedIndexScraper.fetch_data",
+            return_value={"fear_and_greed_historical": {"data": official_rows}},
+        ) as fetch_data:
+            frame, meta = _fetch_fear_history(
+                "cnn",
+                pd.Timestamp("2021-01-01").date(),
+                pd.Timestamp("2021-01-05").date(),
+            )
+
+        fetch_data.assert_called_once_with(pd.Timestamp("2021-01-01").date())
+        assert frame["date"].tolist() == [
+            pd.Timestamp("2021-01-04").date(),
+            pd.Timestamp("2021-01-05").date(),
+        ]
+        assert frame["fear_greed"].tolist() == [50.0, 35.0]
+        assert meta["fear_data_source"] == "cnn_official_api"
+
     def _price_frame(self):
         dates = pd.bdate_range("2024-01-01", periods=40).date
         volumes = [100.0] * len(dates)

@@ -69,10 +69,15 @@ const SELL_MA5_CONFIRM_OPTIONS = [
   { value: 'off', label: '关闭（贪婪即卖）' },
   { value: 'non_main', label: '仅候补等跌破MA5' },
   { value: 'all', label: '所有标的都等跌破MA5' },
+  { value: 'any', label: '跌破MA5或移动止盈任一触发' },
 ];
 const SELL_MA5_CONFIRM_LABELS = SELL_MA5_CONFIRM_OPTIONS.reduce(
   (acc, item) => ({ ...acc, [item.value]: item.label }), {},
 );
+const SOXL_SELL_MODE_OPTIONS = [
+  { value: 'trailing', label: '移动止盈' },
+  { value: 'valuation_ma5', label: '贪婪+高估后等待 SOXX 跌破 MA5' },
+];
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
 );
@@ -167,6 +172,7 @@ const SoxlFearBacktest = () => {
   const [backtestMode, setBacktestMode] = useState(
     location.pathname === '/soxl-fear-backtest' ? 'soxl' : 'a_stock',
   );
+  const isSoxlMode = backtestMode === 'soxl';
   const [backtestOptions, setBacktestOptions] = useState({
     symbol_options: DEFAULT_SYMBOL_OPTIONS,
     volume_signal_symbol_options: DEFAULT_SYMBOL_OPTIONS,
@@ -260,6 +266,7 @@ const SoxlFearBacktest = () => {
   const buildPayload = (values) => {
     const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
     const executeNextOpenValues = parseBooleanList(values.execute_next_open_values);
+    const soxlSellMode = values.soxl_sell_mode || 'valuation_ma5';
     return {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
@@ -328,6 +335,38 @@ const SoxlFearBacktest = () => {
       valuation_buy_max_values: parseOptionalThresholdList(values.valuation_buy_max_values),
       valuation_sell_min_values: parseOptionalThresholdList(values.valuation_sell_min_values),
       valuation_force_sell_greed_values: parseOptionalThresholdList(values.valuation_force_sell_greed_values),
+      ...(isSoxlMode ? {
+        // SOXL 专用回测固定为：CNN + SOXL 量能买入，SOXX 估值/MA5/移动止盈卖出。
+        fear_source_values: ['cnn'],
+        symbol: 'SOXL.US',
+        volume_signal_symbol: 'SOXL.US',
+        sell_ma5_signal_symbol: 'SOXX.US',
+        buy_turn_signal_mode_values: ['legacy'],
+        sell_turn_signal_mode_values: ['legacy'],
+        sub_symbol: undefined,
+        sub_fear_source: 'cnn',
+        sub_volume_signal_symbol: undefined,
+        sub_buy_threshold_values: [25],
+        sub_volume_ratio_threshold_values: [1.6],
+        swap_threshold_values: [null],
+        sub2_symbol: undefined,
+        sub2_fear_source: 'cnn',
+        sub2_volume_signal_symbol: undefined,
+        sub2_buy_threshold_values: [20],
+        sub2_volume_ratio_threshold_values: [1.3],
+        sub3_symbol: undefined,
+        sub3_fear_source: 'cnn',
+        sub3_volume_signal_symbol: undefined,
+        sub3_buy_threshold_values: [20],
+        sub3_volume_ratio_threshold_values: [1.3],
+        sell_ma5_confirm: soxlSellMode === 'valuation_ma5' ? 'all' : 'off',
+        valuation_window_values: [252],
+        valuation_buy_max_values: [null],
+        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [80] : [null],
+        valuation_force_sell_greed_values: [null],
+        trailing_stop_pct_values: soxlSellMode === 'valuation_ma5' ? [0] : parseNumberList(values.trailing_stop_pct_values),
+        execute_next_open_values: [true],
+      } : {}),
     };
   };
 
@@ -494,26 +533,27 @@ const SoxlFearBacktest = () => {
         volume_signal_symbol: 'SOXL.US',
         sell_ma5_signal_symbol: 'SOXX.US',
         fear_source_values: ['cnn'],
-        date_range: [dayjs('2025-02-10'), dayjs()],
+        date_range: [dayjs('2021-01-01'), dayjs()],
         buy_threshold_values: '40',
         greed_threshold_values: '41',
         volume_ratio_threshold_values: '1.37',
         buy_position_pct_values: '50',
         cooldown_days_values: '10',
-        trailing_stop_pct_values: '0',
+        trailing_stop_pct_values: '10',
         sell_position_pct_values: '50',
         sell_reduction_basis_values: ['portfolio'],
         sell_price_above_avg_cost_values: ['true'],
         max_take_profit_sells_per_cycle_values: '2',
         min_position_pct_after_take_profit_values: '5',
-        execute_next_open_values: ['false'],
+        execute_next_open_values: ['true'],
         sell_ma5_confirm: 'all',
+        soxl_sell_mode: 'valuation_ma5',
         sub_symbol: undefined,
         sub2_symbol: undefined,
         sub3_symbol: undefined,
         swap_threshold_values: 'none',
         valuation_buy_max_values: 'none',
-        valuation_sell_min_values: 'none',
+        valuation_sell_min_values: '80',
         valuation_force_sell_greed_values: 'none',
       });
     }
@@ -799,6 +839,10 @@ const SoxlFearBacktest = () => {
     },
     { title: '原因', dataIndex: 'reason' },
   ];
+
+  const displayedResultColumns = isSoxlMode
+    ? resultColumns.filter(column => !['sub_symbol', 'sub2_symbol', 'sub3_symbol'].includes(column.dataIndex))
+    : resultColumns;
 
   const yearlyReturnColumns = [
     { title: '年份', dataIndex: 'year', width: 100 },
@@ -1264,18 +1308,20 @@ const SoxlFearBacktest = () => {
           }}
         >
           <Row gutter={16}>
-            <Col xs={24} md={6}>
-              <Form.Item name="a_stock_pair" label="A股指数ETF组合">
-                <Select
-                  allowClear
-                  showSearch
-                  optionFilterProp="label"
-                  placeholder="选择后自动填入标的和贪恐来源"
-                  options={aStockPresetPairs.map(item => ({ label: item.label, value: item.key }))}
-                  onChange={handleAStockPresetPairChange}
-                />
-              </Form.Item>
-            </Col>
+            {!isSoxlMode && (
+              <Col xs={24} md={6}>
+                <Form.Item name="a_stock_pair" label="A股指数ETF组合">
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择后自动填入标的和贪恐来源"
+                    options={aStockPresetPairs.map(item => ({ label: item.label, value: item.key }))}
+                    onChange={handleAStockPresetPairChange}
+                  />
+                </Form.Item>
+              </Col>
+            )}
             <Col xs={24} md={4}>
               <Form.Item name="symbol" label="标的">
                 <Select showSearch optionFilterProp="label" options={symbolOptions} onChange={handleSymbolChange} />
@@ -1413,6 +1459,7 @@ const SoxlFearBacktest = () => {
                 <InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
+            {!isSoxlMode && (<>
             <Col xs={24} md={4}>
               <Form.Item name="volume_z_threshold_values" label="放量标准差(log-z)候选" tooltip="逗号分隔；none=旧量比逻辑；数值=log(成交量)相对前20日均值的标准差倍数，默认 1.25">
                 <Input placeholder="例如 none,1.25,1.5（none=旧量比）" />
@@ -1444,6 +1491,8 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={3}><Form.Item name="volume_top_score_values" label="量能顶阈值"><Input /></Form.Item></Col>
             <Col xs={24} md={3}><Form.Item name="volume_expand_std_values" label="量能底放量σ"><Input /></Form.Item></Col>
             <Col xs={24} md={3}><Form.Item name="volume_shrink_std_values" label="量能顶缩量σ"><Input /></Form.Item></Col>
+            </>)}
+            {!isSoxlMode && (<>
             <Col xs={24} md={24}>
               <Alert
                 type="info"
@@ -1521,15 +1570,26 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
               </Form.Item>
             </Col>
+            </>)}
             <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="第三候补 + 卖出跌破MA5确认（可选）"
-                description="第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。红利+半导体+纳指科技 2023-03-22 起：关闭 274.7%，全部都等 275.9%，仅候补等 315.7%（夏普 2.43，最大回撤 9.8% 不变）。"
+                message={isSoxlMode ? 'SOXL 卖出规则' : '第三候补 + 卖出跌破MA5确认（可选）'}
+                description={isSoxlMode
+                  ? 'SOXL 可选择移动止盈，或 CNN 贪婪且 SOXX 估值分位达到阈值后，等待 SOXX 跌破 MA5 卖出，固定次日开盘成交。'
+                  : '第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
               />
             </Col>
+            {isSoxlMode && (
+              <Col xs={24} md={8}>
+                <Form.Item name="soxl_sell_mode" label="SOXL 卖出模式">
+                  <Select options={SOXL_SELL_MODE_OPTIONS} />
+                </Form.Item>
+              </Col>
+            )}
+            {!isSoxlMode && (<>
             <Col xs={24} md={4}>
               <Form.Item name="sub3_symbol" label="第三候补标的">
                 <Select allowClear showSearch optionFilterProp="label" placeholder="留空=不启用" options={symbolOptions} />
@@ -1557,25 +1617,31 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
               </Form.Item>
             </Col>
-            <Col xs={24} md={6}>
+            </>)}
+            {!isSoxlMode && (<Col xs={24} md={6}>
               <Form.Item name="sell_ma5_confirm" label="卖出跌破MA5确认">
                 <Select options={SELL_MA5_CONFIRM_OPTIONS} />
               </Form.Item>
-            </Col>
+            </Col>)}
             <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="估值点位闸门（可选）"
-                description="估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖（贪婪但还不贵就继续拿）；贪恐达到兜底阈值时不看估值直接卖。A股指数用成分一致预期估值，美股指数（QQQ/SPY/SOXX/DIA 自算贪恐来源）用美股ETF估值分析（EVC 成分公允价值 ÷ 持仓净值）；没有对应指数估值的来源（如 CNN）、估值样本不足 120 天的早期日期不设闸。none=关闭。"
+                message={isSoxlMode ? 'SOXX 估值闸门' : '估值点位闸门（可选）'}
+                description={isSoxlMode
+                  ? 'SOXL 专用固定使用 SOXX 近 252 个交易日估值分位；CNN 贪婪且 SOXX 估值分位 ≥80 才进入卖出等待状态。'
+                  : '估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖。'}
               />
             </Col>
+            {isSoxlMode ? null : (
             <Col xs={24} md={4}>
               <Form.Item name="valuation_window_values" label="估值点位窗口候选">
                 <Select mode="multiple" options={valuationWindowOptions} />
               </Form.Item>
             </Col>
+            )}
+            {isSoxlMode ? null : (<>
             <Col xs={24} md={4}>
               <Form.Item name="valuation_buy_max_values" label="买入估值点位(<=)候选">
                 <Input placeholder="例如 none,20,40（none=关闭）" />
@@ -1591,6 +1657,7 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 none,90（none=不兜底）" />
               </Form.Item>
             </Col>
+            </>)}
           </Row>
 
           <Space>
@@ -1643,7 +1710,7 @@ const SoxlFearBacktest = () => {
         <Card title={`最优参数候选 (${searchResults.length} 组)`} style={{ marginBottom: 24 }}>
           <Table
             dataSource={searchResults}
-            columns={resultColumns}
+            columns={displayedResultColumns}
             rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}-${record.swap_threshold}-${record.valuation_window}-${record.valuation_buy_max}-${record.valuation_sell_min}-${record.valuation_force_sell_greed}`}
             pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 2210 }}

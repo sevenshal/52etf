@@ -5,12 +5,14 @@ MA5 口径与实盘一致：用「量比来源标的」的收盘价，跌破自�
 """
 
 from unittest.mock import patch
+from datetime import date
 
 import numpy as np
 import pandas as pd
 
 from src.app.api.soxl_fear_backtest import (
     SELL_MA5_CONFIRM_ALL,
+    SELL_MA5_CONFIRM_ANY,
     SELL_MA5_CONFIRM_NON_MAIN,
     SELL_MA5_CONFIRM_OFF,
     SIGNAL_BELOW_MA5_COLUMN,
@@ -18,8 +20,18 @@ from src.app.api.soxl_fear_backtest import (
     _run_backtest,
     _run_seesaw_backtest,
     _prepare_base_dataframe,
+    _latest_confirmed_valuation_position,
     _valuation_column,
 )
+
+
+def test_valuation_uses_latest_confirmed_point_before_signal_date():
+    positions = {
+        date(2025, 1, 2): {252: 61.0},
+        date(2025, 1, 6): {252: 84.0},
+    }
+    assert _latest_confirmed_valuation_position(positions, date(2025, 1, 5), 252) == 61.0
+    assert _latest_confirmed_valuation_position(positions, date(2025, 1, 6), 252) == 84.0
 
 
 def _frame(fear, close, symbol="510880.SH", label="上证红利 指数贪恐"):
@@ -89,6 +101,28 @@ def test_sell_ma5_all_waits_for_ma5_break():
     assert _sell_dates(result) == ["2025-03-13"]
 
 
+def test_sell_ma5_any_exits_on_trailing_drawdown_without_ma5_break():
+    frame = _frame(FEAR, CLOSE)
+    # 当日收盘仍在 SOXX MA5 上方，但盘中高点相对收盘已回撤超过 10%。
+    frame.loc[8, "high"] = 17.0
+    frame.loc[8, "close"] = 15.2
+    frame.loc[8, "open"] = 15.2
+    frame.loc[8, "low"] = 15.2
+    frame.loc[8, "execution_price"] = 15.2
+    close = frame["close"].tolist()
+    ma5 = pd.Series(close).rolling(5, min_periods=5).mean()
+    frame[SIGNAL_BELOW_MA5_COLUMN] = (pd.Series(close) < ma5).where(ma5.notna(), False).astype(bool)
+    assert not bool(frame.loc[8, SIGNAL_BELOW_MA5_COLUMN])
+
+    result = _run_backtest(
+        frame,
+        _params(sell_ma5_confirm=SELL_MA5_CONFIRM_ANY, trailing_stop_pct=10),
+        100000.0,
+        detailed=True,
+    )
+    assert _sell_dates(result) == ["2025-03-13"]
+
+
 def test_sell_ma5_source_can_be_independent_from_volume_source():
     dates = list(pd.bdate_range("2025-01-02", periods=30).date)
 
@@ -116,7 +150,7 @@ def test_sell_ma5_source_can_be_independent_from_volume_source():
     ), patch(
         "src.app.api.soxl_fear_backtest._fetch_valuation_positions",
         return_value={},
-    ):
+    ) as fetch_valuation:
         base_df, meta = _prepare_base_dataframe(
             "SOXL.US",
             dates[20],
@@ -128,6 +162,11 @@ def test_sell_ma5_source_can_be_independent_from_volume_source():
 
     assert meta["volume_signal_symbol"] == "SOXL.US"
     assert meta["sell_ma5_signal_symbol"] == "SOXX.US"
+    fetch_valuation.assert_called_once_with(
+        "cnn",
+        dates[-1],
+        valuation_signal_symbol="SOXX.US",
+    )
     assert base_df[SIGNAL_BELOW_MA5_COLUMN].iloc[-1]
 
 

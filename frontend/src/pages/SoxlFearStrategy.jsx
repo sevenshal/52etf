@@ -48,6 +48,11 @@ const sellReductionBasisOptions = [
   { label: '按持仓股票', value: 'holdings' },
 ];
 
+const sellModeOptions = [
+  { label: '移动止盈', value: 'trailing' },
+  { label: '贪婪+高估后等待 SOXX 跌破 MA5', value: 'valuation_ma5' },
+];
+
 const accountTypeOptions = [
   { label: 'Interactive Brokers (IB)', value: 'ib' },
   { label: '长桥证券 (Longport)', value: 'longport' },
@@ -74,6 +79,9 @@ const defaultValues = {
   buy_position_pct: 60,
   cooldown_days: 10,
   trailing_stop_pct: 5,
+  sell_mode: 'trailing',
+  valuation_window: 252,
+  valuation_sell_min: 80,
   sell_position_pct: 50,
   sell_reduction_basis: 'portfolio',
   max_take_profit_sells_per_cycle: 2,
@@ -489,10 +497,10 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           sub3_symbol: undefined,
           swap_threshold_values: 'none',
           valuation_buy_max_values: 'none',
-          valuation_sell_min_values: 'none',
+          valuation_sell_min_values: values.sell_mode === 'valuation_ma5' ? String(values.valuation_sell_min ?? 80) : 'none',
           valuation_force_sell_greed_values: 'none',
           // 传字符串：history state 会被 structuredClone，dayjs 实例会丢原型方法导致回测页白屏
-          date_range: ['2025-02-10', dayjs().format('YYYY-MM-DD')],
+          date_range: ['2021-01-01', dayjs().format('YYYY-MM-DD')],
           initial_capital: 100000,
           top_n: 1,
           objective: 'annualized_return',
@@ -503,14 +511,18 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           volume_ratio_threshold_values: '1.37',
           buy_position_pct_values: '50',
           cooldown_days_values: '10',
-          trailing_stop_pct_values: '0',
+          trailing_stop_pct_values: values.sell_mode === 'valuation_ma5' ? '0' : String(values.trailing_stop_pct || 5),
           sell_position_pct_values: '50',
           sell_reduction_basis_values: ['portfolio'],
           sell_price_above_avg_cost_values: ['true'],
           max_take_profit_sells_per_cycle_values: '2',
           min_position_pct_after_take_profit_values: '5',
-          execute_next_open_values: ['false'],
-          sell_ma5_confirm: 'all',
+          execute_next_open_values: ['true'],
+          sell_ma5_confirm: values.sell_mode === 'valuation_ma5' ? 'all' : 'off',
+          soxl_sell_mode: values.sell_mode || 'trailing',
+          sell_mode: values.sell_mode || 'trailing',
+          valuation_window: values.valuation_window || 252,
+          valuation_sell_min: values.valuation_sell_min || 80,
         },
       },
     });
@@ -868,6 +880,24 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         <Col xs={24} md={8}>
           <Form.Item name="trailing_stop_pct" label="移动止盈回撤%" rules={[{ required: true }]}>
             <InputNumber min={0} max={100} step={0.1} style={{ width: '100%' }} />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Row gutter={16}>
+        <Col xs={24} md={8}>
+          <Form.Item name="sell_mode" label="SOXL 卖出模式" rules={[{ required: true }]}>
+            <Select options={sellModeOptions} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="valuation_window" label="SOXX 估值分位窗口" rules={[{ required: true }]}>
+            <Select options={[{ label: '252日', value: 252 }, { label: '504日', value: 504 }]} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="valuation_sell_min" label="SOXX 高估分位≥" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
       </Row>

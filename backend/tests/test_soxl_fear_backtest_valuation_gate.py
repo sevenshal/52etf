@@ -122,7 +122,7 @@ def test_seesaw_applies_gate_to_each_leg_with_its_own_valuation():
     assert _trade_days(result, "SELL") == [_day(3)]
 
 
-def test_prepare_base_dataframe_aligns_valuation_to_fear_date():
+def test_prepare_base_dataframe_uses_latest_confirmed_valuation_before_fear_date():
     dates = list(pd.bdate_range("2024-01-01", periods=40).date)
     price_df = pd.DataFrame({
         "date": dates, "open": [10.0] * 40, "high": [12.0] * 40, "low": [9.0] * 40,
@@ -143,8 +143,9 @@ def test_prepare_base_dataframe_aligns_valuation_to_fear_date():
     row = base_df[base_df["date"] == dates[30]].iloc[0]
     assert row[_valuation_column(252)] == 91.0
     assert row[_valuation_column(504)] == 85.0
-    assert base_df[_valuation_column(252)].notna().sum() == 1
-    assert meta["valuation_points"] == 1
+    # 估值点位一旦确认，后续信号日沿用最近一条已确认值，不等待当天重新计算。
+    assert base_df[_valuation_column(252)].notna().sum() == 10
+    assert meta["valuation_points"] == 10
 
 
 def test_valuation_position_history_has_no_look_ahead():

@@ -47,6 +47,9 @@ class SoxlFearStrategyConfigPayload(BaseModel):
     buy_position_pct: float = 60.0
     cooldown_days: int = 10
     trailing_stop_pct: float = 5.0
+    sell_mode: str = "trailing"
+    valuation_window: int = 252
+    valuation_sell_min: float = 80.0
     sell_position_pct: float = 50.0
     sell_reduction_basis: str = "portfolio"
     max_take_profit_sells_per_cycle: int = 2
@@ -72,12 +75,25 @@ class SoxlFearStrategyConfigPayload(BaseModel):
             raise ValueError("sell_reduction_basis 仅支持 portfolio 或 holdings")
         return value
 
+    @validator("sell_mode")
+    def validate_sell_mode(cls, value):
+        if value not in {"trailing", "valuation_ma5"}:
+            raise ValueError("sell_mode 仅支持 trailing 或 valuation_ma5")
+        return value
+
+    @validator("valuation_window")
+    def validate_valuation_window(cls, value):
+        if value not in {252, 504}:
+            raise ValueError("valuation_window 仅支持 252 或 504")
+        return value
+
     @validator(
         "buy_threshold",
         "greed_threshold",
         "volume_ratio_threshold",
         "buy_position_pct",
         "trailing_stop_pct",
+        "valuation_sell_min",
         "sell_position_pct",
         "min_position_pct_after_take_profit",
         "rebalance_threshold_pct",
@@ -142,6 +158,7 @@ class SoxlFearStrategyStatePayload(BaseModel):
     cooldown_remaining_days: int = 0
     greed_peak_price: Optional[float] = None
     take_profit_cycle_sell_count: int = 0
+    pending_sell_signal_date: Optional[date] = None
 
     @validator("cooldown_remaining_days")
     def validate_cooldown_remaining_days(cls, value):
@@ -187,6 +204,9 @@ CONFIG_FIELDS = [
     "buy_position_pct",
     "cooldown_days",
     "trailing_stop_pct",
+    "sell_mode",
+    "valuation_window",
+    "valuation_sell_min",
     "sell_position_pct",
     "sell_reduction_basis",
     "max_take_profit_sells_per_cycle",
@@ -474,6 +494,7 @@ def _soxl_state_response(
         cooldown_remaining_days=int(getattr(state, "cooldown_remaining_days", 0) or 0),
         greed_peak_price=getattr(state, "greed_peak_price", None),
         take_profit_cycle_sell_count=int(getattr(state, "take_profit_cycle_sell_count", 0) or 0),
+        pending_sell_signal_date=getattr(state, "pending_sell_signal_date", None),
         updated_at=getattr(state, "updated_at", None),
         has_state=bool(state),
     )
@@ -668,6 +689,7 @@ def update_soxl_fear_strategy_state_by_config(
     state.cooldown_remaining_days = int(payload.cooldown_remaining_days or 0)
     state.greed_peak_price = payload.greed_peak_price
     state.take_profit_cycle_sell_count = int(payload.take_profit_cycle_sell_count or 0)
+    state.pending_sell_signal_date = payload.pending_sell_signal_date
     state.updated_at = datetime.now()
     db.commit()
     db.refresh(state)

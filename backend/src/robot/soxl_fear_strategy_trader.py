@@ -49,6 +49,7 @@ from ..core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
 )
+from ..core.services.index_valuation import load_latest_index_valuation_position
 from ..core.services.ib_service import IBKRService
 from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
@@ -461,6 +462,49 @@ class SoxlFearStrategyTrader:
             if close_price > 0 and high_price > 0:
                 rows.append((item_date, high_price, close_price))
         return sorted(rows, key=lambda value: value[0])
+
+    def _get_soxx_exit_context(
+        self,
+        account_id: str,
+        signal_date: date,
+        valuation_window: int = 252,
+        preferred_longport_account_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Build the confirmed SOXX MA5/valuation inputs used by the live exit."""
+        rows = self._fetch_daily_price_rows(
+            account_id,
+            "SOXX.US",
+            signal_date - timedelta(days=45),
+            signal_date,
+            preferred_longport_account_id=preferred_longport_account_id,
+        )
+        if not rows or rows[-1][0] < signal_date:
+            market_data_service = self._get_market_data_service(
+                account_id,
+                preferred_longport_account_id,
+            )
+            quote = market_data_service.get_quote("SOXX.US")
+            quote_timestamp = self._to_eastern_datetime((quote or {}).get("timestamp"))
+            if quote and quote.get("price") and (quote_timestamp is None or quote_timestamp.date() == signal_date):
+                rows.append((signal_date, float(quote.get("high") or quote["price"]), float(quote["price"])))
+        if len(rows) < 5:
+            return {"available": False, "reason": "SOXX 日线不足 5 天"}
+        closes = pd.Series([item[2] for item in rows], dtype=float)
+        ma5 = float(closes.tail(5).mean())
+        close = float(rows[-1][2])
+        valuation = load_latest_index_valuation_position(
+            "SOXX.US",
+            as_of_date=signal_date,
+            window=valuation_window,
+        )
+        return {
+            "available": True,
+            "date": rows[-1][0],
+            "close": close,
+            "ma5": ma5,
+            "below_ma5": close < ma5,
+            "valuation_position": valuation,
+        }
 
     def _backfill_missing_greed_state(
         self,
@@ -962,6 +1006,7 @@ class SoxlFearStrategyTrader:
                 state.cooldown_remaining_days = int(state_values.cooldown_remaining_days or 0)
                 state.greed_peak_price = state_values.greed_peak_price
                 state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
+                state.pending_sell_signal_date = getattr(state_values, "pending_sell_signal_date", None)
 
                 db.add(
                     SoxlFearStrategyLog(
@@ -1019,6 +1064,19 @@ class SoxlFearStrategyTrader:
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
             volume_detail = self._format_volume_projection_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
+            preferred_longport_account_id = config.longport_account_id if config.account_type == "longport" else None
+            sell_mode = str(getattr(config, "sell_mode", None) or "trailing")
+            valuation_window = int(getattr(config, "valuation_window", 252) or 252)
+            valuation_sell_min_value = getattr(config, "valuation_sell_min", None)
+            valuation_sell_min = float(80.0 if valuation_sell_min_value is None else valuation_sell_min_value)
+            soxx_exit_context = {"available": False, "reason": "移动止盈模式未启用"}
+            if sell_mode == "valuation_ma5":
+                soxx_exit_context = self._get_soxx_exit_context(
+                    config.account_id,
+                    market_date,
+                    valuation_window=valuation_window,
+                    preferred_longport_account_id=preferred_longport_account_id,
+                )
             rebalance_notification = None
             order_action = None
             order_quantity = 0
@@ -1034,6 +1092,12 @@ class SoxlFearStrategyTrader:
                 if persisted_config:
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
+                    config.sell_mode = getattr(persisted_config, "sell_mode", None) or "trailing"
+                    config.valuation_window = int(getattr(persisted_config, "valuation_window", 252) or 252)
+                    persisted_valuation_sell_min = getattr(persisted_config, "valuation_sell_min", None)
+                    config.valuation_sell_min = float(
+                        80.0 if persisted_valuation_sell_min is None else persisted_valuation_sell_min
+                    )
 
                 state_row = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config_id).first()
                 state = SimpleNamespace(
@@ -1044,6 +1108,7 @@ class SoxlFearStrategyTrader:
                     cooldown_remaining_days=int(getattr(state_row, "cooldown_remaining_days", 0) or 0),
                     greed_peak_price=getattr(state_row, "greed_peak_price", None),
                     take_profit_cycle_sell_count=int(getattr(state_row, "take_profit_cycle_sell_count", 0) or 0),
+                    pending_sell_signal_date=getattr(state_row, "pending_sell_signal_date", None),
                 )
 
                 shares = int(broker_snapshot.shares)
@@ -1064,12 +1129,28 @@ class SoxlFearStrategyTrader:
                     state.last_processed_date = market_date
 
                 is_fear = float(cnn_score) <= float(config.buy_threshold)
-                is_greedy = float(cnn_score) >= float(config.greed_threshold)
+                greedy_signal = float(cnn_score) >= float(config.greed_threshold)
                 can_trade = state.cooldown_remaining_days <= 0
+
+                valuation_position = soxx_exit_context.get("valuation_position")
+                valuation_is_high = (
+                    valuation_position is not None
+                    and float(valuation_position) >= float(config.valuation_sell_min)
+                )
+                if str(config.sell_mode or "trailing") == "valuation_ma5":
+                    if shares > 0 and allow_greed_state_update and greedy_signal and valuation_is_high:
+                        state.pending_sell_signal_date = market_date
+                    is_greedy = bool(state.pending_sell_signal_date)
+                    sell_exit_ready = bool(is_greedy and soxx_exit_context.get("below_ma5"))
+                else:
+                    is_greedy = greedy_signal
+                    sell_exit_ready = False
+                    state.pending_sell_signal_date = None
 
                 if shares <= 0:
                     state.greed_peak_price = None
                     state.take_profit_cycle_sell_count = 0
+                    state.pending_sell_signal_date = None
                 elif allow_greed_state_update:
                     if not is_greedy:
                         state.greed_peak_price = None
@@ -1108,14 +1189,25 @@ class SoxlFearStrategyTrader:
                     sell_amount = trade_quantity * current_price
                     trade_pct = (sell_amount / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
-                    if drawdown_from_peak >= float(config.trailing_stop_pct) and avg_cost > 0 and current_price > avg_cost and current_position_ratio > float(config.min_position_pct_after_take_profit):
+                    if (
+                        (sell_exit_ready if str(config.sell_mode or "trailing") == "valuation_ma5" else drawdown_from_peak >= float(config.trailing_stop_pct))
+                        and avg_cost > 0
+                        and current_price > avg_cost
+                        and current_position_ratio > float(config.min_position_pct_after_take_profit)
+                    ):
                         if trade_quantity >= 1 and trade_pct > float(config.rebalance_threshold_pct):
                             order_action = "SELL"
                             order_quantity = trade_quantity
-                            order_message_template = (
-                                f"CNN={cnn_score:.2f} 进入止盈区，价格较峰值回撤 {drawdown_from_peak:.2f}% "
-                                "触发移动止盈，订单ID={order_id}"
-                            )
+                            if str(config.sell_mode or "trailing") == "valuation_ma5":
+                                order_message_template = (
+                                    f"CNN={cnn_score:.2f} 且 SOXX 估值点位 {float(valuation_position):.1f} 高估，"
+                                    f"SOXX 跌破 MA5，订单ID={{order_id}}"
+                                )
+                            else:
+                                order_message_template = (
+                                    f"CNN={cnn_score:.2f} 进入止盈区，价格较峰值回撤 {drawdown_from_peak:.2f}% "
+                                    "触发移动止盈，订单ID={order_id}"
+                                )
                             position_ratio_after = max(0.0, ((shares - trade_quantity) * current_price / portfolio_value * 100) if portfolio_value > 0 else 0.0)
                         else:
                             trade_message = "止盈信号成立，但可卖数量过小或未达到调仓阈值"
@@ -1180,6 +1272,7 @@ class SoxlFearStrategyTrader:
                 state.cooldown_remaining_days = int(config.cooldown_days)
                 if trade_action == "SELL":
                     state.take_profit_cycle_sell_count += 1
+                    state.pending_sell_signal_date = None
                     if shares - trade_quantity <= 0 or state.take_profit_cycle_sell_count >= int(config.max_take_profit_sells_per_cycle):
                         state.greed_peak_price = None
                     else:
