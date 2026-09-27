@@ -34,7 +34,10 @@ from ...robot.a_stock_base_data_config import (
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
 from .account import valid_admin_account
 
-router = APIRouter(prefix="/api/fear-volume-backtest", tags=["Fear Volume Backtest"])
+# 两套回测的 API 入口分开：本模块只作为共享计算实现，同时暴露 SOXL 入口；
+# A 股入口在文件末尾单独注册，避免前端再把两类参数混在同一个路径下。
+router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["SOXL Fear Volume Backtest"])
+a_stock_router = APIRouter(prefix="/api/a-stock-fear-backtest", tags=["A-stock Fear Volume Backtest"])
 logger = logging.getLogger(__name__)
 SEARCH_JOBS: Dict[str, Dict] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
@@ -3823,3 +3826,40 @@ def run_soxl_fear_backtest(
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# A 股回测沿用同一套经过验证的底层计算器，但拥有独立的路由、任务空间和
+# 前端入口。这样后续 A 股候选参数与 SOXL 专用参数可以分别演进，不再依赖
+# 一个“万能”URL来区分市场。
+a_stock_router.add_api_route(
+    "/options",
+    get_soxl_fear_backtest_options,
+    methods=["GET"],
+    name="get_a_stock_fear_backtest_options",
+)
+a_stock_router.add_api_route(
+    "/search",
+    search_soxl_fear_params,
+    methods=["POST"],
+    name="search_a_stock_fear_params",
+)
+a_stock_router.add_api_route(
+    "/search/jobs",
+    create_soxl_fear_search_job,
+    methods=["POST"],
+    response_model=SOXLFearSearchJobCreated,
+    name="create_a_stock_fear_search_job",
+)
+a_stock_router.add_api_route(
+    "/search/jobs/{task_id}",
+    get_soxl_fear_search_job_status,
+    methods=["GET"],
+    response_model=SOXLFearSearchJobStatus,
+    name="get_a_stock_fear_search_job_status",
+)
+a_stock_router.add_api_route(
+    "/run",
+    run_soxl_fear_backtest,
+    methods=["POST"],
+    name="run_a_stock_fear_backtest",
+)

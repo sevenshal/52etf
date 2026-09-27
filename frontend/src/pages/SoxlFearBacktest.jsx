@@ -173,6 +173,7 @@ const SoxlFearBacktest = () => {
     location.pathname === '/soxl-fear-backtest' ? 'soxl' : 'a_stock',
   );
   const isSoxlMode = backtestMode === 'soxl';
+  const backtestApiPrefix = isSoxlMode ? '/api/soxl-fear-backtest' : '/api/a-stock-fear-backtest';
   const [backtestOptions, setBacktestOptions] = useState({
     symbol_options: DEFAULT_SYMBOL_OPTIONS,
     volume_signal_symbol_options: DEFAULT_SYMBOL_OPTIONS,
@@ -236,7 +237,7 @@ const SoxlFearBacktest = () => {
     const loadOptions = async () => {
       setOptionsLoading(true);
       try {
-        const { data } = await request.get('/api/fear-volume-backtest/options');
+        const { data } = await request.get(`${backtestApiPrefix}/options`);
         if (!cancelled) {
           setBacktestOptions({
             symbol_options: data.symbol_options?.length ? data.symbol_options : DEFAULT_SYMBOL_OPTIONS,
@@ -261,7 +262,7 @@ const SoxlFearBacktest = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [backtestApiPrefix]);
 
   const buildPayload = (values) => {
     const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
@@ -271,6 +272,7 @@ const SoxlFearBacktest = () => {
     const soxlValuationSellMin = Number.isFinite(Number(values.soxl_valuation_sell_min))
       ? Number(values.soxl_valuation_sell_min)
       : 80;
+    const soxlValuationBuyMaxValues = parseOptionalThresholdList(values.soxl_valuation_buy_max_values);
     const soxlBuyThresholdValues = parseNumberList(values.buy_threshold_values);
     const soxlGreedThresholdValues = parseNumberList(values.greed_threshold_values);
     const soxlVolumeRatioThresholdValues = parseNumberList(values.volume_ratio_threshold_values);
@@ -399,7 +401,7 @@ const SoxlFearBacktest = () => {
         turn_signal_cooldown_days_values: [5],
         sell_ma5_confirm: soxlSellMode === 'valuation_ma5' ? 'all' : 'off',
         valuation_window_values: [soxlValuationWindow],
-        valuation_buy_max_values: [null],
+        valuation_buy_max_values: soxlValuationBuyMaxValues,
         valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [soxlValuationSellMin] : [null],
         valuation_force_sell_greed_values: [null],
         trailing_stop_pct_values: soxlSellMode === 'valuation_ma5'
@@ -541,7 +543,7 @@ const SoxlFearBacktest = () => {
     setSearchStatus('pending');
     try {
       const payload = buildPayload(values);
-      const { data } = await request.post('/api/fear-volume-backtest/search/jobs', payload, {
+      const { data } = await request.post(`${backtestApiPrefix}/search/jobs`, payload, {
         timeout: 60 * 1000,
       });
       searchTaskIdRef.current = data.task_id;
@@ -589,6 +591,7 @@ const SoxlFearBacktest = () => {
         sell_ma5_confirm: 'all',
         soxl_sell_mode: 'valuation_ma5',
         soxl_valuation_window: 252,
+        soxl_valuation_buy_max_values: 'none',
         soxl_valuation_sell_min: 80,
         sub_symbol: undefined,
         sub2_symbol: undefined,
@@ -646,7 +649,7 @@ const SoxlFearBacktest = () => {
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
         params: buildParamsFromRecord(record),
       };
-      const { data } = await request.post('/api/fear-volume-backtest/run', payload);
+      const { data } = await request.post(`${backtestApiPrefix}/run`, payload);
       setDetailedResult(data);
       setTimeout(() => {
         document.getElementById('soxl-fear-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1345,6 +1348,7 @@ const SoxlFearBacktest = () => {
             sell_ma5_confirm: 'off',
             soxl_sell_mode: 'valuation_ma5',
             soxl_valuation_window: 252,
+            soxl_valuation_buy_max_values: 'none',
             soxl_valuation_sell_min: 80,
             valuation_window_values: [252],
             valuation_buy_max_values: 'none',
@@ -1642,6 +1646,15 @@ const SoxlFearBacktest = () => {
               <Col xs={24} md={8}>
                 <Form.Item name="soxl_valuation_sell_min" label="SOXX 高估分位阈值(≥)">
                   <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item
+                  name="soxl_valuation_buy_max_values"
+                  label="SOXX 买入低估分位(≤)候选"
+                  tooltip="CNN 恐慌且 SOXL 放量时，SOXX 估值分位不高于此阈值才买；none=不启用，可填 none,20,40"
+                >
+                  <Input placeholder="none,20,40（none=关闭）" />
                 </Form.Item>
               </Col>
               </>
