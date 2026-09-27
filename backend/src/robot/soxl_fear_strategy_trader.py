@@ -49,7 +49,10 @@ from ..core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
 )
-from ..core.services.index_valuation import load_latest_index_valuation_position
+from ..core.services.index_valuation import (
+    load_index_valuation_position_history,
+    resolve_index_valuation_position,
+)
 from ..core.services.ib_service import IBKRService
 from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
@@ -485,14 +488,20 @@ class SoxlFearStrategyTrader:
             )
             quote = market_data_service.get_quote("SOXX.US")
             quote_timestamp = self._to_eastern_datetime((quote or {}).get("timestamp"))
-            if quote and quote.get("price") and (quote_timestamp is None or quote_timestamp.date() == signal_date):
+            if quote and quote.get("price") and quote_timestamp and quote_timestamp.date() == signal_date:
                 rows.append((signal_date, float(quote.get("high") or quote["price"]), float(quote["price"])))
+        if not rows or rows[-1][0] != signal_date:
+            return {
+                "available": False,
+                "reason": f"SOXX 当日行情未就绪（最近日线: {rows[-1][0] if rows else '-'}）",
+            }
         if len(rows) < 5:
             return {"available": False, "reason": "SOXX 日线不足 5 天"}
         closes = pd.Series([item[2] for item in rows], dtype=float)
         ma5 = float(closes.tail(5).mean())
         close = float(rows[-1][2])
-        valuation = load_latest_index_valuation_position(
+        valuation, valuation_date = resolve_index_valuation_position(
+            load_index_valuation_position_history("SOXX.US", end_date=signal_date),
             "SOXX.US",
             as_of_date=signal_date,
             window=valuation_window,
@@ -504,6 +513,7 @@ class SoxlFearStrategyTrader:
             "ma5": ma5,
             "below_ma5": close < ma5,
             "valuation_position": valuation,
+            "valuation_date": valuation_date,
         }
 
     def _backfill_missing_greed_state(
@@ -546,6 +556,11 @@ class SoxlFearStrategyTrader:
         if not score_map:
             return None
 
+        sell_mode = str(getattr(config, "sell_mode", None) or "trailing")
+        valuation_history = {}
+        if sell_mode in {"valuation_ma5", "valuation_trailing"}:
+            valuation_history = load_index_valuation_position_history("SOXX.US", end_date=backfill_end)
+
         original_processed_date = state.last_processed_date
         sorted_scores = sorted(score_map.items(), key=lambda value: value[0])
         score_index = 0
@@ -559,7 +574,26 @@ class SoxlFearStrategyTrader:
             if last_score is None:
                 continue
 
-            if last_score >= float(config.greed_threshold):
+            if sell_mode in {"valuation_ma5", "valuation_trailing"}:
+                valuation, _ = resolve_index_valuation_position(
+                    valuation_history,
+                    "SOXX.US",
+                    as_of_date=price_date,
+                    window=int(getattr(config, "valuation_window", 252) or 252),
+                )
+                activated = (
+                    valuation is not None
+                    and last_score >= float(config.greed_threshold)
+                    and valuation >= float(getattr(config, "valuation_sell_min", 80.0) or 80.0)
+                )
+                if sell_mode == "valuation_ma5":
+                    if activated:
+                        state.pending_sell_signal_date = price_date
+                    # MA5 确认的挂起信号不能因为随后贪恐/估值回落而消失。
+                elif activated or state.greed_peak_price is not None:
+                    # valuation_trailing 一经激活就持续追踪峰值，和当日运行分支保持一致。
+                    state.greed_peak_price = max(float(state.greed_peak_price or high_price), high_price)
+            elif last_score >= float(config.greed_threshold):
                 state.greed_peak_price = max(float(state.greed_peak_price or high_price), high_price)
             else:
                 state.greed_peak_price = None
@@ -1049,6 +1083,22 @@ class SoxlFearStrategyTrader:
             if not config_id:
                 raise ValueError("策略配置缺少配置ID")
 
+            # 配置可能刚被管理页更新；在任何行情/下单 IO 前读取卖出模式快照，
+            # 防止用过期的 window/mode 构建 SOXX 信号。
+            with get_db_ctx() as db:
+                persisted_config = db.query(SoxlFearStrategyConfig).filter(
+                    SoxlFearStrategyConfig.id == config_id
+                ).first()
+                if persisted_config:
+                    config.buy_threshold = float(persisted_config.buy_threshold)
+                    config.greed_threshold = float(persisted_config.greed_threshold)
+                    config.sell_mode = getattr(persisted_config, "sell_mode", None) or "trailing"
+                    config.valuation_window = int(getattr(persisted_config, "valuation_window", 252) or 252)
+                    persisted_valuation_sell_min = getattr(persisted_config, "valuation_sell_min", None)
+                    config.valuation_sell_min = float(
+                        80.0 if persisted_valuation_sell_min is None else persisted_valuation_sell_min
+                    )
+
             cnn_score, cnn_timestamp = self._fetch_latest_cnn_score()
 
             _, market_snapshot = self._build_realtime_dataframe(
@@ -1077,6 +1127,12 @@ class SoxlFearStrategyTrader:
                     valuation_window=valuation_window,
                     preferred_longport_account_id=preferred_longport_account_id,
                 )
+                if not soxx_exit_context.get("available"):
+                    raise ValueError(f"SOXX 卖出信号数据未就绪: {soxx_exit_context.get('reason')}")
+                if soxx_exit_context.get("valuation_position") is None:
+                    raise ValueError(
+                        "SOXX 估值点位缺失：只允许使用信号日或前一交易日的估值，无法继续执行"
+                    )
             rebalance_notification = None
             order_action = None
             order_quantity = 0
@@ -1088,17 +1144,6 @@ class SoxlFearStrategyTrader:
             status = "INFO"
 
             with get_db_ctx() as db:
-                persisted_config = db.query(SoxlFearStrategyConfig).filter(SoxlFearStrategyConfig.id == config_id).first()
-                if persisted_config:
-                    config.buy_threshold = float(persisted_config.buy_threshold)
-                    config.greed_threshold = float(persisted_config.greed_threshold)
-                    config.sell_mode = getattr(persisted_config, "sell_mode", None) or "trailing"
-                    config.valuation_window = int(getattr(persisted_config, "valuation_window", 252) or 252)
-                    persisted_valuation_sell_min = getattr(persisted_config, "valuation_sell_min", None)
-                    config.valuation_sell_min = float(
-                        80.0 if persisted_valuation_sell_min is None else persisted_valuation_sell_min
-                    )
-
                 state_row = db.query(SoxlFearStrategyState).filter(SoxlFearStrategyState.config_id == config_id).first()
                 state = SimpleNamespace(
                     config_id=config_id,

@@ -87,12 +87,12 @@ def test_backtest_uses_index_valuation_for_us_fear_sources():
     loader.assert_called_once_with("QQQ.US", end_date=signal_day)
 
 
-def test_live_us_leg_only_not_ready_on_its_own_trading_day():
+def test_live_us_leg_uses_one_prior_trading_day_only():
     positions = {date(2026, 9, 10): {252: 30.0, 504: 35.0}}
     with patch("src.robot.a_stock_fear_strategy_trader.load_index_valuation_position_history", return_value=positions):
         # A股交易日但美股休市：这条腿没有信号日恐贪、本来不出信号，不算未就绪
         assert _signal_day_valuation("qqq_clone", date(2026, 9, 11), 252, has_signal_day_fear=False) == (None, True)
-        # 有信号日恐贪但估值还没算出来 → 未就绪
-        assert _signal_day_valuation("qqq_clone", date(2026, 9, 11), 252, has_signal_day_fear=True) == (None, False)
+        # 有信号日恐贪但当日估值还没算出来 → 只回看一个美股交易日。
+        assert _signal_day_valuation("qqq_clone", date(2026, 9, 11), 252, has_signal_day_fear=True) == (30.0, True)
         assert _signal_day_valuation("qqq_clone", date(2026, 9, 10), 504) == (35.0, True)
         assert _signal_day_valuation("cnn", date(2026, 9, 10), 252) == (None, True)

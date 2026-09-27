@@ -104,6 +104,7 @@ const normalizeStateFormValues = (state) => ({
   cooldown_remaining_days: state?.cooldown_remaining_days ?? 0,
   greed_peak_price: state?.greed_peak_price ?? null,
   take_profit_cycle_sell_count: state?.take_profit_cycle_sell_count ?? 0,
+  pending_sell_signal_date: state?.pending_sell_signal_date ? dayjs(state.pending_sell_signal_date) : null,
 });
 
 const SoxlFearStrategy = ({ embedded = false }) => {
@@ -427,6 +428,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         ? values.last_processed_date.format('YYYY-MM-DD')
         : null,
       greed_peak_price: values.greed_peak_price ?? null,
+      pending_sell_signal_date: values.pending_sell_signal_date
+        ? values.pending_sell_signal_date.format('YYYY-MM-DD')
+        : null,
     };
     setStateSaving(true);
     try {
@@ -508,18 +512,19 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           objective: 'annualized_return',
           eval_workers: 1,
           fit_rebalance_threshold_pct: values.rebalance_threshold_pct,
-          buy_threshold_values: '40',
-          greed_threshold_values: '41',
-          volume_ratio_threshold_values: '1.37',
-          buy_position_pct_values: '50',
-          cooldown_days_values: '10',
-          trailing_stop_pct_values: values.sell_mode === 'valuation_ma5' ? '0' : String(values.trailing_stop_pct || 5),
-          sell_position_pct_values: '50',
-          sell_reduction_basis_values: ['portfolio'],
+          buy_threshold_values: String(values.buy_threshold),
+          greed_threshold_values: String(values.greed_threshold),
+          volume_ratio_threshold_values: String(values.volume_ratio_threshold),
+          buy_position_pct_values: String(values.buy_position_pct),
+          cooldown_days_values: String(values.cooldown_days),
+          trailing_stop_pct_values: values.sell_mode === 'valuation_ma5' ? '0' : String(values.trailing_stop_pct),
+          sell_position_pct_values: String(values.sell_position_pct),
+          sell_reduction_basis_values: [values.sell_reduction_basis],
           sell_price_above_avg_cost_values: ['true'],
-          max_take_profit_sells_per_cycle_values: '2',
-          min_position_pct_after_take_profit_values: '5',
-          execute_next_open_values: ['true'],
+          max_take_profit_sells_per_cycle_values: String(values.max_take_profit_sells_per_cycle),
+          min_position_pct_after_take_profit_values: String(values.min_position_pct_after_take_profit),
+          // 实盘在收盘附近根据当日信号下单，不应把回测变成次日开盘成交。
+          execute_next_open_values: ['false'],
           sell_ma5_confirm: values.sell_mode === 'valuation_ma5' ? 'all' : 'off',
           soxl_sell_mode: values.sell_mode || 'trailing',
           soxl_valuation_window: values.valuation_window || 252,
@@ -1050,6 +1055,9 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           <Descriptions.Item label="本轮止盈次数">
             {renderStateValue(strategyState?.take_profit_cycle_sell_count)}
           </Descriptions.Item>
+          <Descriptions.Item label="待确认卖出信号日">
+            {renderStateValue(strategyState?.pending_sell_signal_date)}
+          </Descriptions.Item>
           <Descriptions.Item label="更新时间">
             {renderStateValue(strategyState?.updated_at, (value) => dayjs(value).format('YYYY-MM-DD HH:mm:ss'))}
           </Descriptions.Item>
@@ -1064,11 +1072,17 @@ const SoxlFearStrategy = ({ embedded = false }) => {
             cooldown_remaining_days: 0,
             greed_peak_price: null,
             take_profit_cycle_sell_count: 0,
+            pending_sell_signal_date: null,
           }}
         >
           <Row gutter={16}>
             <Col xs={24} md={6}>
               <Form.Item name="last_processed_date" label="最近处理交易日">
+                <DatePicker allowClear style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="pending_sell_signal_date" label="待确认卖出信号日">
                 <DatePicker allowClear style={{ width: '100%' }} />
               </Form.Item>
             </Col>

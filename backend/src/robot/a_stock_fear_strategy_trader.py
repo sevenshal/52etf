@@ -47,7 +47,10 @@ from ..core.services.a_stock_index_valuation import (
     valuation_buy_allowed,
     valuation_sell_allowed,
 )
-from ..core.services.index_valuation import load_index_valuation_position_history
+from ..core.services.index_valuation import (
+    load_index_valuation_position_history,
+    resolve_index_valuation_position,
+)
 from ..core.services.external_trading_executor import trigger_external_trading_executor
 from ..core.services.external_trading_ledger import (
     ACTIVE_ORDER_STATUSES,
@@ -158,12 +161,21 @@ def _signal_day_valuation(
     index_symbol = _fear_source_index_symbol(fear_source)
     if not index_symbol:
         return None, True
+    # 这条腿没有信号日恐贪时（例如美股休市），无需也不应因估值缺口阻塞其它市场的交易。
+    if not has_signal_day_fear:
+        return None, True
     positions = load_index_valuation_position_history(index_symbol, end_date=signal_date)
     if not positions:
-        return None, True
-    if signal_date not in positions:
-        return None, not has_signal_day_fear
-    return positions[signal_date].get(window), True
+        return None, False
+    value, valuation_date = resolve_index_valuation_position(
+        positions,
+        index_symbol,
+        as_of_date=signal_date,
+        window=window,
+    )
+    if value is None:
+        return None, False
+    return value, valuation_date is not None
 
 
 def _format_valuation(value: Optional[float]) -> str:
@@ -861,16 +873,10 @@ class AStockFearStrategyTrader:
                     if not leg_ready:
                         not_ready_labels.append(_fear_source_label(leg_source))
                 if not_ready_labels:
-                    log_message = (
-                        f"信号日 {signal_date} 缺少估值点位（{'、'.join(not_ready_labels)}），跳过。"
-                        f"请确认 A股指数估值刷新已完成"
+                    raise ValueError(
+                        f"信号日 {signal_date} 缺少估值点位（{'、'.join(not_ready_labels)}）："
+                        "只允许使用信号日或前一交易日的估值，无法执行已配置的估值闸门"
                     )
-                    self._persist_run_result(
-                        config_id=config_id, account_id=config.account_id, symbol=symbol,
-                        trigger_source=trigger_source, action="CHECK", status="SKIPPED",
-                        message=log_message, state_values=state, run_message="估值数据未就绪",
-                    )
-                    return
             main_valuation = leg_valuations.get("main")
             sub_valuation = leg_valuations.get("sub")
             sub2_valuation = leg_valuations.get("sub2")

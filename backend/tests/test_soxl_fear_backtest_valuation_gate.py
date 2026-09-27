@@ -86,14 +86,14 @@ def test_force_sell_greed_overrides_valuation_gate():
     assert _trade_days(result, "SELL") == [_day(4)]
 
 
-def test_buy_gate_blocks_expensive_buy_but_missing_valuation_passes():
+def test_buy_gate_blocks_expensive_buy_but_missing_valuation_is_unrestricted_in_backtest():
     # 买入闸门：估值点位 <= 20（极度低估）才买；第 1 天点位 50 不够便宜
     blocked = _run_backtest(_frame(FEAR, VALUATION), _params(valuation_buy_max=20), 1_000_000.0, detailed=True)
     assert _trade_days(blocked, "BUY") == []
 
     no_valuation = [np.nan] * len(FEAR)
-    passed = _run_backtest(_frame(FEAR, no_valuation), _params(valuation_buy_max=20), 1_000_000.0, detailed=True)
-    assert _trade_days(passed, "BUY") == [_day(1)]
+    result = _run_backtest(_frame(FEAR, no_valuation), _params(valuation_buy_max=20), 1_000_000.0, detailed=True)
+    assert _trade_days(result, "BUY") == [_day(1)]
 
 
 def test_valuation_gate_uses_signal_day_value_with_next_open_execution():
@@ -116,10 +116,11 @@ def test_seesaw_applies_gate_to_each_leg_with_its_own_valuation():
     assert _trade_days(result, "BUY") == [_day(1)]
     assert _trade_days(result, "SELL") == [_day(5)]
 
-    # 候补腿没有估值时不设闸，贪婪即卖
+    # 回测早期没有估值历史时，候补腿也应按无估值闸门继续计算。
     sub_without_valuation = _frame(FEAR, [np.nan] * len(FEAR), symbol="512480.SH")
-    result = _run_seesaw_backtest(main, sub_without_valuation, params, 1_000_000.0, detailed=True)
-    assert _trade_days(result, "SELL") == [_day(3)]
+    fallback_result = _run_seesaw_backtest(main, sub_without_valuation, params, 1_000_000.0, detailed=True)
+    assert _trade_days(fallback_result, "BUY") == [_day(1)]
+    assert _trade_days(fallback_result, "SELL") == [_day(3)]
 
 
 def test_prepare_base_dataframe_uses_latest_confirmed_valuation_before_fear_date():
@@ -143,9 +144,9 @@ def test_prepare_base_dataframe_uses_latest_confirmed_valuation_before_fear_date
     row = base_df[base_df["date"] == dates[30]].iloc[0]
     assert row[_valuation_column(252)] == 91.0
     assert row[_valuation_column(504)] == 85.0
-    # 估值点位一旦确认，后续信号日沿用最近一条已确认值，不等待当天重新计算。
-    assert base_df[_valuation_column(252)].notna().sum() == 10
-    assert meta["valuation_points"] == 10
+    # 只允许信号日或前一个交易日，不能无限向前沿用旧估值。
+    assert base_df[_valuation_column(252)].notna().sum() == 2
+    assert meta["valuation_points"] == 2
 
 
 def test_valuation_position_history_has_no_look_ahead():

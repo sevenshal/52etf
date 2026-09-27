@@ -23,7 +23,10 @@ from ...core.services.a_stock_index_valuation import (
     valuation_buy_allowed,
     valuation_sell_allowed,
 )
-from ...core.services.index_valuation import load_index_valuation_position_history
+from ...core.services.index_valuation import (
+    load_index_valuation_position_history,
+    resolve_index_valuation_position,
+)
 from ...core.services.factor_backtest_engine import load_price_frame
 from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
@@ -1221,8 +1224,8 @@ def _prepare_base_dataframe(
     existing_signal_columns = [column for column in signal_columns if column in merged_df.columns]
     merged_df[existing_signal_columns] = merged_df[existing_signal_columns].ffill()
     merged_df[SIGNAL_BELOW_MA5_COLUMN] = merged_df[SIGNAL_BELOW_MA5_COLUMN].fillna(False).astype(bool)
-    # 估值点位使用截至信号日期最近一个已确认的值；估值数据可能滞后于行情，
-    # 不能因为当天尚未生成估值就把估值闸门错误地视为关闭。
+    # 估值仅可使用信号日或前一交易日，避免陈旧数据悄悄改变历史信号。
+    valuation_signal_symbol = ma5_signal_symbol if fear_source == "cnn" else FEAR_SOURCE_OPTIONS[fear_source].get("symbol")
     valuation_positions = _fetch_valuation_positions(
         fear_source,
         end_date,
@@ -1232,7 +1235,12 @@ def _prepare_base_dataframe(
         merged_df[_valuation_column(window)] = pd.to_numeric(
             pd.Series(
                 [
-                    _latest_confirmed_valuation_position(valuation_positions, day, window)
+                    _latest_confirmed_valuation_position(
+                        valuation_positions,
+                        day,
+                        window,
+                        valuation_symbol=valuation_signal_symbol,
+                    )
                     for day in merged_df["fear_date"]
                 ],
                 index=merged_df.index,
@@ -1289,6 +1297,9 @@ def _prepare_base_dataframe(
     base_df.attrs["volume_signal_label"] = _symbol_label(signal_symbol)
     base_df.attrs["sell_ma5_signal_symbol"] = ma5_signal_symbol
     base_df.attrs["sell_ma5_signal_label"] = _symbol_label(ma5_signal_symbol)
+    base_df.attrs["valuation_signal_symbol"] = (
+        valuation_signal_symbol
+    )
     base_df.attrs["execution_price_label"] = "信号日收盘价"
     return base_df, meta
 
@@ -1732,15 +1743,18 @@ def _latest_confirmed_valuation_position(
     valuation_positions: Dict[date, Dict[int, Optional[float]]],
     signal_date: Optional[date],
     window: int,
+    valuation_symbol: Optional[str] = "SOXX.US",
 ) -> Optional[float]:
-    """Use the most recent valuation row confirmed by the signal date."""
+    """Use the signal market day or one prior market day, never an older value."""
     if signal_date is None or not valuation_positions:
         return None
-    confirmed_dates = [item_date for item_date in valuation_positions if item_date <= signal_date]
-    if not confirmed_dates:
-        return None
-    value = (valuation_positions[max(confirmed_dates)] or {}).get(window)
-    return float(value) if value is not None else None
+    value, _ = resolve_index_valuation_position(
+        valuation_positions,
+        valuation_symbol,
+        as_of_date=signal_date,
+        window=window,
+    )
+    return value
 
 
 def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial_capital: float, detailed: bool = False) -> Dict:
@@ -1941,6 +1955,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         )
         is_greedy = fear_score >= params.greed_threshold if params.sell_turn_signal_mode == "legacy" else top_signal
         valuation = float(decision_valuation_values[index])
+        # 回测必须可在估值历史尚未覆盖的早期区间运行。缺失点位由统一闸门
+        # 函数视为“不设估值限制”；实盘则在 trader 中严格阻止这种交易。
         is_fear = is_fear and _valuation_buy_allowed(params, valuation)
         is_greedy = is_greedy and _valuation_sell_allowed(params, valuation, fear_score)
         # 跌破 MA5 确认：卖出信号成立后挂起，等量比来源标的收盘跌破 5 日均线再卖

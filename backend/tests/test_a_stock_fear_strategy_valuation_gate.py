@@ -64,7 +64,7 @@ def _holding_main_snapshot():
     )
 
 
-def _run(config, fear, positions):
+def _run(config, fear, positions, expect_error=False):
     trader = AStockFearStrategyTrader()
     valuation_loader = MagicMock(return_value=positions)
     with patch(f"{TRADER_MODULE}.get_db_ctx", _empty_db_ctx), \
@@ -82,8 +82,14 @@ def _run(config, fear, positions):
             patch.object(trader, "_send_rebalance_notification"), \
             patch.object(trader, "_append_error_log") as error_log:
         asyncio.run(trader.run_config_once(config, trigger_source="manual", ignore_enabled=True))
-    assert not error_log.called, error_log.call_args
-    return SimpleNamespace(sync_order=sync_order, persist=persist, snapshot=snapshot, valuation_loader=valuation_loader)
+    assert error_log.called is expect_error, error_log.call_args
+    return SimpleNamespace(
+        sync_order=sync_order,
+        persist=persist,
+        snapshot=snapshot,
+        valuation_loader=valuation_loader,
+        error_log=error_log,
+    )
 
 
 def _positions(value):
@@ -107,12 +113,21 @@ def test_live_force_sell_greed_ignores_valuation():
     assert result.sync_order.await_args.args[2] == "SELL"
 
 
-def test_live_skips_when_signal_day_valuation_not_ready():
-    result = _run(_config(), fear=80.0, positions={date(2026, 9, 10): {252: 90.0, 504: 90.0}})
+def test_live_errors_when_signal_day_and_one_prior_day_valuation_are_missing():
+    result = _run(
+        _config(),
+        fear=80.0,
+        positions={date(2026, 9, 9): {252: 90.0, 504: 90.0}},
+        expect_error=True,
+    )
     assert not result.snapshot.await_count
     assert not result.sync_order.await_count
-    assert result.persist.call_args.kwargs["status"] == "SKIPPED"
-    assert result.persist.call_args.kwargs["run_message"] == "估值数据未就绪"
+    assert "只允许使用信号日或前一交易日" in result.error_log.call_args.args[-1]
+
+
+def test_live_uses_one_prior_trading_day_valuation():
+    result = _run(_config(), fear=80.0, positions={date(2026, 9, 10): {252: 90.0, 504: 90.0}})
+    assert result.sync_order.await_args.args[2] == "SELL"
 
 
 def test_live_without_valuation_gate_keeps_old_behavior():
