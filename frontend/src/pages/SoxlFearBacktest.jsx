@@ -267,6 +267,10 @@ const SoxlFearBacktest = () => {
     const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
     const executeNextOpenValues = parseBooleanList(values.execute_next_open_values);
     const soxlSellMode = values.soxl_sell_mode || 'valuation_ma5';
+    const soxlValuationWindow = Number(values.soxl_valuation_window) || 252;
+    const soxlValuationSellMin = Number.isFinite(Number(values.soxl_valuation_sell_min))
+      ? Number(values.soxl_valuation_sell_min)
+      : 80;
     return {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
@@ -384,9 +388,9 @@ const SoxlFearBacktest = () => {
         volume_shrink_std_values: [0.25],
         turn_signal_cooldown_days_values: [5],
         sell_ma5_confirm: soxlSellMode === 'valuation_ma5' ? 'all' : 'off',
-        valuation_window_values: [252],
+        valuation_window_values: [soxlValuationWindow],
         valuation_buy_max_values: [null],
-        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [80] : [null],
+        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? [soxlValuationSellMin] : [null],
         valuation_force_sell_greed_values: [null],
         trailing_stop_pct_values: soxlSellMode === 'valuation_ma5' ? [0] : parseNumberList(values.trailing_stop_pct_values),
         execute_next_open_values: [true],
@@ -572,6 +576,8 @@ const SoxlFearBacktest = () => {
         execute_next_open_values: ['true'],
         sell_ma5_confirm: 'all',
         soxl_sell_mode: 'valuation_ma5',
+        soxl_valuation_window: 252,
+        soxl_valuation_sell_min: 80,
         sub_symbol: undefined,
         sub2_symbol: undefined,
         sub3_symbol: undefined,
@@ -1325,6 +1331,9 @@ const SoxlFearBacktest = () => {
             sub3_buy_threshold_values: '20',
             sub3_volume_ratio_threshold_values: '1.3',
             sell_ma5_confirm: 'off',
+            soxl_sell_mode: 'valuation_ma5',
+            soxl_valuation_window: 252,
+            soxl_valuation_sell_min: 80,
             valuation_window_values: [252],
             valuation_buy_max_values: 'none',
             valuation_sell_min_values: '80',
@@ -1607,11 +1616,23 @@ const SoxlFearBacktest = () => {
               />
             </Col>
             {isSoxlMode && (
+              <>
               <Col xs={24} md={8}>
                 <Form.Item name="soxl_sell_mode" label="SOXL 卖出模式">
                   <Select options={SOXL_SELL_MODE_OPTIONS} />
                 </Form.Item>
               </Col>
+              <Col xs={24} md={8}>
+                <Form.Item name="soxl_valuation_window" label="SOXX 估值分位窗口">
+                  <Select options={[{ value: 252, label: '近252个交易日' }, { value: 504, label: '近504个交易日' }]} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={8}>
+                <Form.Item name="soxl_valuation_sell_min" label="SOXX 高估分位阈值(≥)">
+                  <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              </>
             )}
             {!isSoxlMode && (<>
             <Col xs={24} md={4}>

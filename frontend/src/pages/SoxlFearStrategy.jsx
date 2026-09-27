@@ -520,6 +520,8 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           execute_next_open_values: ['true'],
           sell_ma5_confirm: values.sell_mode === 'valuation_ma5' ? 'all' : 'off',
           soxl_sell_mode: values.sell_mode || 'trailing',
+          soxl_valuation_window: values.valuation_window || 252,
+          soxl_valuation_sell_min: values.valuation_sell_min ?? 80,
           sell_mode: values.sell_mode || 'trailing',
           valuation_window: values.valuation_window || 252,
           valuation_sell_min: values.valuation_sell_min || 80,
