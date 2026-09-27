@@ -423,8 +423,9 @@ const SoxlFearBacktest = () => {
     if (!isSoxlMode) {
       return payload;
     }
-    // SOXL 不使用 A 股候补、顶底信号和 log-z/缩量实验参数；这些字段不再
-    // 发送到 SOXL 专用回测接口，避免它们继续出现在 SOXL 的候选空间里。
+    // SOXL 不使用 A 股候补、顶底信号实验参数；这些字段不再发送到专用接口。
+    // 但 volume_z_threshold/sell_shrink_z 必须保留固定值：省略后后端会填入
+    // 通用搜索默认值 volume_z=1.25，导致 SOXL 意外切成 log-z 放量策略。
     const {
       sub_symbol,
       sub_fear_source,
@@ -442,8 +443,6 @@ const SoxlFearBacktest = () => {
       sub3_volume_signal_symbol,
       sub3_buy_threshold_values,
       sub3_volume_ratio_threshold_values,
-      volume_z_threshold_values,
-      sell_shrink_z_values,
       buy_turn_signal_mode_values,
       sell_turn_signal_mode_values,
       ma5_bottom_score_values,
