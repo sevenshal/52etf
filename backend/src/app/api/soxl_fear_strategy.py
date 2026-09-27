@@ -77,8 +77,8 @@ class SoxlFearStrategyConfigPayload(BaseModel):
 
     @validator("sell_mode")
     def validate_sell_mode(cls, value):
-        if value not in {"trailing", "valuation_ma5"}:
-            raise ValueError("sell_mode 仅支持 trailing 或 valuation_ma5")
+        if value not in {"trailing", "valuation_ma5", "valuation_trailing"}:
+            raise ValueError("sell_mode 仅支持 trailing、valuation_ma5 或 valuation_trailing")
         return value
 
     @validator("valuation_window")

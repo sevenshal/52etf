@@ -995,7 +995,8 @@ class SoxlFearStrategyConfig(Base):
     max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
     min_position_pct_after_take_profit = Column(Float, nullable=False, default=10.0)
     rebalance_threshold_pct = Column(Float, nullable=False, default=5.0)
-    # SOXL 专用卖出模式：trailing=移动止盈；valuation_ma5=贪婪且高估后等待 SOXX 跌破 MA5
+    # SOXL 专用卖出模式：trailing=移动止盈；valuation_ma5=贪婪且高估后等待 SOXX 跌破 MA5；
+    # valuation_trailing=贪婪且高估后启动移动止盈
     sell_mode = Column(String, nullable=False, default="trailing")
     valuation_window = Column(Integer, nullable=False, default=252)
     valuation_sell_min = Column(Float, nullable=False, default=80.0)

@@ -1833,6 +1833,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     ma5_confirm_mode = str(params.sell_ma5_confirm or SELL_MA5_CONFIRM_OFF)
     ma5_confirm_active = ma5_confirm_mode in {SELL_MA5_CONFIRM_ALL, SELL_MA5_CONFIRM_ANY}
     pending_sell = False
+    pending_sell_valuation = None
+    pending_sell_signal_date = None
+    pending_sell_fear = None
 
     cash = float(initial_capital)
     shares = 0
@@ -1919,7 +1922,14 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         if ma5_confirm_active:
             if shares <= 0:
                 pending_sell = False
+                pending_sell_valuation = None
+                pending_sell_signal_date = None
+                pending_sell_fear = None
             elif is_greedy:
+                if not pending_sell:
+                    pending_sell_valuation = valuation
+                    pending_sell_signal_date = signal_date_text
+                    pending_sell_fear = fear_score
                 pending_sell = True
             is_greedy = is_greedy or pending_sell
             sell_ma5_ok = bool(decision_below_ma5[index])
@@ -2002,6 +2012,12 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     holdings_value_after = shares * execution_price
                     net_value_after = cash + holdings_value_after
                     pending_sell = False
+                    sell_pending_valuation = pending_sell_valuation
+                    sell_pending_signal_date = pending_sell_signal_date
+                    sell_pending_fear = pending_sell_fear
+                    pending_sell_valuation = None
+                    pending_sell_signal_date = None
+                    pending_sell_fear = None
                     if shares <= 0:
                         shares = 0
                         avg_cost = 0.0
@@ -2045,7 +2061,15 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
                             f"，均价保护{'开启' if params.sell_price_above_avg_cost else '关闭'}"
                             f"{_valuation_reason(params, valuation)}"
+                            + (
+                                f"；挂起触发日 {sell_pending_signal_date}，"
+                                f"恐贪 {sell_pending_fear:.2f}，估值点位 {sell_pending_valuation:.2f}"
+                                if sell_pending_valuation is not None else ""
+                            )
                         ),
+                        "sell_pending_signal_date": sell_pending_signal_date,
+                        "sell_pending_fear": sell_pending_fear,
+                        "sell_pending_valuation": sell_pending_valuation,
                         "fear_score": fear_score,
                         "cnn_score": fear_score,
                         "volume_ratio": volume_ratio,

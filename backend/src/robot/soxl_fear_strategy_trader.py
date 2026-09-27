@@ -1070,7 +1070,7 @@ class SoxlFearStrategyTrader:
             valuation_sell_min_value = getattr(config, "valuation_sell_min", None)
             valuation_sell_min = float(80.0 if valuation_sell_min_value is None else valuation_sell_min_value)
             soxx_exit_context = {"available": False, "reason": "移动止盈模式未启用"}
-            if sell_mode == "valuation_ma5":
+            if sell_mode in {"valuation_ma5", "valuation_trailing"}:
                 soxx_exit_context = self._get_soxx_exit_context(
                     config.account_id,
                     market_date,
@@ -1142,6 +1142,11 @@ class SoxlFearStrategyTrader:
                         state.pending_sell_signal_date = market_date
                     is_greedy = bool(state.pending_sell_signal_date)
                     sell_exit_ready = bool(is_greedy and soxx_exit_context.get("below_ma5"))
+                elif str(config.sell_mode or "trailing") == "valuation_trailing":
+                    # 与回测一致：只有 CNN 贪婪且 SOXX 已确认高估后，才启动移动止盈锚点。
+                    # 估值回落后不再继续追踪该轮移动止盈。
+                    is_greedy = bool(greedy_signal and valuation_is_high)
+                    sell_exit_ready = False
                 else:
                     is_greedy = greedy_signal
                     sell_exit_ready = False
@@ -1202,6 +1207,11 @@ class SoxlFearStrategyTrader:
                                 order_message_template = (
                                     f"CNN={cnn_score:.2f} 且 SOXX 估值点位 {float(valuation_position):.1f} 高估，"
                                     f"SOXX 跌破 MA5，订单ID={{order_id}}"
+                                )
+                            elif str(config.sell_mode or "trailing") == "valuation_trailing":
+                                order_message_template = (
+                                    f"CNN={cnn_score:.2f} 且 SOXX 估值点位 {float(valuation_position):.1f} 高估，"
+                                    f"价格较高位回撤 {drawdown_from_peak:.2f}% 触发移动止盈，订单ID={{order_id}}"
                                 )
                             else:
                                 order_message_template = (

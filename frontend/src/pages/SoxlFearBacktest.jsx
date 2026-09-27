@@ -77,6 +77,7 @@ const SELL_MA5_CONFIRM_LABELS = SELL_MA5_CONFIRM_OPTIONS.reduce(
 const SOXL_SELL_MODE_OPTIONS = [
   { value: 'trailing', label: '移动止盈' },
   { value: 'valuation_ma5', label: '贪婪+高估后等待 SOXX 跌破 MA5' },
+  { value: 'valuation_trailing', label: '贪婪+高估后启动移动止盈' },
 ];
 const formatNumber = (value, digits = 2) => (
   value === null || value === undefined ? '-' : Number(value || 0).toFixed(digits)
@@ -280,7 +281,7 @@ const SoxlFearBacktest = () => {
     const soxlTrailingValues = parseNumberList(values.trailing_stop_pct_values);
     const soxlMaxSellValues = parseNumberList(values.max_take_profit_sells_per_cycle_values, true);
     const soxlMinPositionValues = parseNumberList(values.min_position_pct_after_take_profit_values);
-    return {
+    const payload = {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
       sell_ma5_signal_symbol: values.sell_ma5_signal_symbol || undefined,
@@ -400,7 +401,8 @@ const SoxlFearBacktest = () => {
         sell_ma5_confirm: soxlSellMode === 'valuation_ma5' ? 'all' : 'off',
         valuation_window_values: [soxlValuationWindow],
         valuation_buy_max_values: soxlValuationBuyMaxValues,
-        valuation_sell_min_values: soxlSellMode === 'valuation_ma5' ? soxlValuationSellMinValues : [null],
+        valuation_sell_min_values: ['valuation_ma5', 'valuation_trailing'].includes(soxlSellMode)
+          ? soxlValuationSellMinValues : [null],
         valuation_force_sell_greed_values: [null],
         trailing_stop_pct_values: soxlSellMode === 'valuation_ma5'
           ? [0]
@@ -408,6 +410,44 @@ const SoxlFearBacktest = () => {
         execute_next_open_values: [true],
       } : {}),
     };
+    if (!isSoxlMode) {
+      return payload;
+    }
+    // SOXL 不使用 A 股候补、顶底信号和 log-z/缩量实验参数；这些字段不再
+    // 发送到 SOXL 专用回测接口，避免它们继续出现在 SOXL 的候选空间里。
+    const {
+      sub_symbol,
+      sub_fear_source,
+      sub_volume_signal_symbol,
+      sub_buy_threshold_values,
+      sub_volume_ratio_threshold_values,
+      swap_threshold_values,
+      sub2_symbol,
+      sub2_fear_source,
+      sub2_volume_signal_symbol,
+      sub2_buy_threshold_values,
+      sub2_volume_ratio_threshold_values,
+      sub3_symbol,
+      sub3_fear_source,
+      sub3_volume_signal_symbol,
+      sub3_buy_threshold_values,
+      sub3_volume_ratio_threshold_values,
+      volume_z_threshold_values,
+      sell_shrink_z_values,
+      buy_turn_signal_mode_values,
+      sell_turn_signal_mode_values,
+      ma5_bottom_score_values,
+      ma5_top_score_values,
+      ma5_lookback_days_values,
+      volume_bottom_score_values,
+      volume_top_score_values,
+      volume_expand_std_values,
+      volume_shrink_std_values,
+      turn_signal_cooldown_days_values,
+      volume_ratio_consecutive_days_values,
+      ...soxlPayload
+    } = payload;
+    return soxlPayload;
   };
 
   const buildParamsFromRecord = (record) => ({
@@ -887,7 +927,10 @@ const SoxlFearBacktest = () => {
   ];
 
   const displayedResultColumns = isSoxlMode
-    ? resultColumns.filter(column => !['sub_symbol', 'sub2_symbol', 'sub3_symbol'].includes(column.dataIndex))
+    ? resultColumns.filter(column => ![
+      'sub_symbol', 'sub2_symbol', 'sub3_symbol',
+      'buy_turn_signal_mode', 'sell_turn_signal_mode', 'sell_ma5_confirm',
+    ].includes(column.dataIndex))
     : resultColumns;
 
   const yearlyReturnColumns = [
@@ -1285,7 +1328,7 @@ const SoxlFearBacktest = () => {
           style={{ marginBottom: 16 }}
           message="策略假设"
           description={backtestMode === 'soxl'
-            ? 'SOXL专用口径：CNN恐慌且SOXL放量买入SOXL；CNN进入贪婪区后挂起卖出，等待SOXX收盘跌破5日均线再卖出SOXL。该模式使用独立的SOXL参数预设。'
+            ? 'SOXL专用口径：CNN恐慌且SOXL放量买入SOXL；卖出可选择纯移动止盈、贪婪高估后等待SOXX跌破MA5，或贪婪高估后启动移动止盈。该模式使用独立的SOXL参数预设。'
             : `A股专用口径：使用所选贪恐来源（${selectedFearSourceLabel}）和 ${selectedVolumeSignalSymbol} 的信号日量比；当贪恐分数低于等于买入触发阈值，且量比放大满足连续天数要求时买入；成交模式可选信号日收盘价成交，或信号日收盘决策、下一交易日开盘价成交；可选估值点位闸门和候补轮动。`}
         />
         <Form
@@ -1388,17 +1431,19 @@ const SoxlFearBacktest = () => {
                 />
               </Form.Item>
             </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="sell_ma5_signal_symbol" label="卖出MA5来源标的">
-                <Select
-                  allowClear
-                  showSearch
-                  optionFilterProp="label"
-                  placeholder="默认使用量比来源"
-                  options={volumeSignalSymbolOptions}
-                />
-              </Form.Item>
-            </Col>
+            {!isSoxlMode && (
+              <Col xs={24} md={4}>
+                <Form.Item name="sell_ma5_signal_symbol" label="卖出MA5来源标的">
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="默认使用量比来源"
+                    options={volumeSignalSymbolOptions}
+                  />
+                </Form.Item>
+              </Col>
+            )}
             <Col xs={24} md={4}>
               <Form.Item name="date_range" label="回测区间" rules={[{ required: true, message: '请选择回测区间' }]}>
                 <RangePicker style={{ width: '100%' }} />
@@ -1424,11 +1469,13 @@ const SoxlFearBacktest = () => {
                 <InputNumber min={1} max={16} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="fear_source_values" label="贪恐来源候选">
-                <Select mode="multiple" showSearch optionFilterProp="label" maxTagCount="responsive" options={fearSourceOptions} />
-              </Form.Item>
-            </Col>
+            {!isSoxlMode && (
+              <Col xs={24} md={4}>
+                <Form.Item name="fear_source_values" label="贪恐来源候选">
+                  <Select mode="multiple" showSearch optionFilterProp="label" maxTagCount="responsive" options={fearSourceOptions} />
+                </Form.Item>
+              </Col>
+            )}
             <Col xs={24} md={4}>
               <Form.Item name="buy_threshold_values" label="买入贪恐阈值(<=)候选">
                 <Input placeholder="例如 35,40,45" />
@@ -1444,11 +1491,13 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 1.3,1.38,1.45" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="volume_ratio_consecutive_days_values" label="连续量比天数候选">
-                <Input placeholder="例如 1,3" />
-              </Form.Item>
-            </Col>
+            {!isSoxlMode && (
+              <Col xs={24} md={4}>
+                <Form.Item name="volume_ratio_consecutive_days_values" label="连续量比天数候选">
+                  <Input placeholder="例如 1,3" />
+                </Form.Item>
+              </Col>
+            )}
             <Col xs={24} md={4}>
               <Form.Item name="greed_threshold_values" label="止盈区贪恐阈值(>=) 候选">
                 <Input placeholder="例如 40,41,42" />
@@ -1628,7 +1677,7 @@ const SoxlFearBacktest = () => {
                 style={{ marginBottom: 12 }}
                 message={isSoxlMode ? 'SOXL 卖出规则' : '第三候补 + 卖出跌破MA5确认（可选）'}
                 description={isSoxlMode
-                  ? 'SOXL 可选择移动止盈，或 CNN 贪婪且 SOXX 估值分位达到阈值后，等待 SOXX 跌破 MA5 卖出，固定次日开盘成交。'
+                  ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；固定次日开盘成交。'
                   : '第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
               />
             </Col>
@@ -1705,7 +1754,7 @@ const SoxlFearBacktest = () => {
                 style={{ marginBottom: 12 }}
                 message={isSoxlMode ? 'SOXX 估值闸门' : '估值点位闸门（可选）'}
                 description={isSoxlMode
-                  ? 'SOXL 专用固定使用 SOXX 近 252 个交易日估值分位；CNN 贪婪且 SOXX 估值分位 ≥80 才进入卖出等待状态。'
+                  ? 'SOXL 专用使用最近一个已确认的 SOXX 估值点位；估值高于阈值后，可等待 SOXX 跌破 MA5，或启动移动止盈。'
                   : '估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖。'}
               />
             </Col>
@@ -1840,17 +1889,21 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_symbol || detailedResult.params?.volume_signal_symbol || '自身'}</Descriptions.Item>
               <Descriptions.Item label="初始资金">{detailedResult.meta?.initial_capital ?? '-'}</Descriptions.Item>
               <Descriptions.Item label="买入触发阈值">{detailedResult.params?.buy_threshold}</Descriptions.Item>
-              <Descriptions.Item label="买入顶底信号">{getTurnSignalModeLabel(detailedResult.params?.buy_turn_signal_mode)}</Descriptions.Item>
-              <Descriptions.Item label="卖出顶底信号">{getTurnSignalModeLabel(detailedResult.params?.sell_turn_signal_mode)}</Descriptions.Item>
-              <Descriptions.Item label="MA5底/顶阈值">{detailedResult.params?.ma5_bottom_score} / {detailedResult.params?.ma5_top_score}</Descriptions.Item>
-              <Descriptions.Item label="量能底/顶阈值">{detailedResult.params?.volume_bottom_score} / {detailedResult.params?.volume_top_score}</Descriptions.Item>
-              <Descriptions.Item label="量能放量/缩量σ">{detailedResult.params?.volume_expand_std} / {detailedResult.params?.volume_shrink_std}</Descriptions.Item>
-              <Descriptions.Item label="MA5回看天数">{detailedResult.params?.ma5_lookback_days}</Descriptions.Item>
-              <Descriptions.Item label="顶底信号冷却天数">{detailedResult.params?.turn_signal_cooldown_days}</Descriptions.Item>
+              {!isSoxlMode && <>
+                <Descriptions.Item label="买入顶底信号">{getTurnSignalModeLabel(detailedResult.params?.buy_turn_signal_mode)}</Descriptions.Item>
+                <Descriptions.Item label="卖出顶底信号">{getTurnSignalModeLabel(detailedResult.params?.sell_turn_signal_mode)}</Descriptions.Item>
+                <Descriptions.Item label="MA5底/顶阈值">{detailedResult.params?.ma5_bottom_score} / {detailedResult.params?.ma5_top_score}</Descriptions.Item>
+                <Descriptions.Item label="量能底/顶阈值">{detailedResult.params?.volume_bottom_score} / {detailedResult.params?.volume_top_score}</Descriptions.Item>
+                <Descriptions.Item label="量能放量/缩量σ">{detailedResult.params?.volume_expand_std} / {detailedResult.params?.volume_shrink_std}</Descriptions.Item>
+                <Descriptions.Item label="MA5回看天数">{detailedResult.params?.ma5_lookback_days}</Descriptions.Item>
+                <Descriptions.Item label="顶底信号冷却天数">{detailedResult.params?.turn_signal_cooldown_days}</Descriptions.Item>
+              </>}
               <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
-              <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>
-              <Descriptions.Item label="卖出缩量标准差">{(detailedResult.params?.sell_shrink_z ?? -1) <= 0 ? '关闭（贪恐即卖）' : detailedResult.params?.sell_shrink_z}</Descriptions.Item>
+              {!isSoxlMode && <>
+                <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>
+                <Descriptions.Item label="卖出缩量标准差">{(detailedResult.params?.sell_shrink_z ?? -1) <= 0 ? '关闭（贪恐即卖）' : detailedResult.params?.sell_shrink_z}</Descriptions.Item>
+              </>}
               <Descriptions.Item label="连续量比天数">{detailedResult.params?.volume_ratio_consecutive_days ?? 1}</Descriptions.Item>
               <Descriptions.Item label="每次买入仓位%">{detailedResult.params?.buy_position_pct}</Descriptions.Item>
               <Descriptions.Item label="冷却天数">{detailedResult.params?.cooldown_days}</Descriptions.Item>
@@ -1883,9 +1936,9 @@ const SoxlFearBacktest = () => {
                   <Descriptions.Item label="第三候补量比阈值">{detailedResult.params.sub3_volume_ratio_threshold}</Descriptions.Item>
                 </>
               )}
-              <Descriptions.Item label="卖出跌破MA5确认">
+              {!isSoxlMode && <Descriptions.Item label="卖出跌破MA5确认">
                 {SELL_MA5_CONFIRM_LABELS[detailedResult.params?.sell_ma5_confirm || 'off'] || '关闭（贪婪即卖）'}
-              </Descriptions.Item>
+              </Descriptions.Item>}
               {detailedResult.params?.sub2_symbol && (
                 <>
                   <Descriptions.Item label="第二候补">{detailedResult.params.sub2_symbol}</Descriptions.Item>

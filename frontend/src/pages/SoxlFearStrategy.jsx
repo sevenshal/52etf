@@ -51,6 +51,7 @@ const sellReductionBasisOptions = [
 const sellModeOptions = [
   { label: '移动止盈', value: 'trailing' },
   { label: '贪婪+高估后等待 SOXX 跌破 MA5', value: 'valuation_ma5' },
+  { label: '贪婪+高估后启动移动止盈', value: 'valuation_trailing' },
 ];
 
 const accountTypeOptions = [
@@ -497,7 +498,8 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           sub3_symbol: undefined,
           swap_threshold_values: 'none',
           valuation_buy_max_values: 'none',
-          valuation_sell_min_values: values.sell_mode === 'valuation_ma5' ? String(values.valuation_sell_min ?? 80) : 'none',
+          valuation_sell_min_values: ['valuation_ma5', 'valuation_trailing'].includes(values.sell_mode)
+            ? String(values.valuation_sell_min ?? 80) : 'none',
           valuation_force_sell_greed_values: 'none',
           // 传字符串：history state 会被 structuredClone，dayjs 实例会丢原型方法导致回测页白屏
           date_range: ['2021-01-01', dayjs().format('YYYY-MM-DD')],
@@ -521,7 +523,8 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           sell_ma5_confirm: values.sell_mode === 'valuation_ma5' ? 'all' : 'off',
           soxl_sell_mode: values.sell_mode || 'trailing',
           soxl_valuation_window: values.valuation_window || 252,
-          soxl_valuation_sell_min: values.valuation_sell_min ?? 80,
+          soxl_valuation_sell_min_values: ['valuation_ma5', 'valuation_trailing'].includes(values.sell_mode)
+            ? String(values.valuation_sell_min ?? 80) : 'none',
           sell_mode: values.sell_mode || 'trailing',
           valuation_window: values.valuation_window || 252,
           valuation_sell_min: values.valuation_sell_min || 80,
