@@ -3646,7 +3646,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
         fear_series = _build_fear_series_payload(base_dfs)
         search_execution_type, search_execution_label = _execution_mode_meta(payload.execute_next_open_values)
 
-        result_payload = {
+        result_payload = _json_safe({
             "meta": {
                 **meta,
                 "initial_capital": payload.initial_capital,
@@ -3674,7 +3674,7 @@ def _run_search_job(task_id: str, payload: SOXLFearSearchParams):
                 "sub3_meta": sub3_meta,
                 },
             },
-        }
+        })
 
         _update_search_job(
             task_id,
