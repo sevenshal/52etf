@@ -1143,8 +1143,8 @@ class SoxlFearStrategyTrader:
                     is_greedy = bool(state.pending_sell_signal_date)
                     sell_exit_ready = bool(is_greedy and soxx_exit_context.get("below_ma5"))
                 elif str(config.sell_mode or "trailing") == "valuation_trailing":
-                    # 与回测一致：只有 CNN 贪婪且 SOXX 已确认高估后，才启动移动止盈锚点。
-                    # 估值回落后不再继续追踪该轮移动止盈。
+                    # CNN 贪婪且 SOXX 高估时启动本轮移动止盈；启动后即使
+                    # 情绪/估值短暂回落，也继续追踪高点，直到回撤阈值触发。
                     is_greedy = bool(greedy_signal and valuation_is_high)
                     sell_exit_ready = False
                 else:
@@ -1157,11 +1157,24 @@ class SoxlFearStrategyTrader:
                     state.take_profit_cycle_sell_count = 0
                     state.pending_sell_signal_date = None
                 elif allow_greed_state_update:
-                    if not is_greedy:
+                    valuation_trailing_mode = str(config.sell_mode or "trailing") == "valuation_trailing"
+                    if valuation_trailing_mode:
+                        # greed_peak_price 非空表示本轮已被高估+贪婪信号激活。
+                        # 激活后每天都更新峰值，不因当前估值/情绪回落而取消。
+                        if is_greedy or state.greed_peak_price is not None:
+                            state.greed_peak_price = max(
+                                float(state.greed_peak_price or current_high_price),
+                                current_high_price,
+                            )
+                    elif not is_greedy:
                         state.greed_peak_price = None
                         state.take_profit_cycle_sell_count = 0
                     else:
                         state.greed_peak_price = max(float(state.greed_peak_price or current_high_price), current_high_price)
+
+                if str(config.sell_mode or "trailing") == "valuation_trailing" and state.greed_peak_price:
+                    # 这是已激活的移动止盈轮次，卖出判断不再依赖当天的贪婪+高估信号。
+                    is_greedy = True
 
                 if broker_snapshot.has_today_order:
                     trade_message = "今日已存在订单，跳过重复执行"

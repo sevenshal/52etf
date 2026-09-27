@@ -1947,8 +1947,19 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         if float(params.sell_shrink_z) > 0:
             shrink_sell_ok = np.isfinite(log_z_self) and log_z_self <= -float(params.sell_shrink_z)
 
+        valuation_trailing_mode = (
+            params.valuation_sell_min is not None
+            and float(params.trailing_stop_pct) > 0
+            and ma5_confirm_mode == SELL_MA5_CONFIRM_OFF
+        )
         if shares > 0:
-            if is_greedy:
+            if valuation_trailing_mode:
+                # 一旦 CNN 贪婪且估值达到高估阈值，启动本轮移动止盈。
+                # 启动后不再要求每天重复满足贪婪/高估，持续追踪持仓高点，
+                # 否则情绪或估值短暂回落会错误清空止盈锚点。
+                if is_greedy or greed_peak_price is not None:
+                    greed_peak_price = max(greed_peak_price or high_price, high_price)
+            elif is_greedy:
                 greed_peak_price = max(greed_peak_price or high_price, high_price)
             else:
                 greed_peak_price = None
@@ -1959,7 +1970,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         if (
             shares > 0
-            and is_greedy
+            and (is_greedy or valuation_trailing_mode and greed_peak_price is not None)
             and can_trade
             and greed_peak_price
             and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
