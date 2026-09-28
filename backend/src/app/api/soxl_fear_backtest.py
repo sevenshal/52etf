@@ -771,6 +771,9 @@ class SoxlFearSearchParams(BaseModel):
     sell_price_above_avg_cost_values: List[bool] = Field(default_factory=lambda: [True])
     max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [2])
     min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [0.0])
+    # False = 信号日收盘价成交；True = 信号日收盘决策、次日开盘成交。
+    # 这是 SOXL 页面显式选择的候选维度，不能在专属转换时硬编码覆盖。
+    execute_next_open_values: List[bool] = Field(default_factory=lambda: [True])
     sell_mode: str = "valuation_ma5"
     valuation_window: int = VALUATION_POSITION_SHORT_WINDOW
     valuation_buy_max_values: List[Optional[float]] = Field(default_factory=lambda: [50.0])
@@ -786,6 +789,12 @@ class SoxlFearSearchParams(BaseModel):
     def validate_valuation_window(cls, value):
         if value not in VALUATION_POSITION_WINDOWS:
             raise ValueError("估值窗口仅支持 252 或 504")
+        return value
+
+    @validator("execute_next_open_values")
+    def validate_execute_next_open_values(cls, value):
+        if not value:
+            raise ValueError("至少选择一个成交口径")
         return value
 
     def to_engine_params(self) -> SOXLFearSearchParams:
@@ -830,7 +839,7 @@ class SoxlFearSearchParams(BaseModel):
             sell_price_above_avg_cost_values=self.sell_price_above_avg_cost_values,
             max_take_profit_sells_per_cycle_values=self.max_take_profit_sells_per_cycle_values,
             min_position_pct_after_take_profit_values=self.min_position_pct_after_take_profit_values,
-            execute_next_open_values=[True],
+            execute_next_open_values=self.execute_next_open_values,
             sub_symbol=None, sub_fear_source="cnn", sub_volume_signal_symbol=None,
             sub_buy_threshold_values=[25.0], sub_volume_ratio_threshold_values=[1.6],
             swap_threshold_values=[None], sub2_symbol=None, sub2_fear_source="cnn",

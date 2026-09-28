@@ -204,10 +204,11 @@ def test_soxl_compact_search_preserves_pure_trailing_replay_contract():
         trailing_stop_pct_values=[7.0],
         valuation_buy_max_values=[50.0],
         valuation_sell_min_values=[None],
+        execute_next_open_values=[False],
         sell_mode="trailing",
     ).to_engine_params()
 
-    assert payload.execute_next_open_values == [True]
+    assert payload.execute_next_open_values == [False]
     assert payload.trailing_stop_pct_values == [7.0]
     assert payload.valuation_buy_max_values == [50.0]
     assert payload.valuation_sell_min_values == [None]

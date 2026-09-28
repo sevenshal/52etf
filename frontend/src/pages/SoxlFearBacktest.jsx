@@ -316,6 +316,7 @@ const SoxlFearBacktest = () => {
         sell_price_above_avg_cost_values: sellPriceAboveAvgCostValues.length ? sellPriceAboveAvgCostValues : [true],
         max_take_profit_sells_per_cycle_values: soxlMaxSellValues.length ? soxlMaxSellValues : [2],
         min_position_pct_after_take_profit_values: soxlMinPositionValues.length ? soxlMinPositionValues : [0],
+        execute_next_open_values: executeNextOpenValues.length ? executeNextOpenValues : [true],
         sell_mode: soxlSellMode,
         valuation_window: soxlValuationWindow,
         valuation_buy_max_values: soxlValuationBuyMaxValues.length ? soxlValuationBuyMaxValues : [50],
@@ -505,9 +506,9 @@ const SoxlFearBacktest = () => {
     sell_price_above_avg_cost: record.sell_price_above_avg_cost,
     max_take_profit_sells_per_cycle: record.max_take_profit_sells_per_cycle,
     min_position_pct_after_take_profit: record.min_position_pct_after_take_profit,
-    // SOXL 专属搜索固定为“信号日次日开盘成交”。旧的结果行没有这个字段时，
-    // 详情回放也必须沿用该口径；A 股仍保持旧的收盘成交默认值。
-    execute_next_open: record.execute_next_open ?? (isSoxlMode ? true : false),
+    // 搜索结果会保存实际成交口径；极旧结果没有该字段时，沿用历史默认的收盘成交，
+    // 不能擅自改成次日开盘成交。
+    execute_next_open: record.execute_next_open ?? false,
     slippage_pct: record.slippage_pct ?? -1,
     stamp_duty_pct: record.stamp_duty_pct ?? 0,
     buy_turn_signal_mode: record.buy_turn_signal_mode ?? 'legacy',
@@ -1719,7 +1720,7 @@ const SoxlFearBacktest = () => {
                 style={{ marginBottom: 12 }}
                 message={isSoxlMode ? 'SOXL 卖出规则' : '第三候补 + 卖出跌破MA5确认（可选）'}
                 description={isSoxlMode
-                  ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；固定次日开盘成交。'
+                  ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；成交口径按上方开关执行。'
                   : '第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
               />
             </Col>
