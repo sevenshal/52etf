@@ -6,6 +6,7 @@ import pandas as pd
 from src.app.api.soxl_fear_backtest import (
     SOXLFearSearchParams,
     SOXLFearStrategyParams,
+    SoxlFearSearchParams,
     _count_search_params,
     _prepare_base_dataframe,
     _run_backtest,
@@ -195,3 +196,20 @@ def test_search_count_deduplicates_repeated_candidate_values():
     single = SOXLFearSearchParams(buy_threshold_values=[30])
     repeated = SOXLFearSearchParams(buy_threshold_values=[30, 30])
     assert _count_search_params(repeated) == _count_search_params(single)
+
+
+def test_soxl_compact_search_preserves_pure_trailing_replay_contract():
+    """第二组“移动止盈”不应被默认卖出估值/MA5 条件污染。"""
+    payload = SoxlFearSearchParams(
+        trailing_stop_pct_values=[7.0],
+        valuation_buy_max_values=[50.0],
+        valuation_sell_min_values=[None],
+        sell_mode="trailing",
+    ).to_engine_params()
+
+    assert payload.execute_next_open_values == [True]
+    assert payload.trailing_stop_pct_values == [7.0]
+    assert payload.valuation_buy_max_values == [50.0]
+    assert payload.valuation_sell_min_values == [None]
+    assert payload.sell_ma5_confirm == "off"
+    assert _count_search_params(payload) == 1

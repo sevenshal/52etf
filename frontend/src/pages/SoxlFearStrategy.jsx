@@ -493,7 +493,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         backtestMode: 'soxl',
         presetValues: {
           symbol: values.symbol || 'SOXL.US',
-          // 清掉 A股候补和估值条件，避免两套实盘配置串用。
+          // 清掉 A 股候补；SOXL 自己的买入估值闸门和卖出模式参数要完整带入。
           a_stock_pair: undefined,
           fear_source_values: ['cnn'],
           volume_signal_symbol: 'SOXL.US',
@@ -508,7 +508,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           valuation_force_sell_greed_values: 'none',
           // 传字符串：history state 会被 structuredClone，dayjs 实例会丢原型方法导致回测页白屏
           date_range: ['2021-01-01', dayjs().format('YYYY-MM-DD')],
-          initial_capital: 100000,
+          initial_capital: 1000000,
           top_n: 1,
           objective: 'annualized_return',
           eval_workers: 1,
