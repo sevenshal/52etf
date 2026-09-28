@@ -112,6 +112,8 @@ const SoxlFearStrategy = ({ embedded = false }) => {
   const [form] = Form.useForm();
   const [stateForm] = Form.useForm();
   const selectedExternalTradingAccountId = Form.useWatch('external_trading_account_id', form);
+  const selectedSellMode = Form.useWatch('sell_mode', form) || 'trailing';
+  const sellValuationEnabled = ['valuation_ma5', 'valuation_trailing'].includes(selectedSellMode);
   const navigate = useNavigate();
   const [viewMode, setViewMode] = useState('list');
   const [activeTab, setActiveTab] = useState('config');
@@ -914,8 +916,16 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           </Form.Item>
         </Col>
         <Col xs={24} md={8}>
-          <Form.Item name="valuation_sell_min" label="SOXX 高估分位≥" rules={[{ required: true }]}>
-            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+          <Form.Item
+            name="valuation_sell_min"
+            label="SOXX 高估分位≥"
+            rules={[{ required: true }]}
+            tooltip={sellValuationEnabled
+              ? 'SOXX 估值达到该点位，才进入卖出确认/移动止盈。'
+              : '纯移动止盈模式不使用该参数；切换为任一“贪婪+高估后”卖出模式后才可编辑。'}
+            extra={sellValuationEnabled ? undefined : '当前为纯移动止盈：此参数不参与实盘卖出。'}
+          >
+            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} disabled={!sellValuationEnabled} />
           </Form.Item>
         </Col>
       </Row>

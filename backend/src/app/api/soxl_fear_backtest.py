@@ -79,6 +79,7 @@ US_TARGET_OPTIONS = [
     {"label": "SPY.US", "value": "SPY.US", "market": "us"},
 ]
 SOXL_SYMBOL = "SOXL.US"
+SOXL_BENCHMARK_SYMBOL = "SOXX.US"
 
 
 def _normalize_symbol(value: str) -> str:
@@ -1136,6 +1137,23 @@ def _prepare_base_dataframe(
     fear_df, fear_meta = _fetch_fear_history(fear_source, lookback_start_date, end_date)
 
     price_df = _normalize_price_dates(price_df)
+    # SOXL 专属回测的策略风险敞口是半导体行业，而不是 3 倍杠杆本身；
+    # 因此基准固定使用未杠杆的 SOXX。其余（A 股通用）引擎仍以交易标的自身为基准。
+    benchmark_symbol = SOXL_BENCHMARK_SYMBOL if symbol == SOXL_SYMBOL else symbol
+    if benchmark_symbol == symbol:
+        price_df["benchmark_open"] = pd.to_numeric(price_df["open"], errors="coerce")
+        price_df["benchmark_close"] = pd.to_numeric(price_df["close"], errors="coerce")
+    else:
+        benchmark_df = _normalize_price_dates(
+            _fetch_signal_price_history(benchmark_symbol, lookback_start_date, end_date)
+        )[["date", "open", "close"]].rename(columns={
+            "open": "benchmark_open", "close": "benchmark_close",
+        })
+        price_df = price_df.merge(benchmark_df, on="date", how="left")
+        # 同一美股交易日通常一一对应；极少量缺口时宁可使用交易标的价，
+        # 也不能令整条净值曲线断裂。
+        price_df["benchmark_open"] = pd.to_numeric(price_df["benchmark_open"], errors="coerce").fillna(price_df["open"])
+        price_df["benchmark_close"] = pd.to_numeric(price_df["benchmark_close"], errors="coerce").fillna(price_df["close"])
     price_df["ma20"] = pd.to_numeric(price_df["close"], errors="coerce").rolling(20).mean()
     price_df["date_ts"] = pd.to_datetime(price_df["date"])
     # 持仓标的自有成交量 log_z（用于卖出缩量确认；与信号量比来源的 log_z 区分）
@@ -1336,6 +1354,8 @@ def _prepare_base_dataframe(
         "volume_signal_label": _symbol_label(signal_symbol),
         "sell_ma5_signal_symbol": ma5_signal_symbol,
         "sell_ma5_signal_label": _symbol_label(ma5_signal_symbol),
+        "benchmark_symbol": benchmark_symbol,
+        "benchmark_label": _symbol_label(benchmark_symbol),
         "volume_signal_points": int(len(signal_price_df)),
         "valuation_points": int(base_df[_valuation_column(VALUATION_POSITION_SHORT_WINDOW)].notna().sum()),
         "execution_price_type": "same_day_close",
@@ -1349,6 +1369,8 @@ def _prepare_base_dataframe(
     base_df.attrs["volume_signal_label"] = _symbol_label(signal_symbol)
     base_df.attrs["sell_ma5_signal_symbol"] = ma5_signal_symbol
     base_df.attrs["sell_ma5_signal_label"] = _symbol_label(ma5_signal_symbol)
+    base_df.attrs["benchmark_symbol"] = benchmark_symbol
+    base_df.attrs["benchmark_label"] = _symbol_label(benchmark_symbol)
     base_df.attrs["valuation_signal_symbol"] = (
         valuation_signal_symbol
     )
@@ -1456,6 +1478,8 @@ def _prepare_search_dataframes(
         "volume_signal_symbol": meta_items[0].get("volume_signal_symbol"),
         "sell_ma5_signal_symbol": meta_items[0].get("sell_ma5_signal_symbol"),
         "volume_signal_label": meta_items[0].get("volume_signal_label"),
+        "benchmark_symbol": meta_items[0].get("benchmark_symbol"),
+        "benchmark_label": meta_items[0].get("benchmark_label"),
         "volume_signal_points": max(int(item.get("volume_signal_points") or 0) for item in meta_items),
         "execution_price_type": meta_items[0].get("execution_price_type"),
         "execution_price_label": meta_items[0].get("execution_price_label"),
@@ -1944,9 +1968,20 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     equity_values = np.empty(len(close_prices), dtype=float)
     benchmark_values = np.empty(len(close_prices), dtype=float)
 
-    first_execution_price = float(execution_prices[0])
-    benchmark_shares = _floor_share_count(initial_capital / first_execution_price) if first_execution_price > 0 else 0
-    benchmark_cash = initial_capital - benchmark_shares * first_execution_price if first_execution_price > 0 else initial_capital
+    benchmark_close_prices = pd.to_numeric(
+        base_df.get("benchmark_close", base_df["close"]), errors="coerce"
+    ).fillna(base_df["close"]).to_numpy(dtype=float, copy=False)
+    benchmark_execution_column = "benchmark_open" if use_next_open else "benchmark_close"
+    benchmark_execution_fallback = base_df["open"] if use_next_open else base_df["close"]
+    benchmark_execution_prices = pd.to_numeric(
+        base_df.get(benchmark_execution_column, benchmark_execution_fallback), errors="coerce"
+    ).fillna(benchmark_execution_fallback).to_numpy(dtype=float, copy=False)
+    first_benchmark_execution_price = float(benchmark_execution_prices[0])
+    benchmark_shares = (
+        _floor_share_count(initial_capital / first_benchmark_execution_price)
+        if first_benchmark_execution_price > 0 else 0
+    )
+    benchmark_cash = initial_capital - benchmark_shares * first_benchmark_execution_price if first_benchmark_execution_price > 0 else initial_capital
 
     for index in range(len(close_prices)):
         if shares == 0:
@@ -2248,7 +2283,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     })
 
         equity_value = cash + shares * close_price
-        benchmark_value = benchmark_cash + benchmark_shares * close_price
+        benchmark_value = benchmark_cash + benchmark_shares * float(benchmark_close_prices[index])
         equity_values[index] = equity_value
         benchmark_values[index] = benchmark_value
 
@@ -2325,6 +2360,8 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         "execution_price_type": "next_day_open" if use_next_open else "same_day_close",
         "execution_price_label": "信号日次日开盘价" if use_next_open else "信号日收盘价",
         "benchmark_metrics": benchmark_metrics,
+        "benchmark_symbol": str(base_df.attrs.get("benchmark_symbol") or base_df.attrs.get("symbol") or ""),
+        "benchmark_label": str(base_df.attrs.get("benchmark_label") or base_df.attrs.get("symbol") or "基准"),
         "yearly_returns": yearly_returns,
     }
     if detailed:

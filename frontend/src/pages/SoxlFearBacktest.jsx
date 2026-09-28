@@ -220,6 +220,8 @@ const SoxlFearBacktest = () => {
   const selectedVolumeSignalSymbol = Form.useWatch('volume_signal_symbol', form) || selectedSymbol;
   const selectedFearSources = Form.useWatch('fear_source_values', form) || ['cnn'];
   const selectedVolumeZThresholds = Form.useWatch('volume_z_threshold_values', form);
+  const selectedSoxlSellMode = Form.useWatch('soxl_sell_mode', form) || 'valuation_ma5';
+  const soxlSellValuationEnabled = ['valuation_ma5', 'valuation_trailing'].includes(selectedSoxlSellMode);
   // 统一 log-z 放量启用时（候选含数值），主/候补/第二候补放量统一走 log-z，各标的量比阈值忽略
   const logZVolumeEnabled = parseVolumeZList(selectedVolumeZThresholds).some(v => v !== null);
   const subRatioDisabled = logZVolumeEnabled;
@@ -762,7 +764,14 @@ const SoxlFearBacktest = () => {
     { title: '卖出顶底信号', dataIndex: 'sell_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
     { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
     { title: '买入估值上限(≤)', dataIndex: 'valuation_buy_max', width: 125, render: value => value == null ? '关闭' : value },
-    { title: '卖出估值下限(≥)', dataIndex: 'valuation_sell_min', width: 125, render: value => value == null ? '关闭' : value },
+    {
+      title: '卖出估值下限(≥)',
+      dataIndex: 'valuation_sell_min',
+      width: 125,
+      render: (value, record) => record.effective_soxl_sell_mode === 'trailing'
+        ? <Tag>不适用（纯移动止盈）</Tag>
+        : (value == null ? '关闭' : value),
+    },
     { title: '估值窗口', dataIndex: 'valuation_window', width: 90, render: value => value ? `${value}日` : '-' },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
     { title: '连续量比天数', dataIndex: 'volume_ratio_consecutive_days', width: 110 },
@@ -1350,7 +1359,7 @@ const SoxlFearBacktest = () => {
             formatter={formatter ? () => formatter(strategyValue) : undefined}
           />
           <div style={{ marginTop: 8, fontSize: 12, color: '#666', lineHeight: 1.6 }}>
-            <span>基准 {formatMetricValue(benchmarkValue, { precision, suffix, formatter })}</span>
+            <span>基准（{detailedResult?.benchmark_label || detailedResult?.benchmark_symbol || '交易标的'}） {formatMetricValue(benchmarkValue, { precision, suffix, formatter })}</span>
             {hasNumericDiff && (
               <span style={{ marginLeft: 12, color: isBetter ? '#cf1322' : '#1677ff' }}>
                 差值 {formatSignedMetricValue(diffValue, { precision, suffix })}
@@ -1740,9 +1749,12 @@ const SoxlFearBacktest = () => {
                 <Form.Item
                   name="soxl_valuation_sell_min_values"
                   label="SOXX 高估分位阈值(≥)候选"
-                  tooltip="CNN 贪婪后，SOXX 估值分位达到此阈值才进入等待卖出；可填 none,70,80,90"
+                  tooltip={soxlSellValuationEnabled
+                    ? 'CNN 贪婪后，SOXX 估值分位达到此阈值才进入等待卖出/启动移动止盈；可填 none,70,80,90'
+                    : '纯移动止盈模式不使用该参数。请切换为“贪婪+高估后等待 SOXX 跌破 MA5”或“贪婪+高估后启动移动止盈”。'}
+                  extra={soxlSellValuationEnabled ? undefined : '当前为纯移动止盈：此参数不参与回测。'}
                 >
-                  <Input placeholder="例如 70,80,90" />
+                  <Input placeholder="例如 70,80,90" disabled={!soxlSellValuationEnabled} />
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
@@ -1864,6 +1876,7 @@ const SoxlFearBacktest = () => {
             <Descriptions.Item label="搜索目标">{getObjectiveLabel(searchMeta.objective)}</Descriptions.Item>
             <Descriptions.Item label="贪恐来源">{searchMeta.fear_source_labels || formatFearSourceLabels(searchMeta.fear_sources || searchMeta.fear_source)}</Descriptions.Item>
             <Descriptions.Item label="量比来源">{searchMeta.volume_signal_label || searchMeta.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
+            <Descriptions.Item label="基准">{searchMeta.benchmark_label || searchMeta.benchmark_symbol || selectedSymbol}</Descriptions.Item>
             <Descriptions.Item label="成交口径">{searchMeta.execution_price_label || '信号日收盘价'}</Descriptions.Item>
             <Descriptions.Item label="贪恐数据点">{searchMeta.fear_points}</Descriptions.Item>
             <Descriptions.Item label="并发进程数">{searchMeta.eval_workers}</Descriptions.Item>
@@ -2000,6 +2013,7 @@ const SoxlFearBacktest = () => {
               <Descriptions.Item label="印花税%(卖出)">{detailedResult.params?.stamp_duty_pct ?? 0}%</Descriptions.Item>
               <Descriptions.Item label="贪恐来源">{detailFearSourceLabel}</Descriptions.Item>
               <Descriptions.Item label="量比来源">{detailedResult.meta?.volume_signal_label || detailedResult.meta?.volume_signal_symbol || selectedVolumeSignalSymbol}</Descriptions.Item>
+              <Descriptions.Item label="基准">{detailedResult.benchmark_label || detailedResult.benchmark_symbol || detailedResult.meta?.benchmark_label || detailedResult.meta?.benchmark_symbol || selectedSymbol}</Descriptions.Item>
               <Descriptions.Item label="成交口径">{detailedResult.meta?.execution_price_label || '信号日收盘价'}</Descriptions.Item>
               <Descriptions.Item label="有效区间">{detailedResult.meta?.effective_start_date} ~ {detailedResult.meta?.effective_end_date}</Descriptions.Item>
               <Descriptions.Item label="交易日数">{detailedResult.meta?.trading_days}</Descriptions.Item>

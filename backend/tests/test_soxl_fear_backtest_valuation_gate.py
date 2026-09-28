@@ -214,3 +214,29 @@ def test_soxl_compact_search_preserves_pure_trailing_replay_contract():
     assert payload.valuation_sell_min_values == [None]
     assert payload.sell_ma5_confirm == "off"
     assert _count_search_params(payload) == 1
+
+
+def test_soxl_compact_search_expands_sell_valuation_candidates_when_mode_uses_them():
+    payload = SoxlFearSearchParams(
+        trailing_stop_pct_values=[7.0],
+        valuation_sell_min_values=[51.0, 55.0],
+        sell_mode="valuation_trailing",
+    ).to_engine_params()
+
+    assert payload.valuation_sell_min_values == [51.0, 55.0]
+    assert payload.sell_ma5_confirm == "off"
+    assert _count_search_params(payload) == 2
+
+
+def test_backtest_uses_explicit_benchmark_price_curve_when_present():
+    frame = _frame([90.0] * 10, [None] * 10)
+    frame["benchmark_open"] = [20.0] * 10
+    frame["benchmark_close"] = [20.0 + index * 2 for index in range(10)]
+    frame.attrs["benchmark_symbol"] = "SOXX.US"
+    frame.attrs["benchmark_label"] = "SOXX.US"
+
+    result = _run_backtest(frame, _params(), 1_000_000.0, detailed=True)
+
+    assert result["benchmark_symbol"] == "SOXX.US"
+    assert result["benchmark_label"] == "SOXX.US"
+    assert result["equity_curve"][-1]["benchmark_value"] == 1_900_000.0
