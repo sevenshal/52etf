@@ -232,6 +232,13 @@ const SoxlFearBacktest = () => {
   const [searchResults, setSearchResults] = useState([]);
   const [detailedResult, setDetailedResult] = useState(null);
   const detailFearSourceLabel = detailedResult?.meta?.fear_source_label || selectedFearSourceLabel;
+  const benchmarkDisplayLabel = detailedResult?.benchmark_label
+    || detailedResult?.benchmark_symbol
+    || detailedResult?.meta?.benchmark_label
+    || detailedResult?.meta?.benchmark_symbol
+    || searchMeta?.benchmark_label
+    || searchMeta?.benchmark_symbol
+    || selectedSymbol;
   const isComparingFearSources = (detailedResult?.fear_series?.sources?.length || 0) > 1;
   const [detailLoading, setDetailLoading] = useState(false);
   const [searchTaskId, setSearchTaskId] = useState(null);
@@ -998,7 +1005,7 @@ const SoxlFearBacktest = () => {
       ),
     },
     {
-      title: `${selectedSymbol}买入持有`,
+      title: `${benchmarkDisplayLabel}买入持有`,
       dataIndex: 'benchmark_return',
       width: 140,
       render: value => (
@@ -1031,7 +1038,7 @@ const SoxlFearBacktest = () => {
     const benchmark = detailedResult.equity_curve.map(item => item.benchmark_value);
     return {
       tooltip: { trigger: 'axis' },
-      legend: { data: ['策略净值', `${selectedSymbol}买入持有`] },
+      legend: { data: ['策略净值', `${benchmarkDisplayLabel}买入持有`] },
       xAxis: { type: 'category', data: dates },
       yAxis: { type: 'value', scale: true },
       dataZoom: [{ type: 'inside', start: 50, end: 100 }, { type: 'slider' }],
@@ -1046,7 +1053,7 @@ const SoxlFearBacktest = () => {
           areaStyle: { opacity: 0.12, color: '#cf1322' },
         },
         {
-          name: `${selectedSymbol}买入持有`,
+          name: `${benchmarkDisplayLabel}买入持有`,
           type: 'line',
           data: benchmark,
           smooth: true,
@@ -1055,7 +1062,7 @@ const SoxlFearBacktest = () => {
         },
       ],
     };
-  }, [detailedResult, selectedSymbol]);
+  }, [detailedResult, benchmarkDisplayLabel]);
 
   const drawdownOption = useMemo(() => {
     if (!detailedResult?.equity_curve?.length) {
@@ -1067,7 +1074,7 @@ const SoxlFearBacktest = () => {
         trigger: 'axis',
         valueFormatter: value => `${Number(value || 0).toFixed(2)}%`,
       },
-      legend: { data: ['策略回撤', `${selectedSymbol}买入持有回撤`] },
+      legend: { data: ['策略回撤', `${benchmarkDisplayLabel}买入持有回撤`] },
       xAxis: { type: 'category', data: dates },
       yAxis: {
         type: 'value',
@@ -1088,7 +1095,7 @@ const SoxlFearBacktest = () => {
           areaStyle: { opacity: 0.12, color: '#cf1322' },
         },
         {
-          name: `${selectedSymbol}买入持有回撤`,
+          name: `${benchmarkDisplayLabel}买入持有回撤`,
           type: 'line',
           data: detailedResult.equity_curve.map(item => item.benchmark_drawdown),
           smooth: true,
@@ -1098,7 +1105,7 @@ const SoxlFearBacktest = () => {
         },
       ],
     };
-  }, [detailedResult, selectedSymbol]);
+  }, [detailedResult, benchmarkDisplayLabel]);
 
   const priceVolumeOption = useMemo(() => {
     if (!detailedResult?.daily_data?.length) {

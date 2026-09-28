@@ -179,6 +179,25 @@ def test_sell_signal_stays_pending_after_fear_falls_back():
     assert _sell_dates(result) == ["2025-03-13"]
 
 
+def test_partial_sell_clears_pending_until_a_fresh_greed_cycle():
+    """部分卖出后，旧的贪婪信号不能在次日自动重新挂起。"""
+    fear = [50.0, 20.0, 50.0, 50.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+    # 第 9 天跌破 MA5，触发第一次部分卖出；第 10、11 天反弹到 MA5 上方。
+    # 旧实现会在第 10 天用仍为 80 的贪恐重新挂起，随后第 12 天再次跌破时卖出。
+    close = [10.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 10.0, 15.0, 16.0, 10.0]
+    result = _run_backtest(
+        _frame(fear, close),
+        _params(
+            sell_ma5_confirm=SELL_MA5_CONFIRM_ALL,
+            sell_position_pct=50,
+            max_take_profit_sells_per_cycle=2,
+        ),
+        100000.0,
+        detailed=True,
+    )
+    assert _sell_dates(result) == ["2025-03-13"]
+
+
 def _seesaw_frames():
     main = _frame(FEAR, CLOSE)
     # 候补：第 2 天更恐慌所以先买候补；第 5 天起贪婪，价格第 7 天就跌破 MA5

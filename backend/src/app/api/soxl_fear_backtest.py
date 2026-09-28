@@ -1952,6 +1952,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     pending_sell_valuation = None
     pending_sell_signal_date = None
     pending_sell_fear = None
+    # 部分止盈同样结束本轮卖出：卖出后必须先退出贪婪/高估区，才允许新的
+    # 贪婪+高估信号再次挂起。否则次日仍处于旧信号区会立刻重新挂起，之后可能
+    # 用数月前的信号卖掉后来加仓的仓位。
+    sell_cycle_requires_reset = False
 
     cash = float(initial_capital)
     shares = 0
@@ -2054,7 +2058,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 pending_sell_valuation = None
                 pending_sell_signal_date = None
                 pending_sell_fear = None
-            elif is_greedy:
+                sell_cycle_requires_reset = False
+            elif not is_greedy:
+                # 已退出本轮贪婪/高估区；以后再次满足条件才算新的卖出信号。
+                sell_cycle_requires_reset = False
+            elif not sell_cycle_requires_reset:
                 if not pending_sell:
                     pending_sell_valuation = valuation
                     pending_sell_signal_date = signal_date_text
@@ -2072,6 +2080,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             and float(params.trailing_stop_pct) > 0
             and ma5_confirm_mode == SELL_MA5_CONFIRM_OFF
         )
+        # MA5 确认模式的成交资格只能来自本轮已挂起的卖出信号，不能仅因当天
+        # 仍在贪婪区就绕过“卖出后清空”的状态。
+        sell_signal_active = pending_sell if ma5_confirm_active else is_greedy
         if shares > 0:
             if valuation_trailing_mode:
                 # 一旦 CNN 贪婪且估值达到高估阈值，启动本轮移动止盈。
@@ -2090,7 +2101,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
 
         if (
             shares > 0
-            and (is_greedy or valuation_trailing_mode and greed_peak_price is not None)
+            and (sell_signal_active or valuation_trailing_mode and greed_peak_price is not None)
             and can_trade
             and greed_peak_price
             and take_profit_sell_count_in_cycle < params.max_take_profit_sells_per_cycle
@@ -2158,6 +2169,9 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     pending_sell_valuation = None
                     pending_sell_signal_date = None
                     pending_sell_fear = None
+                    # 无论本次是否全部卖光，成交都清空挂起卖出，并要求后续出现
+                    # 新的一轮贪婪/高估信号才能再次挂起。
+                    sell_cycle_requires_reset = True
                     if shares <= 0:
                         shares = 0
                         avg_cost = 0.0
@@ -2175,6 +2189,13 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     closed_trade_count += 1
                     if profit > 0:
                         winning_trade_count += 1
+
+                    if ma5_confirm_mode == SELL_MA5_CONFIRM_ALL and sell_ma5_ok:
+                        sell_reason = (
+                            f"等待{base_df.attrs.get('sell_ma5_signal_label') or '信号标的'}跌破 MA5 确认后卖出"
+                        )
+                    else:
+                        sell_reason = trailing_reason
 
                     trades.append({
                         "date": current_date,
@@ -2197,7 +2218,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "profit_pct": profit_pct,
                         "stamp_duty": stamp_fee,
                         "reason": (
-                            f"{fear_source_label} {fear_score:.2f} 进入止盈区后{trailing_reason}"
+                            f"{fear_source_label} {fear_score:.2f} 进入止盈区后{sell_reason}"
                             f"，本轮第 {take_profit_sell_count_in_cycle} 次卖出"
                             f"，均价保护{'开启' if params.sell_price_above_avg_cost else '关闭'}"
                             f"{_valuation_reason(params, valuation)}"
