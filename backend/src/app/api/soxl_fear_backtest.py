@@ -1952,10 +1952,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     pending_sell_valuation = None
     pending_sell_signal_date = None
     pending_sell_fear = None
-    # 部分止盈同样结束本轮卖出：卖出后必须先退出贪婪/高估区，才允许新的
-    # 贪婪+高估信号再次挂起。否则次日仍处于旧信号区会立刻重新挂起，之后可能
-    # 用数月前的信号卖掉后来加仓的仓位。
-    sell_cycle_requires_reset = False
 
     cash = float(initial_capital)
     shares = 0
@@ -2058,11 +2054,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                 pending_sell_valuation = None
                 pending_sell_signal_date = None
                 pending_sell_fear = None
-                sell_cycle_requires_reset = False
-            elif not is_greedy:
-                # 已退出本轮贪婪/高估区；以后再次满足条件才算新的卖出信号。
-                sell_cycle_requires_reset = False
-            elif not sell_cycle_requires_reset:
+            elif is_greedy:
                 if not pending_sell:
                     pending_sell_valuation = valuation
                     pending_sell_signal_date = signal_date_text
@@ -2169,9 +2161,6 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     pending_sell_valuation = None
                     pending_sell_signal_date = None
                     pending_sell_fear = None
-                    # 无论本次是否全部卖光，成交都清空挂起卖出，并要求后续出现
-                    # 新的一轮贪婪/高估信号才能再次挂起。
-                    sell_cycle_requires_reset = True
                     if shares <= 0:
                         shares = 0
                         avg_cost = 0.0
@@ -2238,6 +2227,11 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                     })
 
         if not action_taken and is_fear and can_trade:
+            # 买入代表新的持仓周期，不能沿用此前等待 MA5 的旧卖出信号。
+            pending_sell = False
+            pending_sell_valuation = None
+            pending_sell_signal_date = None
+            pending_sell_fear = None
             execution_price = buy_fill_price
             portfolio_value = cash + shares * execution_price
             buy_amount = min(cash, portfolio_value * (params.buy_position_pct / 100.0))
