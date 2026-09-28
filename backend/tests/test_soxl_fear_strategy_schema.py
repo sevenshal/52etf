@@ -68,7 +68,7 @@ def test_schema_upgrade_adds_pending_sell_signal_date(tmp_path, state_table_sql)
             "FROM soxl_fear_strategy_states"
         )).one()
     assert "pending_sell_signal_date" in columns
-    assert {"sell_mode", "valuation_window", "valuation_sell_min"}.issubset(config_columns)
+    assert {"sell_mode", "valuation_window", "valuation_buy_max", "valuation_sell_min"}.issubset(config_columns)
     # 存量状态保留，补列后没有挂起的卖出信号
     assert tuple(row) == (2, 1, None)
 

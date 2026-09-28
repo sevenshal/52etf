@@ -82,6 +82,7 @@ const defaultValues = {
   trailing_stop_pct: 5,
   sell_mode: 'trailing',
   valuation_window: 252,
+  valuation_buy_max: 50,
   valuation_sell_min: 80,
   sell_position_pct: 50,
   sell_reduction_basis: 'portfolio',
@@ -501,7 +502,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           sub2_symbol: undefined,
           sub3_symbol: undefined,
           swap_threshold_values: 'none',
-          valuation_buy_max_values: 'none',
+          valuation_buy_max_values: String(values.valuation_buy_max ?? 50),
           valuation_sell_min_values: ['valuation_ma5', 'valuation_trailing'].includes(values.sell_mode)
             ? String(values.valuation_sell_min ?? 80) : 'none',
           valuation_force_sell_greed_values: 'none',
@@ -528,10 +529,12 @@ const SoxlFearStrategy = ({ embedded = false }) => {
           sell_ma5_confirm: values.sell_mode === 'valuation_ma5' ? 'all' : 'off',
           soxl_sell_mode: values.sell_mode || 'trailing',
           soxl_valuation_window: values.valuation_window || 252,
+          soxl_valuation_buy_max_values: String(values.valuation_buy_max ?? 50),
           soxl_valuation_sell_min_values: ['valuation_ma5', 'valuation_trailing'].includes(values.sell_mode)
             ? String(values.valuation_sell_min ?? 80) : 'none',
           sell_mode: values.sell_mode || 'trailing',
           valuation_window: values.valuation_window || 252,
+          valuation_buy_max: values.valuation_buy_max ?? 50,
           valuation_sell_min: values.valuation_sell_min || 80,
         },
       },
@@ -903,6 +906,11 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         <Col xs={24} md={8}>
           <Form.Item name="valuation_window" label="SOXX 估值分位窗口" rules={[{ required: true }]}>
             <Select options={[{ label: '252日', value: 252 }, { label: '504日', value: 504 }]} />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
+          <Form.Item name="valuation_buy_max" label="SOXX 买入低估分位≤" rules={[{ required: true }]}>
+            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
         <Col xs={24} md={8}>

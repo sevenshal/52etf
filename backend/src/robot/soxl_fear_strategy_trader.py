@@ -1094,6 +1094,11 @@ class SoxlFearStrategyTrader:
                     config.greed_threshold = float(persisted_config.greed_threshold)
                     config.sell_mode = getattr(persisted_config, "sell_mode", None) or "trailing"
                     config.valuation_window = int(getattr(persisted_config, "valuation_window", 252) or 252)
+                    persisted_valuation_buy_max = getattr(persisted_config, "valuation_buy_max", None)
+                    config.valuation_buy_max = (
+                        float(persisted_valuation_buy_max)
+                        if persisted_valuation_buy_max is not None else None
+                    )
                     persisted_valuation_sell_min = getattr(persisted_config, "valuation_sell_min", None)
                     config.valuation_sell_min = float(
                         80.0 if persisted_valuation_sell_min is None else persisted_valuation_sell_min
@@ -1117,10 +1122,17 @@ class SoxlFearStrategyTrader:
             preferred_longport_account_id = config.longport_account_id if config.account_type == "longport" else None
             sell_mode = str(getattr(config, "sell_mode", None) or "trailing")
             valuation_window = int(getattr(config, "valuation_window", 252) or 252)
+            valuation_buy_max_value = getattr(config, "valuation_buy_max", None)
+            valuation_buy_max = (
+                float(valuation_buy_max_value) if valuation_buy_max_value is not None else None
+            )
             valuation_sell_min_value = getattr(config, "valuation_sell_min", None)
             valuation_sell_min = float(80.0 if valuation_sell_min_value is None else valuation_sell_min_value)
-            soxx_exit_context = {"available": False, "reason": "移动止盈模式未启用"}
-            if sell_mode in {"valuation_ma5", "valuation_trailing"}:
+            needs_valuation = valuation_buy_max is not None or sell_mode in {"valuation_ma5", "valuation_trailing"}
+            soxx_exit_context = {"available": False, "reason": "未启用估值闸门"}
+            if needs_valuation:
+                # 买入与两种估值卖出都使用同一份确认后的 SOXX 点位；实盘不允许
+                # 回测式的“缺失估值放行”。
                 soxx_exit_context = self._get_soxx_exit_context(
                     config.account_id,
                     market_date,
@@ -1128,7 +1140,7 @@ class SoxlFearStrategyTrader:
                     preferred_longport_account_id=preferred_longport_account_id,
                 )
                 if not soxx_exit_context.get("available"):
-                    raise ValueError(f"SOXX 卖出信号数据未就绪: {soxx_exit_context.get('reason')}")
+                    raise ValueError(f"SOXX 估值信号数据未就绪: {soxx_exit_context.get('reason')}")
                 if soxx_exit_context.get("valuation_position") is None:
                     raise ValueError(
                         "SOXX 估值点位缺失：只允许使用信号日或前一交易日的估值，无法继续执行"
@@ -1173,14 +1185,16 @@ class SoxlFearStrategyTrader:
                         state.cooldown_remaining_days = max(0, state.cooldown_remaining_days - 1)
                     state.last_processed_date = market_date
 
+                valuation_position = soxx_exit_context.get("valuation_position")
                 is_fear = float(cnn_score) <= float(config.buy_threshold)
+                if valuation_buy_max is not None:
+                    is_fear = is_fear and float(valuation_position) <= valuation_buy_max
                 greedy_signal = float(cnn_score) >= float(config.greed_threshold)
                 can_trade = state.cooldown_remaining_days <= 0
 
-                valuation_position = soxx_exit_context.get("valuation_position")
                 valuation_is_high = (
                     valuation_position is not None
-                    and float(valuation_position) >= float(config.valuation_sell_min)
+                    and float(valuation_position) >= valuation_sell_min
                 )
                 if str(config.sell_mode or "trailing") == "valuation_ma5":
                     if shares > 0 and allow_greed_state_update and greedy_signal and valuation_is_high:

@@ -999,6 +999,7 @@ class SoxlFearStrategyConfig(Base):
     # valuation_trailing=贪婪且高估后启动移动止盈
     sell_mode = Column(String, nullable=False, default="trailing")
     valuation_window = Column(Integer, nullable=False, default=252)
+    valuation_buy_max = Column(Float, nullable=True)
     valuation_sell_min = Column(Float, nullable=False, default=80.0)
     last_run_at = Column(DateTime)
     last_run_status = Column(String(16))
@@ -2329,6 +2330,7 @@ def ensure_soxl_fear_strategy_multi_config_schema():
                     rebalance_threshold_pct FLOAT NOT NULL DEFAULT 5.0,
                     sell_mode VARCHAR NOT NULL DEFAULT 'trailing',
                     valuation_window INTEGER NOT NULL DEFAULT 252,
+                    valuation_buy_max FLOAT,
                     valuation_sell_min FLOAT NOT NULL DEFAULT 80.0,
                     last_run_at DATETIME,
                     last_run_status VARCHAR(16),
@@ -2402,6 +2404,7 @@ def ensure_soxl_fear_strategy_multi_config_schema():
             "live_sub_account_id": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN live_sub_account_id INTEGER",
             "sell_mode": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN sell_mode VARCHAR NOT NULL DEFAULT 'trailing'",
             "valuation_window": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN valuation_window INTEGER NOT NULL DEFAULT 252",
+            "valuation_buy_max": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN valuation_buy_max FLOAT",
             "valuation_sell_min": "ALTER TABLE soxl_fear_strategy_configs ADD COLUMN valuation_sell_min FLOAT NOT NULL DEFAULT 80.0",
         }
         for column_name, ddl in soxl_config_column_ddls.items():

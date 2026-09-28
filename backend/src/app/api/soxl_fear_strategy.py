@@ -49,6 +49,7 @@ class SoxlFearStrategyConfigPayload(BaseModel):
     trailing_stop_pct: float = 5.0
     sell_mode: str = "trailing"
     valuation_window: int = 252
+    valuation_buy_max: Optional[float] = None
     valuation_sell_min: float = 80.0
     sell_position_pct: float = 50.0
     sell_reduction_basis: str = "portfolio"
@@ -93,14 +94,19 @@ class SoxlFearStrategyConfigPayload(BaseModel):
         "volume_ratio_threshold",
         "buy_position_pct",
         "trailing_stop_pct",
+        "valuation_buy_max",
         "valuation_sell_min",
         "sell_position_pct",
         "min_position_pct_after_take_profit",
         "rebalance_threshold_pct",
     )
     def validate_percent_like_values(cls, value):
+        if value is None:
+            return None
         if value < 0:
             raise ValueError("参数不能为负数")
+        if value > 100:
+            raise ValueError("百分比参数不能大于 100")
         return value
 
     @validator("cooldown_days")
@@ -206,6 +212,7 @@ CONFIG_FIELDS = [
     "trailing_stop_pct",
     "sell_mode",
     "valuation_window",
+    "valuation_buy_max",
     "valuation_sell_min",
     "sell_position_pct",
     "sell_reduction_basis",
