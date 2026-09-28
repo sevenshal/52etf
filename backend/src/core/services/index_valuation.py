@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 from .a_stock_index_valuation import load_a_stock_index_valuation_position_history
@@ -51,6 +51,14 @@ def resolve_index_valuation_position(
     fallback was used.
     """
     if not history:
+        return None, None
+    # A merged backtest frame can contain a missing date as ``NaN`` (a float).
+    # Do not pass that through to the calendar helpers: they correctly expect a
+    # date, but would otherwise fail with ``'float' object has no attribute
+    # 'weekday'``.  Missing signal dates simply have no usable valuation.
+    if isinstance(as_of_date, datetime):
+        as_of_date = as_of_date.date()
+    elif not isinstance(as_of_date, date):
         return None, None
     latest, previous = _latest_or_previous_trading_day(symbol, as_of_date)
     for candidate_date in (latest, previous):

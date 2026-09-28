@@ -96,3 +96,12 @@ def test_live_us_leg_uses_one_prior_trading_day_only():
         assert _signal_day_valuation("qqq_clone", date(2026, 9, 11), 252, has_signal_day_fear=True) == (30.0, True)
         assert _signal_day_valuation("qqq_clone", date(2026, 9, 10), 504) == (35.0, True)
         assert _signal_day_valuation("cnn", date(2026, 9, 10), 252) == (None, True)
+
+
+def test_invalid_merged_signal_date_has_no_valuation_instead_of_calendar_error():
+    history = {date(2026, 9, 10): {252: 30.0}}
+    # pandas represents an unmatched/forward-filled date as a float NaN in
+    # some mixed-date frames.  The backtest must treat it as no valuation.
+    assert index_valuation.resolve_index_valuation_position(
+        history, "000300.SH", as_of_date=float("nan"), window=252,
+    ) == (None, None)

@@ -32,16 +32,18 @@ from ...core.services.longport import LongPortService
 from ...core.services.quote import QuoteService
 from ...robot.a_stock_base_data_config import (
     A_STOCK_ETF_DAILY_NAMES,
-    A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
-    A_STOCK_INDEX_FEAR_GREED_TARGETS,
 )
 from ...robot.cnn_fear_index import CNNFearGreedIndexScraper
+from .a_stock_fear_volume_config import (
+    A_STOCK_FEAR_SOURCE_OPTIONS,
+    A_STOCK_PRESET_PAIRS,
+    A_STOCK_TARGET_OPTIONS,
+)
 from .account import valid_admin_account
 
-# 两套回测的 API 入口分开：本模块只作为共享计算实现，同时暴露 SOXL 入口；
-# A 股入口在文件末尾单独注册，避免前端再把两类参数混在同一个路径下。
+# SOXL 的 API 入口。A 股回测由 a_stock_fear_backtest 模块注册，不能从这里
+# 反向挂载路由。
 router = APIRouter(prefix="/api/soxl-fear-backtest", tags=["SOXL Fear Volume Backtest"])
-a_stock_router = APIRouter(prefix="/api/a-stock-fear-backtest", tags=["A-stock Fear Volume Backtest"])
 logger = logging.getLogger(__name__)
 SEARCH_JOBS: Dict[str, Dict] = {}
 SEARCH_JOBS_LOCK = threading.Lock()
@@ -66,8 +68,6 @@ SELL_MA5_CONFIRM_MODES = {
 }
 MA5_WINDOW = 5
 SIGNAL_BELOW_MA5_COLUMN = "signal_below_ma5"
-A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
-A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ",)
 VALUATION_POSITION_WINDOWS = (VALUATION_POSITION_SHORT_WINDOW, VALUATION_POSITION_MAX_WINDOW)
 
 US_TARGET_OPTIONS = [
@@ -78,10 +78,19 @@ US_TARGET_OPTIONS = [
     {"label": "QQQ.US", "value": "QQQ.US", "market": "us"},
     {"label": "SPY.US", "value": "SPY.US", "market": "us"},
 ]
+SOXL_SYMBOL = "SOXL.US"
 
 
 def _normalize_symbol(value: str) -> str:
     return str(value or "").strip().upper()
+
+
+def _validate_soxl_request(symbol: str, volume_signal_symbol: Optional[str] = None) -> None:
+    """Keep the SOXL executor single-asset; A 股 belongs to its own engine."""
+    if _normalize_symbol(symbol) != SOXL_SYMBOL:
+        raise ValueError("SOXL 回测仅支持 SOXL.US；A 股请使用 A 股情绪量能回测")
+    if volume_signal_symbol and _normalize_symbol(volume_signal_symbol) != SOXL_SYMBOL:
+        raise ValueError("SOXL 回测的量比来源固定为 SOXL.US")
 
 
 def _volume_ratio_consecutive_column(days: int) -> str:
@@ -95,74 +104,6 @@ def _volume_ma_excluding_recent_column(days: int) -> str:
 def _valuation_column(window: int) -> str:
     return f"valuation_position_{window}"
 
-
-def _fear_source_key_for_symbol(symbol: str) -> str:
-    normalized = _normalize_symbol(symbol)
-    return "a_stock_" + re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")
-
-
-def _a_stock_fear_label(target: Dict[str, Any]) -> str:
-    return f"{target.get('ticker') or target.get('label') or target['symbol']} 指数贪恐"
-
-
-def _build_a_stock_fear_sources() -> Dict[str, Dict[str, Any]]:
-    # 自算指数（A创100、微盘400）和公开指数统一从贪恐目标清单来，新增指数不用再改这里。
-    from ...core.services.a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGETS
-
-    sources: Dict[str, Dict[str, Any]] = {}
-    for target in A_STOCK_FEAR_GREED_TARGETS:
-        symbol = _normalize_symbol(target["symbol"])
-        sources[_fear_source_key_for_symbol(symbol)] = {
-            "label": _a_stock_fear_label(target),
-            "column": "etf_fear_greed",
-            "symbol": symbol,
-            "market": "a_stock",
-        }
-    return sources
-
-
-def _build_a_stock_target_options() -> List[Dict[str, Any]]:
-    options = []
-    seen: set[str] = set()
-    for symbol in [*A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS, *A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS]:
-        normalized = _normalize_symbol(symbol)
-        if normalized in seen:
-            continue  # 源配置存在重复（如 510300.SH 出现两次），去重避免下拉重复项
-        seen.add(normalized)
-        name = A_STOCK_ETF_DAILY_NAMES.get(normalized, normalized)
-        options.append({
-            "label": f"{name} {normalized}",
-            "value": normalized,
-            "market": "a_stock",
-        })
-    return options
-
-
-def _build_a_stock_preset_pairs() -> List[Dict[str, Any]]:
-    pairs = []
-    for target in A_STOCK_INDEX_FEAR_GREED_TARGETS:
-        etf_symbol = target.get("proxy_etf")
-        if not etf_symbol:
-            continue
-        fear_symbol = _normalize_symbol(target["symbol"])
-        target_symbol = _normalize_symbol(etf_symbol)
-        target_label = f"{A_STOCK_ETF_DAILY_NAMES.get(target_symbol, target_symbol)} {target_symbol}"
-        fear_label = _a_stock_fear_label(target)
-        pairs.append({
-            "key": f"{target_symbol}:{fear_symbol}",
-            "target_symbol": target_symbol,
-            "target_label": target_label,
-            "fear_source": _fear_source_key_for_symbol(fear_symbol),
-            "fear_symbol": fear_symbol,
-            "fear_label": fear_label,
-            "label": f"{target_label} × {fear_label}",
-        })
-    return pairs
-
-
-A_STOCK_FEAR_SOURCE_OPTIONS = _build_a_stock_fear_sources()
-A_STOCK_TARGET_OPTIONS = _build_a_stock_target_options()
-A_STOCK_PRESET_PAIRS = _build_a_stock_preset_pairs()
 
 FEAR_SOURCE_OPTIONS = {
     "cnn": {
@@ -802,6 +743,108 @@ class SOXLFearSearchParams(BaseModel):
         if value < 0 or value > 100:
             raise ValueError("调仓阈值必须在 0 到 100 之间")
         return value
+
+
+class SoxlFearSearchParams(BaseModel):
+    """SOXL 页面唯一允许提交的搜索参数。
+
+    A 股轮动、log-z 顶底实验等通用引擎遗留字段不再进入 SOXL API；转换为
+    内部执行参数时才补上固定值，避免缺字段触发通用搜索默认网格。
+    """
+    initial_capital: float = 1_000_000.0
+    start_date: str = "2021-01-01"
+    end_date: Optional[str] = None
+    top_n: int = 20
+    objective: str = "annualized_return"
+    eval_workers: Optional[int] = None
+    rebalance_threshold_pct: float = 5.0
+    slippage_pct: float = 0.3
+    stamp_duty_pct: float = 0.0
+    buy_threshold_values: List[float] = Field(default_factory=lambda: [30.0])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0])
+    volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.37])
+    buy_position_pct_values: List[float] = Field(default_factory=lambda: [50.0])
+    cooldown_days_values: List[int] = Field(default_factory=lambda: [10])
+    trailing_stop_pct_values: List[float] = Field(default_factory=lambda: [0.0])
+    sell_position_pct_values: List[float] = Field(default_factory=lambda: [50.0])
+    sell_reduction_basis_values: List[str] = Field(default_factory=lambda: ["portfolio"])
+    sell_price_above_avg_cost_values: List[bool] = Field(default_factory=lambda: [True])
+    max_take_profit_sells_per_cycle_values: List[int] = Field(default_factory=lambda: [2])
+    min_position_pct_after_take_profit_values: List[float] = Field(default_factory=lambda: [0.0])
+    sell_mode: str = "valuation_ma5"
+    valuation_window: int = VALUATION_POSITION_SHORT_WINDOW
+    valuation_buy_max_values: List[Optional[float]] = Field(default_factory=lambda: [50.0])
+    valuation_sell_min_values: List[Optional[float]] = Field(default_factory=lambda: [80.0])
+
+    @validator("sell_mode")
+    def validate_sell_mode(cls, value):
+        if value not in {"trailing", "valuation_ma5", "valuation_trailing"}:
+            raise ValueError("SOXL 卖出模式仅支持 trailing、valuation_ma5、valuation_trailing")
+        return value
+
+    @validator("valuation_window")
+    def validate_valuation_window(cls, value):
+        if value not in VALUATION_POSITION_WINDOWS:
+            raise ValueError("估值窗口仅支持 252 或 504")
+        return value
+
+    def to_engine_params(self) -> SOXLFearSearchParams:
+        sell_valuation_values = (
+            self.valuation_sell_min_values
+            if self.sell_mode in {"valuation_ma5", "valuation_trailing"}
+            else [None]
+        )
+        trailing_values = (
+            [0.0] if self.sell_mode == "valuation_ma5" else self.trailing_stop_pct_values
+        )
+        return SOXLFearSearchParams(
+            symbol=SOXL_SYMBOL,
+            volume_signal_symbol=SOXL_SYMBOL,
+            fear_source_values=["cnn"],
+            initial_capital=self.initial_capital,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            top_n=self.top_n,
+            objective=self.objective,
+            eval_workers=self.eval_workers,
+            rebalance_threshold_pct=self.rebalance_threshold_pct,
+            slippage_pct=self.slippage_pct,
+            stamp_duty_pct=self.stamp_duty_pct,
+            volume_z_threshold_values=[None],
+            sell_shrink_z_values=[-1.0],
+            buy_turn_signal_mode_values=["legacy"],
+            sell_turn_signal_mode_values=["legacy"],
+            ma5_bottom_score_values=[25.0], ma5_top_score_values=[75.0],
+            ma5_lookback_days_values=[5], volume_bottom_score_values=[30.0],
+            volume_top_score_values=[75.0], volume_expand_std_values=[1.25],
+            volume_shrink_std_values=[0.25], turn_signal_cooldown_days_values=[5],
+            buy_threshold_values=self.buy_threshold_values,
+            greed_threshold_values=self.greed_threshold_values,
+            volume_ratio_threshold_values=self.volume_ratio_threshold_values,
+            volume_ratio_consecutive_days_values=[1],
+            buy_position_pct_values=self.buy_position_pct_values,
+            cooldown_days_values=self.cooldown_days_values,
+            trailing_stop_pct_values=trailing_values,
+            sell_position_pct_values=self.sell_position_pct_values,
+            sell_reduction_basis_values=self.sell_reduction_basis_values,
+            sell_price_above_avg_cost_values=self.sell_price_above_avg_cost_values,
+            max_take_profit_sells_per_cycle_values=self.max_take_profit_sells_per_cycle_values,
+            min_position_pct_after_take_profit_values=self.min_position_pct_after_take_profit_values,
+            execute_next_open_values=[True],
+            sub_symbol=None, sub_fear_source="cnn", sub_volume_signal_symbol=None,
+            sub_buy_threshold_values=[25.0], sub_volume_ratio_threshold_values=[1.6],
+            swap_threshold_values=[None], sub2_symbol=None, sub2_fear_source="cnn",
+            sub2_volume_signal_symbol=None, sub2_buy_threshold_values=[20.0],
+            sub2_volume_ratio_threshold_values=[1.3], sub3_symbol=None,
+            sub3_fear_source="cnn", sub3_volume_signal_symbol=None,
+            sub3_buy_threshold_values=[20.0], sub3_volume_ratio_threshold_values=[1.3],
+            sell_ma5_confirm=SELL_MA5_CONFIRM_ALL if self.sell_mode == "valuation_ma5" else SELL_MA5_CONFIRM_OFF,
+            sell_ma5_signal_symbol="SOXX.US",
+            valuation_window_values=[self.valuation_window],
+            valuation_buy_max_values=self.valuation_buy_max_values,
+            valuation_sell_min_values=sell_valuation_values,
+            valuation_force_sell_greed_values=[None],
+        )
 
 
 class SOXLFearSearchJobCreated(BaseModel):
@@ -3693,8 +3736,8 @@ def get_soxl_fear_backtest_options(
     account_id: str = Depends(valid_admin_account),
 ):
     return {
-        "symbol_options": TARGET_OPTIONS,
-        "volume_signal_symbol_options": TARGET_OPTIONS,
+        "symbol_options": [item for item in US_TARGET_OPTIONS if item["value"] == SOXL_SYMBOL],
+        "volume_signal_symbol_options": [item for item in US_TARGET_OPTIONS if item["value"] == SOXL_SYMBOL],
         "fear_source_options": [
             {
                 "label": config["label"],
@@ -3703,10 +3746,11 @@ def get_soxl_fear_backtest_options(
                 "market": config.get("market") or "us",
             }
             for key, config in FEAR_SOURCE_OPTIONS.items()
+            if key == "cnn"
         ],
         "a_stock_preset_pairs": A_STOCK_PRESET_PAIRS,
         "default_request": {
-            "symbol": "SOXL.US",
+            "symbol": SOXL_SYMBOL,
             "volume_signal_symbol": None,
             "fear_source_values": ["cnn"],
             "a_stock_symbol": A_STOCK_PRESET_PAIRS[0]["target_symbol"] if A_STOCK_PRESET_PAIRS else None,
@@ -3717,27 +3761,27 @@ def get_soxl_fear_backtest_options(
 
 @router.post("/search")
 def search_soxl_fear_params(
-    payload: SOXLFearSearchParams,
+    payload: SoxlFearSearchParams,
     account_id: str = Depends(valid_admin_account),
 ):
     try:
-        return _build_search_response(payload)
+        return _build_search_response(payload.to_engine_params())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-
 @router.post("/search/jobs", response_model=SOXLFearSearchJobCreated)
 def create_soxl_fear_search_job(
-    payload: SOXLFearSearchParams,
+    payload: SoxlFearSearchParams,
     account_id: str = Depends(valid_admin_account),
 ):
     try:
-        start_date = _parse_date(payload.start_date)
-        end_date = _parse_date(payload.end_date, default=date.today())
+        engine_payload = payload.to_engine_params()
+        start_date = _parse_date(engine_payload.start_date)
+        end_date = _parse_date(engine_payload.end_date, default=date.today())
         if start_date >= end_date:
             raise ValueError("开始日期必须早于结束日期")
 
-        total_combinations = _count_search_params(payload)
+        total_combinations = _count_search_params(engine_payload)
         if total_combinations <= 0:
             raise ValueError("至少需要提供一组有效的超参数候选值")
 
@@ -3759,7 +3803,7 @@ def create_soxl_fear_search_job(
             }
 
         _publish_search_job(task_id)
-        SEARCH_JOB_EXECUTOR.submit(_run_search_job, task_id, payload)
+        SEARCH_JOB_EXECUTOR.submit(_run_search_job, task_id, engine_payload)
         return SOXLFearSearchJobCreated(
             task_id=task_id,
             status="pending",
@@ -3830,6 +3874,7 @@ def run_soxl_fear_backtest(
     account_id: str = Depends(valid_admin_account),
 ):
     try:
+        _validate_soxl_request(payload.symbol, payload.volume_signal_symbol)
         start_date = _parse_date(payload.start_date)
         end_date = _parse_date(payload.end_date, default=date.today())
         if start_date >= end_date:
@@ -3881,40 +3926,3 @@ def run_soxl_fear_backtest(
         return _json_safe(result)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
-# A 股回测沿用同一套经过验证的底层计算器，但拥有独立的路由、任务空间和
-# 前端入口。这样后续 A 股候选参数与 SOXL 专用参数可以分别演进，不再依赖
-# 一个“万能”URL来区分市场。
-a_stock_router.add_api_route(
-    "/options",
-    get_soxl_fear_backtest_options,
-    methods=["GET"],
-    name="get_a_stock_fear_backtest_options",
-)
-a_stock_router.add_api_route(
-    "/search",
-    search_soxl_fear_params,
-    methods=["POST"],
-    name="search_a_stock_fear_params",
-)
-a_stock_router.add_api_route(
-    "/search/jobs",
-    create_soxl_fear_search_job,
-    methods=["POST"],
-    response_model=SOXLFearSearchJobCreated,
-    name="create_a_stock_fear_search_job",
-)
-a_stock_router.add_api_route(
-    "/search/jobs/{task_id}",
-    get_soxl_fear_search_job_status,
-    methods=["GET"],
-    response_model=SOXLFearSearchJobStatus,
-    name="get_a_stock_fear_search_job_status",
-)
-a_stock_router.add_api_route(
-    "/run",
-    run_soxl_fear_backtest,
-    methods=["POST"],
-    name="run_a_stock_fear_backtest",
-)

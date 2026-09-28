@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 import os  # 导入工具函数
-from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_micro400, a_stock_fund_flow, ai_stock, chan_analysis, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest, tushare_account, realtime, a_stock_fear_strategy, system_info, fear_greed_signal_config, xueqiu_holdings, eastmoney_holdings, sector_nine_turn, value_investing, stock_system, market
+from .api import evc, szdt, account, etf, cnn, stock, positions, trade, backtest, fed_rate, log, lev_etf_backtest, trading, ib_accounts, all_weather_backtest, ib_copy_trading, snowball, monitor, longport_accounts, external_trading_accounts, szdt_configs, scheduled_tasks, evc_accounts, soxl_fear_backtest, soxl_fear_strategy, valuation_sim, a_stock_innovation100, a_stock_micro400, a_stock_fund_flow, ai_stock, chan_analysis, db_manager, factor_lab, events, email_settings, a_stock_fear_etf_backtest, a_stock_fear_backtest, tushare_account, realtime, a_stock_fear_strategy, system_info, fear_greed_signal_config, xueqiu_holdings, eastmoney_holdings, sector_nine_turn, value_investing, stock_system, market
 from ..robot.main import robot
 from ..core.utils import send_alert_email, send_system_startup_email
 import traceback
@@ -105,7 +105,7 @@ app.include_router(szdt_configs.router)
 app.include_router(scheduled_tasks.router)
 app.include_router(evc_accounts.router)
 app.include_router(soxl_fear_backtest.router)
-app.include_router(soxl_fear_backtest.a_stock_router)
+app.include_router(a_stock_fear_backtest.router)
 app.include_router(soxl_fear_strategy.router)
 app.include_router(a_stock_fear_strategy.router)
 app.include_router(valuation_sim.router)

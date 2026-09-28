@@ -27,7 +27,7 @@ from ...core.services.external_trading_market import (
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES
 from ...robot.a_stock_fear_strategy_trader import AStockFearStrategyTrader
 from .account import valid_admin_account
-from .soxl_fear_backtest import (
+from .a_stock_fear_volume_config import (
     A_STOCK_FEAR_SOURCE_OPTIONS,
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,

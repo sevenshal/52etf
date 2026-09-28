@@ -291,6 +291,37 @@ const SoxlFearBacktest = () => {
     const soxlTrailingValues = parseNumberList(values.trailing_stop_pct_values);
     const soxlMaxSellValues = parseNumberList(values.max_take_profit_sells_per_cycle_values, true);
     const soxlMinPositionValues = parseNumberList(values.min_position_pct_after_take_profit_values);
+    if (isSoxlMode) {
+      // SOXL 专属 API：只发送 SOXL 策略真实使用的字段。A 股候补、轮动、
+      // log-z 与顶底实验字段不再以“固定默认值”混入请求。
+      return {
+        initial_capital: values.initial_capital,
+        start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
+        end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
+        top_n: values.top_n,
+        objective: values.objective,
+        eval_workers: values.eval_workers,
+        rebalance_threshold_pct: values.fit_rebalance_threshold_pct,
+        slippage_pct: values.slippage_pct ?? 0.3,
+        stamp_duty_pct: values.stamp_duty_pct ?? 0,
+        buy_threshold_values: soxlBuyThresholdValues.length ? soxlBuyThresholdValues : [30],
+        greed_threshold_values: soxlGreedThresholdValues.length ? soxlGreedThresholdValues : [40],
+        volume_ratio_threshold_values: soxlVolumeRatioThresholdValues.length ? soxlVolumeRatioThresholdValues : [1.37],
+        buy_position_pct_values: soxlBuyPositionValues.length ? soxlBuyPositionValues : [50],
+        cooldown_days_values: soxlCooldownValues.length ? soxlCooldownValues : [10],
+        trailing_stop_pct_values: soxlTrailingValues.length ? soxlTrailingValues : [0],
+        sell_position_pct_values: soxlSellPositionValues.length ? soxlSellPositionValues : [50],
+        sell_reduction_basis_values: values.sell_reduction_basis_values?.length
+          ? values.sell_reduction_basis_values : ['portfolio'],
+        sell_price_above_avg_cost_values: sellPriceAboveAvgCostValues.length ? sellPriceAboveAvgCostValues : [true],
+        max_take_profit_sells_per_cycle_values: soxlMaxSellValues.length ? soxlMaxSellValues : [2],
+        min_position_pct_after_take_profit_values: soxlMinPositionValues.length ? soxlMinPositionValues : [0],
+        sell_mode: soxlSellMode,
+        valuation_window: soxlValuationWindow,
+        valuation_buy_max_values: soxlValuationBuyMaxValues.length ? soxlValuationBuyMaxValues : [50],
+        valuation_sell_min_values: soxlValuationSellMinValues.length ? soxlValuationSellMinValues : [80],
+      };
+    }
     const payload = {
       symbol: values.symbol || 'SOXL.US',
       volume_signal_symbol: values.volume_signal_symbol || undefined,
@@ -420,9 +451,7 @@ const SoxlFearBacktest = () => {
         execute_next_open_values: [true],
       } : {}),
     };
-    if (!isSoxlMode) {
-      return payload;
-    }
+    if (!isSoxlMode) return payload;
     // SOXL 不使用 A 股候补、顶底信号实验参数；这些字段不再发送到专用接口。
     // 但 volume_z_threshold/sell_shrink_z 必须保留固定值：省略后后端会填入
     // 通用搜索默认值 volume_z=1.25，导致 SOXL 意外切成 log-z 放量策略。
