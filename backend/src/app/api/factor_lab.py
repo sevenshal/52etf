@@ -35,6 +35,7 @@ from ...core.database import (
     FactorBacktestSearchState,
     FactorLiveTradingConfig,
     FactorLiveTradingLog,
+    IBKRAccountConfig,
     USStockIndustrySnapshot,
     get_db,
     get_db_ctx,
@@ -121,6 +122,7 @@ from ...core.services.external_trading_valuation import (
     get_realtime_reference_prices,
 )
 from ...core.services.market import MarketService
+from ...core.services.ib_service import IBKRService, IBOrderSubmissionPending
 from ...core.services.symbol_names import format_symbol_label, load_symbol_name_map, normalize_symbol_for_name
 from ...core.services.tushare import TushareService
 from ...core.utils import normalize_us_equity_symbol, send_alert_email
@@ -1012,6 +1014,8 @@ class FactorLiveTradingConfigPayload(BaseModel):
     name: str = Field(default="因子线上交易", min_length=1, max_length=100)
     enabled: bool = False
     request: FactorBacktestRequest = Field(default_factory=FactorBacktestRequest)
+    account_type: Literal["external", "ib"] = "external"
+    ib_account_id: Optional[int] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
     signal_time: str = "18:35"
@@ -3483,6 +3487,16 @@ def _serialize_factor_live_config(
     external_account_name = None
     external_account_identifier = None
     live_sub_account_name = None
+    ib_account_name = None
+    ib_account_port = None
+    if db is not None and config.ib_account_id:
+        ib_account = db.query(IBKRAccountConfig).filter(
+            IBKRAccountConfig.id == config.ib_account_id,
+            IBKRAccountConfig.account_id == config.account_id,
+        ).first()
+        if ib_account:
+            ib_account_name = ib_account.name
+            ib_account_port = ib_account.ib_port
     if external_db is not None:
         if config.external_trading_account_id:
             external_account = external_db.query(ExternalTradingAccount).filter(
@@ -3504,6 +3518,10 @@ def _serialize_factor_live_config(
         "account_id": config.account_id,
         "name": config.name,
         "enabled": bool(config.enabled),
+        "account_type": config.account_type or "external",
+        "ib_account_id": config.ib_account_id,
+        "ib_account_name": ib_account_name,
+        "ib_account_port": ib_account_port,
         "request": request_payload,
         "request_summary": {
             "pool": request_payload.get("pool"),
@@ -3597,6 +3615,8 @@ def _factor_live_config_snapshot(config: FactorLiveTradingConfig) -> SimpleNames
         name=config.name,
         enabled=config.enabled,
         request_payload=config.request_payload,
+        account_type=config.account_type or "external",
+        ib_account_id=config.ib_account_id,
         external_trading_account_id=config.external_trading_account_id,
         live_sub_account_id=config.live_sub_account_id,
         signal_time=config.signal_time,
@@ -3923,8 +3943,10 @@ def _update_factor_live_config_from_payload(
     config.name = payload.name
     config.enabled = payload.enabled
     config.request_payload = _live_backtest_request_payload(payload.request)
-    config.external_trading_account_id = payload.external_trading_account_id
-    config.live_sub_account_id = payload.live_sub_account_id
+    config.account_type = payload.account_type
+    config.ib_account_id = payload.ib_account_id if payload.account_type == "ib" else None
+    config.external_trading_account_id = payload.external_trading_account_id if payload.account_type == "external" else None
+    config.live_sub_account_id = payload.live_sub_account_id if payload.account_type == "external" else None
     config.signal_time = payload.signal_time
     config.signal_timezone = payload.signal_timezone
     config.execution_time = payload.execution_time
@@ -3932,7 +3954,47 @@ def _update_factor_live_config_from_payload(
     config.updated_at = datetime.now()
 
 
-def _build_factor_live_signal_plan(
+def _validate_factor_live_account_selection(
+    db: ORMSession,
+    config: FactorLiveTradingConfig,
+) -> None:
+    account_type = config.account_type or "external"
+    if account_type != "ib":
+        return
+    if _factor_live_market_kind(config) != "us":
+        raise HTTPException(status_code=400, detail="IBKR 账户目前仅支持美股股票池")
+    if not config.ib_account_id:
+        raise HTTPException(status_code=400, detail="请选择 IBKR 账户")
+    ib_account = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config.ib_account_id,
+        IBKRAccountConfig.account_id == config.account_id,
+    ).first()
+    if not ib_account:
+        raise HTTPException(status_code=400, detail="IBKR 账户不存在或不属于当前账户")
+
+
+def _get_factor_live_ib_account(
+    db: ORMSession,
+    config: FactorLiveTradingConfig,
+) -> IBKRAccountConfig:
+    ib_account = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config.ib_account_id,
+        IBKRAccountConfig.account_id == config.account_id,
+    ).first()
+    if not ib_account:
+        raise HTTPException(status_code=404, detail="IBKR 账户不存在")
+    return ib_account
+
+
+def _factor_live_ib_client_id(config_id: Optional[int]) -> int:
+    return 5000 + int(config_id or 0)
+
+
+def _normalize_ib_factor_symbol(symbol: Any) -> Optional[str]:
+    return normalize_us_equity_symbol(symbol)
+
+
+async def _build_factor_live_signal_plan(
     db: ORMSession,
     external_db: ORMSession,
     config: FactorLiveTradingConfig,
@@ -3941,8 +4003,33 @@ def _build_factor_live_signal_plan(
     rank_limit: int = 100,
 ) -> Dict[str, Any]:
     request = _request_payload_from_live_config(config)
-    sub_account = _get_external_sub_account_for_live_config(external_db, config)
-    holding_symbols = _current_holding_symbols(external_db, sub_account)
+    account_type = config.account_type or "external"
+    sub_account = None
+    ib_service = None
+    if account_type == "ib":
+        ib_account = _get_factor_live_ib_account(db, config)
+        ib_service = IBKRService(
+            host=ib_account.ib_host,
+            port=ib_account.ib_port,
+            client_id=_factor_live_ib_client_id(config.id),
+        )
+        try:
+            await ib_service.connect()
+            effective_quantities: Dict[str, float] = {}
+            for symbol, position in ib_service.get_positions_dict().items():
+                normalized = _normalize_ib_factor_symbol(symbol)
+                if normalized:
+                    effective_quantities[normalized] = effective_quantities.get(normalized, 0.0) + float(position.get("qty") or 0)
+            for symbol, pending_quantity in ib_service.get_all_pending_qtys().items():
+                normalized = _normalize_ib_factor_symbol(symbol)
+                if normalized:
+                    effective_quantities[normalized] = effective_quantities.get(normalized, 0.0) + float(pending_quantity or 0)
+            holding_symbols = [symbol for symbol, quantity in effective_quantities.items() if quantity > 0]
+        finally:
+            ib_service.disconnect()
+    else:
+        sub_account = _get_external_sub_account_for_live_config(external_db, config)
+        holding_symbols = _current_holding_symbols(external_db, sub_account)
     next_trading_day_resolver = _factor_live_next_trading_day_resolver(config)
     plan = shared_build_factor_signal_plan(
         _to_shared_backtest_config(request),
@@ -3952,9 +4039,11 @@ def _build_factor_live_signal_plan(
         rank_limit=rank_limit,
         next_trading_day_resolver=next_trading_day_resolver,
     )
+    plan["account_type"] = account_type
+    plan["ib_account_id"] = config.ib_account_id
     plan["external_trading_account_id"] = config.external_trading_account_id
     plan["live_sub_account_id"] = config.live_sub_account_id
-    plan["live_sub_account_name"] = sub_account.name
+    plan["live_sub_account_name"] = sub_account.name if sub_account else None
     return plan
 
 
@@ -4006,22 +4095,62 @@ async def _execute_factor_live_signal(
             "executor_result": None,
         }
 
-    account = external_db.query(ExternalTradingAccount).filter(
-        ExternalTradingAccount.id == config.external_trading_account_id,
-        ExternalTradingAccount.account_id == config.account_id,
-    ).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="外部交易账户不存在")
-    sub_account = _get_external_sub_account_for_live_config(external_db, config)
-    positions = get_ledger_positions(external_db, sub_account.id)
-    current_quantities = {
-        normalize_external_symbol(symbol): external_safe_int(getattr(row, "quantity", 0))
-        for symbol, row in positions.items()
-        if external_safe_int(getattr(row, "quantity", 0)) > 0
-    }
-    sell_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("sell_symbols") or []) if symbol]
-    target_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("target_symbols") or []) if symbol]
-    buy_symbols = [normalize_external_symbol(symbol) for symbol in (signal_payload.get("buy_symbols") or []) if symbol]
+    account_type = config.account_type or "external"
+    account = None
+    sub_account = None
+    ib_service = None
+    positions = {}
+    if account_type == "ib":
+        if db is None:
+            with get_db_ctx() as account_db:
+                ib_account = _get_factor_live_ib_account(account_db, config)
+                ib_host = ib_account.ib_host
+                ib_port = ib_account.ib_port
+        else:
+            ib_account = _get_factor_live_ib_account(db, config)
+            ib_host = ib_account.ib_host
+            ib_port = ib_account.ib_port
+        ib_service = IBKRService(
+            host=ib_host,
+            port=ib_port,
+            client_id=_factor_live_ib_client_id(config.id),
+        )
+        await ib_service.connect()
+        pending_quantities = ib_service.get_all_pending_qtys()
+        current_quantities = {}
+        for symbol, position in ib_service.get_positions_dict().items():
+            normalized = _normalize_ib_factor_symbol(symbol)
+            if not normalized:
+                continue
+            current_quantities[normalized] = int(round(float(position.get("qty") or 0)))
+        for symbol, pending_quantity in pending_quantities.items():
+            normalized = _normalize_ib_factor_symbol(symbol)
+            if normalized:
+                current_quantities[normalized] = current_quantities.get(normalized, 0) + int(round(float(pending_quantity or 0)))
+        current_quantities = {
+            symbol: quantity
+            for symbol, quantity in current_quantities.items()
+            if quantity > 0
+        }
+        normalizer = _normalize_ib_factor_symbol
+    else:
+        account = external_db.query(ExternalTradingAccount).filter(
+            ExternalTradingAccount.id == config.external_trading_account_id,
+            ExternalTradingAccount.account_id == config.account_id,
+        ).first()
+        if not account:
+            raise HTTPException(status_code=404, detail="外部交易账户不存在")
+        sub_account = _get_external_sub_account_for_live_config(external_db, config)
+        positions = get_ledger_positions(external_db, sub_account.id)
+        current_quantities = {
+            normalize_external_symbol(symbol): external_safe_int(getattr(row, "quantity", 0))
+            for symbol, row in positions.items()
+            if external_safe_int(getattr(row, "quantity", 0)) > 0
+        }
+        normalizer = normalize_external_symbol
+    sell_symbols = [normalizer(symbol) for symbol in (signal_payload.get("sell_symbols") or []) if normalizer(symbol)]
+    target_symbols = [normalizer(symbol) for symbol in (signal_payload.get("target_symbols") or []) if normalizer(symbol)]
+    buy_symbols = [normalizer(symbol) for symbol in (signal_payload.get("buy_symbols") or []) if normalizer(symbol)]
     symbols = sorted({
         *current_quantities.keys(),
         *sell_symbols,
@@ -4029,6 +4158,8 @@ async def _execute_factor_live_signal(
         *buy_symbols,
     })
     if not symbols:
+        if ib_service:
+            ib_service.disconnect()
         return {
             "status": "SKIPPED",
             "message": "没有需要同步的目标标的",
@@ -4037,40 +4168,63 @@ async def _execute_factor_live_signal(
             "executor_result": None,
         }
 
-    try:
-        reference_prices = await get_realtime_reference_prices(
-            account.id,
-            symbols,
-            timeout=min(float(timeout_seconds or 120.0), 30.0),
-            filter_stale_quotes=True,  # 执行器触发场景：只接受当日实时价
-        )
-    except ExternalTradingValuationError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-
-    reference_prices = {
-        normalize_external_symbol(symbol): external_safe_float(price)
-        for symbol, price in (reference_prices or {}).items()
-        if external_safe_float(price) and external_safe_float(price) > 0
-    }
+    if account_type == "ib":
+        try:
+            raw_prices = await ib_service.get_market_prices(symbols)
+        except Exception:
+            ib_service.disconnect()
+            raise
+        reference_prices = {
+            normalized: float(price)
+            for symbol, price in (raw_prices or {}).items()
+            for normalized in [_normalize_ib_factor_symbol(symbol)]
+            if normalized and price is not None and math.isfinite(float(price)) and float(price) > 0
+        }
+    else:
+        try:
+            raw_prices = await get_realtime_reference_prices(
+                account.id,
+                symbols,
+                timeout=min(float(timeout_seconds or 120.0), 30.0),
+                filter_stale_quotes=True,  # 执行器触发场景：只接受当日实时价
+            )
+        except ExternalTradingValuationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        reference_prices = {
+            normalize_external_symbol(symbol): external_safe_float(price)
+            for symbol, price in (raw_prices or {}).items()
+            if external_safe_float(price) and external_safe_float(price) > 0
+        }
     missing_prices = [symbol for symbol in symbols if not reference_prices.get(symbol)]
     if missing_prices:
+        if ib_service:
+            ib_service.disconnect()
         raise HTTPException(status_code=409, detail=f"无法获取以下标的执行参考价: {', '.join(missing_prices)}")
 
-    try:
-        valuation = await calculate_sub_account_net_asset(
-            external_db,
-            sub_account,
-            positions=list(positions.values()),
-            update_positions=True,
-        )
-        net_asset = external_safe_float(valuation.get("net_asset"))
-        cash_available = external_safe_float(valuation.get("cash_available"), external_safe_float(sub_account.cash_available))
-    except ExternalTradingValuationError:
-        cash_available = external_safe_float(sub_account.cash_available)
-        net_asset = cash_available + sum(
-            quantity * reference_prices.get(symbol, 0.0)
-            for symbol, quantity in current_quantities.items()
-        )
+    if account_type == "ib":
+        net_asset = float(ib_service.get_net_liquidation() or 0)
+        cash_available = float(ib_service.get_cash_buy_budget(buffer_pct=0.005) or 0)
+        if net_asset <= 0:
+            net_asset = cash_available + sum(
+                quantity * reference_prices.get(symbol, 0.0)
+                for symbol, quantity in current_quantities.items()
+            )
+    else:
+        try:
+            valuation = await calculate_sub_account_net_asset(
+                external_db,
+                sub_account,
+                positions=list(positions.values()),
+                update_positions=True,
+            )
+            net_asset = external_safe_float(valuation.get("net_asset"))
+            cash_available = external_safe_float(valuation.get("cash_available"), external_safe_float(sub_account.cash_available))
+        except ExternalTradingValuationError:
+            cash_available = external_safe_float(sub_account.cash_available)
+            net_asset = cash_available + sum(
+                quantity * reference_prices.get(symbol, 0.0)
+                for symbol, quantity in current_quantities.items()
+            )
 
     lot_size = max(1, int(request.lot_size or 1))
     rotation_mode = normalize_rotation_mode(request.rotation_mode)
@@ -4132,29 +4286,88 @@ async def _execute_factor_live_signal(
     targets.sort(key=lambda item: (0 if item["target_quantity"] == 0 else 1, item["symbol"]))
     signal_id = f"factor_live:{config.id}:{actual_signal_date.isoformat()}"
     signal_version = datetime.now().strftime("%Y%m%d%H%M%S")
-    sync_target_positions(
-        external_db,
-        sub_account=sub_account,
-        targets=targets,
-        signal_id=signal_id,
-        signal_version=signal_version,
-    )
-    external_db.commit()
-
     executor_result = None
-    if trigger_executor:
-        executor_result = await trigger_external_trading_executor(
-            account_id=config.account_id,
-            external_account_id=account.id,
-            trigger_source=f"factor_live_trading:{config.id}",
-            force=force,
-            lot_size=lot_size,
-            order_timeout_seconds=int(timeout_seconds or 120),
+    if account_type == "ib":
+        orders = []
+        failed = 0
+        if trigger_executor:
+            target_quantity_map = {item["symbol"]: int(item["target_quantity"]) for item in targets}
+            order_plan = []
+            for symbol in sorted(set(current_quantities) | set(target_quantity_map)):
+                difference = target_quantity_map.get(symbol, 0) - current_quantities.get(symbol, 0)
+                if difference:
+                    order_plan.append((0 if difference < 0 else 1, symbol, difference))
+            for _, symbol, difference in sorted(order_plan):
+                action = "BUY" if difference > 0 else "SELL"
+                quantity = abs(int(difference))
+                try:
+                    trade = await ib_service.place_market_order(
+                        symbol,
+                        action,
+                        quantity,
+                        submission_timeout=min(float(timeout_seconds or 120.0), 30.0),
+                    )
+                    broker_status = str(getattr(trade.orderStatus, "status", "") or "SUBMITTED")
+                    orders.append({
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": quantity,
+                        "status": broker_status,
+                    })
+                except IBOrderSubmissionPending as exc:
+                    orders.append({
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": quantity,
+                        "status": "SUBMITTED",
+                        "message": str(exc),
+                    })
+                except Exception as exc:
+                    failed += 1
+                    orders.append({
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": quantity,
+                        "status": "FAILED",
+                        "error": str(exc),
+                    })
+        executor_status = "FAILED" if failed and failed == len(orders) else "PARTIAL_FAILED" if failed else "OK"
+        executor_result = {
+            "status": executor_status,
+            "failed": failed,
+            "orders": orders,
+            "account_type": "ib",
+            "ib_account_id": config.ib_account_id,
+        } if trigger_executor else None
+        ib_service.disconnect()
+    else:
+        sync_target_positions(
+            external_db,
+            sub_account=sub_account,
+            targets=targets,
+            signal_id=signal_id,
+            signal_version=signal_version,
         )
+        external_db.commit()
+        if trigger_executor:
+            executor_result = await trigger_external_trading_executor(
+                account_id=config.account_id,
+                external_account_id=account.id,
+                trigger_source=f"factor_live_trading:{config.id}",
+                force=force,
+                lot_size=lot_size,
+                order_timeout_seconds=int(timeout_seconds or 120),
+            )
 
     return {
         "status": "OK",
-        "message": "已按信号同步目标仓位" + ("并触发外部执行器" if trigger_executor else ""),
+        "message": (
+            "已按信号提交 IBKR 调仓订单" if account_type == "ib" and trigger_executor
+            else "已生成 IBKR 目标仓位" if account_type == "ib"
+            else "已按信号同步目标仓位" + ("并触发外部执行器" if trigger_executor else "")
+        ),
+        "account_type": account_type,
+        "ib_account_id": config.ib_account_id,
         "signal": signal_payload,
         "targets": targets,
         "reference_prices": reference_prices,
@@ -4324,12 +4537,14 @@ def process_factor_live_trading_automation_for_robot() -> Dict[str, Any]:
         ):
             try:
                 with get_db_ctx() as db, get_external_trading_db_ctx() as external_db:
-                    plan = _build_factor_live_signal_plan(
-                        db,
-                        external_db,
-                        config,
-                        signal_date=signal_now.date(),
-                        rank_limit=100,
+                    plan = asyncio.run(
+                        _build_factor_live_signal_plan(
+                            db,
+                            external_db,
+                            config,
+                            signal_date=signal_now.date(),
+                            rank_limit=100,
+                        )
                     )
                 signal_date_value = date.fromisoformat(plan["signal_date"])
                 if not plan.get("is_signal_day"):
@@ -6169,6 +6384,7 @@ async def create_factor_live_trading_config(
 ):
     config = FactorLiveTradingConfig(account_id=account_id)
     _update_factor_live_config_from_payload(config, payload)
+    _validate_factor_live_account_selection(db, config)
     db.add(config)
     db.flush()
     _bind_factor_live_sub_account(external_db, config)
@@ -6199,6 +6415,7 @@ async def update_factor_live_trading_config(
     config = _get_factor_live_config_or_404(db, account_id, config_id)
     previous_sub_account_id = config.live_sub_account_id
     _update_factor_live_config_from_payload(config, payload)
+    _validate_factor_live_account_selection(db, config)
     _bind_factor_live_sub_account(external_db, config, previous_sub_account_id=previous_sub_account_id)
     external_db.commit()
     db.commit()
@@ -6277,7 +6494,7 @@ async def generate_factor_live_trading_signal(
             detail=_factor_live_not_signal_day_message(config, requested_signal_date, latest_trading_date),
         )
     try:
-        plan = _build_factor_live_signal_plan(
+        plan = await _build_factor_live_signal_plan(
             db,
             external_db,
             config,
@@ -6331,11 +6548,17 @@ async def execute_factor_live_trading_signal(
         force=payload.force,
         timeout_seconds=payload.timeout_seconds,
     )
+    executor_failure = _factor_live_executor_failure_payload(result)
+    execution_status = (
+        executor_failure.get("status")
+        if executor_failure
+        else result.get("status")
+    ) or "OK"
     config = _get_factor_live_config_or_404(db, account_id, config_id)
     signal_date_value = _normalize_signal_payload_date(result.get("signal") or {})
     config.last_execution_signal_date = signal_date_value
     config.last_execution_at = datetime.now()
-    config.last_execution_status = result.get("status")
+    config.last_execution_status = execution_status
     config.last_execution_message = result.get("message")
     config.last_execution_payload = jsonable_encoder(result)
     config.updated_at = datetime.now()
@@ -6343,7 +6566,7 @@ async def execute_factor_live_trading_signal(
         db,
         config,
         action="EXECUTE",
-        status=result.get("status") or "OK",
+        status=execution_status,
         message=result.get("message"),
         payload=result,
         signal_date=signal_date_value,

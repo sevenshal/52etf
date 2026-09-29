@@ -1595,7 +1595,7 @@ class EmailRecipientConfig(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class FactorLiveTradingConfig(Base):
-    """因子线上交易配置：复用因子回测参数生成信号，并同步到外部交易执行器。"""
+    """因子线上交易配置：复用因子回测参数生成信号，并同步到所选交易账户。"""
     __tablename__ = "factor_live_trading_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1603,6 +1603,8 @@ class FactorLiveTradingConfig(Base):
     name = Column(String(100), nullable=False, default="因子线上交易")
     enabled = Column(Boolean, default=False, nullable=False)
     request_payload = Column(JSON, nullable=False)
+    account_type = Column(String(16), default="external", nullable=False)
+    ib_account_id = Column(Integer, nullable=True)
     external_trading_account_id = Column(Integer, nullable=True)
     live_sub_account_id = Column(Integer, nullable=True)
     signal_time = Column(String(5), default="18:35", nullable=False)
@@ -2213,6 +2215,10 @@ def ensure_table_columns():
             "live_sub_account_id": "ALTER TABLE valuation_sim_configs ADD COLUMN live_sub_account_id INTEGER",
             "trailing_stop_atr_window": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_window INTEGER NOT NULL DEFAULT 20",
             "trailing_stop_atr_multiple": "ALTER TABLE valuation_sim_configs ADD COLUMN trailing_stop_atr_multiple FLOAT NOT NULL DEFAULT 2.5",
+        },
+        "factor_live_trading_configs": {
+            "account_type": "ALTER TABLE factor_live_trading_configs ADD COLUMN account_type VARCHAR(16) NOT NULL DEFAULT 'external'",
+            "ib_account_id": "ALTER TABLE factor_live_trading_configs ADD COLUMN ib_account_id INTEGER",
         },
         "ai_stock_paper_portfolios": {
             "last_execution_target": "ALTER TABLE ai_stock_paper_portfolios ADD COLUMN last_execution_target FLOAT",

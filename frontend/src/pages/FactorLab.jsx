@@ -197,6 +197,7 @@ const TIMEZONE_OPTIONS = [
 const DEFAULT_LIVE_TRADING_VALUES = {
   name: '因子线上交易',
   enabled: false,
+  account_type: 'external',
   signal_time: '18:35',
   signal_timezone: 'Asia/Shanghai',
   execution_time: '09:31',
@@ -494,6 +495,8 @@ const normalizeLiveConfigFormValues = (config = {}) => {
     enabled: Object.prototype.hasOwnProperty.call(config, 'enabled')
       ? config.enabled
       : DEFAULT_LIVE_TRADING_VALUES.enabled,
+    account_type: config.account_type || DEFAULT_LIVE_TRADING_VALUES.account_type,
+    ib_account_id: config.ib_account_id ?? null,
     external_trading_account_id: config.external_trading_account_id ?? null,
     live_sub_account_id: config.live_sub_account_id ?? null,
     signal_time: config.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
@@ -768,8 +771,10 @@ const buildLiveConfigPayload = values => {
     name: String(values.name || DEFAULT_LIVE_TRADING_VALUES.name).trim() || DEFAULT_LIVE_TRADING_VALUES.name,
     enabled: Boolean(values.enabled),
     request: liveRequest,
-    external_trading_account_id: values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
-    live_sub_account_id: values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
+    account_type: values.account_type || DEFAULT_LIVE_TRADING_VALUES.account_type,
+    ib_account_id: values.account_type === 'ib' && values.ib_account_id ? Number(values.ib_account_id) : null,
+    external_trading_account_id: values.account_type === 'external' && values.external_trading_account_id ? Number(values.external_trading_account_id) : null,
+    live_sub_account_id: values.account_type === 'external' && values.live_sub_account_id ? Number(values.live_sub_account_id) : null,
     signal_time: values.signal_time || DEFAULT_LIVE_TRADING_VALUES.signal_time,
     signal_timezone: timezone,
     execution_time: values.execution_time || DEFAULT_LIVE_TRADING_VALUES.execution_time,
@@ -1670,9 +1675,11 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const [selectedLiveConfigId, setSelectedLiveConfigId] = useState(null);
   const [liveConfigModalOpen, setLiveConfigModalOpen] = useState(false);
   const [editingLiveConfigId, setEditingLiveConfigId] = useState(null);
+  const [ibAccounts, setIbAccounts] = useState([]);
   const [externalTradingAccounts, setExternalTradingAccounts] = useState([]);
   const [externalTradingSubAccounts, setExternalTradingSubAccounts] = useState([]);
   const [externalTradingAccountsLoading, setExternalTradingAccountsLoading] = useState(false);
+  const [ibAccountsLoading, setIbAccountsLoading] = useState(false);
   const [liveCustomSymbolOptions, setLiveCustomSymbolOptions] = useState([]);
   const [liveCustomSymbolSearching, setLiveCustomSymbolSearching] = useState(false);
   const [backtestSearchJob, setBacktestSearchJob] = useState(null);
@@ -1724,6 +1731,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   const selectedLivePool = Form.useWatch('pool', liveForm);
   const selectedBacktestCustomSymbols = Form.useWatch('custom_symbols', backtestForm);
   const selectedLiveCustomSymbols = Form.useWatch('custom_symbols', liveForm);
+  const selectedLiveAccountType = Form.useWatch('account_type', liveForm) || 'external';
   const selectedLiveExternalTradingAccountId = Form.useWatch('external_trading_account_id', liveForm);
   const selectedLiveSubAccountId = Form.useWatch('live_sub_account_id', liveForm);
   const compositeLegs = Form.useWatch('legs', compositeForm);
@@ -1795,6 +1803,18 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       message.error(getErrorMessage(error, '加载外部交易账户失败'));
     } finally {
       setExternalTradingAccountsLoading(false);
+    }
+  }, []);
+
+  const loadIbAccounts = useCallback(async () => {
+    setIbAccountsLoading(true);
+    try {
+      const { data } = await request.get('/api/ib-accounts/options');
+      setIbAccounts(Array.isArray(data) ? data : []);
+    } catch (error) {
+      message.error(getErrorMessage(error, '加载 IBKR 账户失败'));
+    } finally {
+      setIbAccountsLoading(false);
     }
   }, []);
 
@@ -1948,13 +1968,22 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   }, [selectedBacktestPool, options?.factors, backtestForm]);
 
   useEffect(() => {
-    if (!selectedLiveExternalTradingAccountId) {
+    if (selectedLiveAccountType !== 'external' || !selectedLiveExternalTradingAccountId) {
       setExternalTradingSubAccounts([]);
       liveForm.setFieldsValue({ live_sub_account_id: null });
       return;
     }
     loadExternalTradingSubAccounts(selectedLiveExternalTradingAccountId);
-  }, [selectedLiveExternalTradingAccountId, loadExternalTradingSubAccounts, liveForm]);
+  }, [selectedLiveAccountType, selectedLiveExternalTradingAccountId, loadExternalTradingSubAccounts, liveForm]);
+
+  useEffect(() => {
+    if (selectedLiveAccountType === 'ib') {
+      setExternalTradingSubAccounts([]);
+      liveForm.setFieldsValue({ external_trading_account_id: null, live_sub_account_id: null });
+    } else {
+      liveForm.setFieldsValue({ ib_account_id: null });
+    }
+  }, [selectedLiveAccountType, liveForm]);
 
   useEffect(() => {
     if (!customLiveMarket) {
@@ -2099,9 +2128,10 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   useEffect(() => {
     loadOptions();
     loadBacktestSearchHistory({ silent: true });
+    loadIbAccounts();
     loadExternalTradingAccounts();
     loadLiveConfigs();
-  }, [loadOptions, loadBacktestSearchHistory, loadExternalTradingAccounts, loadLiveConfigs]);
+  }, [loadOptions, loadBacktestSearchHistory, loadIbAccounts, loadExternalTradingAccounts, loadLiveConfigs]);
 
   useEffect(() => {
     if (!selectedLiveConfigId) {
@@ -2431,7 +2461,11 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
   }, [liveActionState.action, loadLiveConfigLogs, loadLiveConfigs, resolveLiveActionConfigId, selectedLiveConfigId]);
 
   const handleLiveRefresh = async () => {
-    await loadLiveConfigs(selectedLiveConfigId);
+    await Promise.all([
+      loadIbAccounts(),
+      loadExternalTradingAccounts(),
+      loadLiveConfigs(selectedLiveConfigId),
+    ]);
     if (selectedLiveConfigId) {
       await loadLiveConfigLogs(selectedLiveConfigId);
     }
@@ -2802,6 +2836,12 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
     liveConfigs.find(item => item.id === selectedLiveConfigId) || null
   ), [liveConfigs, selectedLiveConfigId]);
   const selectedLiveConfigTitle = selectedLiveConfig?.name || '未选择配置';
+  const ibAccountOptions = useMemo(() => (
+    ibAccounts.map(item => ({
+      label: `${item.name || item.id}（Port ${item.ib_port}）`,
+      value: item.id,
+    }))
+  ), [ibAccounts]);
   const externalTradingAccountOptions = useMemo(() => (
     externalTradingAccounts.map(item => ({
       label: `${item.name || item.identifier || item.id}${item.enabled === false ? '（停用）' : ''}`,
@@ -2863,16 +2903,18 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
       render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>,
     },
     {
-      title: '外部账户',
-      dataIndex: 'external_trading_account_id',
+      title: '交易账户',
+      key: 'trading_account',
       width: 180,
-      render: (value, row) => row.external_trading_account_name || value || '-',
+      render: (_, row) => row.account_type === 'ib'
+        ? (row.ib_account_name || row.ib_account_id || '-')
+        : (row.external_trading_account_name || row.external_trading_account_id || '-'),
     },
     {
       title: '子账户',
       dataIndex: 'live_sub_account_id',
       width: 150,
-      render: (value, row) => row.live_sub_account_name || value || '-',
+      render: (value, row) => row.account_type === 'ib' ? '整账户' : (row.live_sub_account_name || value || '-'),
     },
     { title: '信号', dataIndex: 'last_signal_status', width: 104, render: value => value ? <Tag>{value}</Tag> : '-' },
     { title: '信号日', dataIndex: 'last_signal_date', width: 112, render: value => value || '-' },
@@ -3122,12 +3164,14 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
         </div>
         <div className="factor-lab-live-card__grid">
           <div>
-            <span>外部账户</span>
-            <strong>{config.external_trading_account_name || config.external_trading_account_id || '-'}</strong>
+            <span>交易账户</span>
+            <strong>{config.account_type === 'ib'
+              ? `IBKR · ${config.ib_account_name || config.ib_account_id || '-'}`
+              : (config.external_trading_account_name || config.external_trading_account_id || '-')}</strong>
           </div>
           <div>
             <span>子账户</span>
-            <strong>{config.live_sub_account_name || config.live_sub_account_id || '-'}</strong>
+            <strong>{config.account_type === 'ib' ? '整账户' : (config.live_sub_account_name || config.live_sub_account_id || '-')}</strong>
           </div>
           <div>
             <span>信号</span>
@@ -3317,24 +3361,52 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
                           <Select options={[{ label: '启用', value: true }, { label: '停用', value: false }]} />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} sm={12} md={8} lg={6}>
-                        <Form.Item name="external_trading_account_id" label="外部交易账户">
-                          <Select
-                            allowClear
-                            options={externalTradingAccountOptions}
-                            loading={externalTradingAccountsLoading}
-                          />
+                      <Col xs={24} sm={12} md={8} lg={5}>
+                        <Form.Item name="account_type" label="交易账户类型" rules={[{ required: true }]}>
+                          <Select options={[
+                            { label: '外部交易账户', value: 'external' },
+                            { label: 'IBKR 账户', value: 'ib' },
+                          ]} />
                         </Form.Item>
                       </Col>
-                      <Col xs={24} sm={12} md={8} lg={6}>
-                        <Form.Item name="live_sub_account_id" label="外部交易子账户">
-                          <Select
-                            allowClear
-                            options={externalTradingSubAccountOptions}
-                            placeholder="请选择子账户"
-                          />
-                        </Form.Item>
-                      </Col>
+                      {selectedLiveAccountType === 'ib' ? (
+                        <Col xs={24} sm={12} md={8} lg={7}>
+                          <Form.Item
+                            name="ib_account_id"
+                            label="IBKR 账户"
+                            extra="仅支持美股股票池；策略会按该 IBKR 整账户持仓调仓"
+                            rules={[{ required: true, message: '请选择 IBKR 账户' }]}
+                          >
+                            <Select
+                              allowClear
+                              options={ibAccountOptions}
+                              loading={ibAccountsLoading}
+                              placeholder="请选择 IBKR 账户"
+                            />
+                          </Form.Item>
+                        </Col>
+                      ) : (
+                        <>
+                          <Col xs={24} sm={12} md={8} lg={6}>
+                            <Form.Item name="external_trading_account_id" label="外部交易账户">
+                              <Select
+                                allowClear
+                                options={externalTradingAccountOptions}
+                                loading={externalTradingAccountsLoading}
+                              />
+                            </Form.Item>
+                          </Col>
+                          <Col xs={24} sm={12} md={8} lg={6}>
+                            <Form.Item name="live_sub_account_id" label="外部交易子账户">
+                              <Select
+                                allowClear
+                                options={externalTradingSubAccountOptions}
+                                placeholder="请选择子账户"
+                              />
+                            </Form.Item>
+                          </Col>
+                        </>
+                      )}
                       <Col xs={12} sm={6} md={4} lg={3}>
                         <Form.Item label="交易单位">
                           <Input
@@ -3541,7 +3613,7 @@ const FactorLab = ({ initialTab = 'single', liveOnly = false }) => {
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleLiveCreate}>
                       添加配置
                     </Button>
-                    <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading} />
+                    <Button icon={<ReloadOutlined />} onClick={handleLiveRefresh} loading={liveLoading || externalTradingAccountsLoading || ibAccountsLoading} />
                   </Space>
                 )}
               >
