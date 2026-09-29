@@ -179,11 +179,12 @@ def test_sell_signal_stays_pending_after_fear_falls_back():
     assert _sell_dates(result) == ["2025-03-13"]
 
 
-def test_buy_clears_pending_sell_signal():
-    """新买入后，不能拿买入前重新挂起的旧卖出信号继续卖。"""
+def test_pending_sell_blocks_new_buy():
+    """等待 MA5 确认卖出时，极恐买入信号不能加仓。"""
     fear = [50.0, 20.0, 50.0, 50.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0, 20.0, 50.0]
     # 第 9 天跌破 MA5，触发第一次部分卖出；第 10 天贪婪会重新挂起，
-    # 但第 11 天极恐买入必须清掉该挂起；第 12 天虽跌破 MA5，也不能卖。
+    # 第 11 天出现极恐买入信号，但因已有挂起卖出而不应加仓；第 12 天仍按
+    # 原挂起信号在跌破 MA5 后完成第二次卖出。
     close = [10.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 10.0, 15.0, 15.0, 10.0]
     result = _run_backtest(
         _frame(fear, close),
@@ -195,7 +196,8 @@ def test_buy_clears_pending_sell_signal():
         100000.0,
         detailed=True,
     )
-    assert _sell_dates(result) == ["2025-03-13"]
+    assert [item["date"] for item in result["trades"] if item["action"] == "BUY"] == ["2025-03-04"]
+    assert _sell_dates(result) == ["2025-03-13", "2025-03-18"]
 
 
 def _seesaw_frames():

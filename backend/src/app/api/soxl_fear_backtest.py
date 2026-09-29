@@ -2226,7 +2226,10 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
                         "signal_volume": float(decision_signal_volumes[index]),
                     })
 
-        if not action_taken and is_fear and can_trade:
+        # 已有“贪婪+高估”等待 MA5 的卖出信号时，不再反向加仓；否则会把
+        # 一笔旧的退出信号带入新仓位。新买入路径仍保留清空状态的保护，供
+        # 非挂起模式和未来显式撤销挂起后复用。
+        if not action_taken and is_fear and can_trade and not pending_sell:
             # 买入代表新的持仓周期，不能沿用此前等待 MA5 的旧卖出信号。
             pending_sell = False
             pending_sell_valuation = None
