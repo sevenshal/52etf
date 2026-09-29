@@ -49,6 +49,7 @@ from ...core.services.external_trading_ledger import (
 from ...core.services.external_trading_valuation import (
     ExternalTradingValuationError,
     calculate_sub_account_net_asset,
+    get_realtime_price_details,
 )
 from ...core.services.symbol_names import load_symbol_name_map, normalize_symbol_for_name
 from ...core.services.snowball_backtest import run_snowball_cube_backtest
@@ -907,7 +908,12 @@ def _mark_snowball_external_sync_failure(config_id: int, message: str) -> None:
     _write_snowball_main_db_with_retry("mark Snowball external sync failure", write_failure)
 
 
-async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_source: str) -> Dict[str, Any]:
+async def _sync_one_snowball_external_target(
+    item: Dict[str, Any],
+    *,
+    trigger_source: str,
+    prefetched_prices: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
     if not _last_token_refresh_time or (now - _last_token_refresh_time).total_seconds() >= 3600:
         asyncio.create_task(_refresh_xueqiu_guest_token_task(item.get("account_id"), item.get("cookie")))
@@ -937,7 +943,11 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
         if not sub_account:
             raise ValueError("雪球配置绑定的虚拟子账户不存在")
         try:
-            valuation = await calculate_sub_account_net_asset(trading_db, sub_account)
+            valuation = await calculate_sub_account_net_asset(
+                trading_db,
+                sub_account,
+                prefetched_prices=prefetched_prices,
+            )
         except ExternalTradingValuationError as exc:
             raise ValueError(str(exc)) from exc
     all_symbols.update(_to_xueqiu_symbol(symbol) for symbol in (valuation.get("position_symbols") or []) if _to_xueqiu_symbol(symbol))
@@ -1064,6 +1074,54 @@ async def _sync_one_snowball_external_target(item: Dict[str, Any], *, trigger_so
     }
 
 
+async def _prefetch_snowball_valuation_prices(
+    items: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """一轮雪球同步只批量取一次各账户持仓行情，供所有组合估值复用。"""
+    sub_account_to_external = {
+        int(item["live_sub_account_id"]): int(item["external_trading_account_id"])
+        for item in items
+        if item.get("live_sub_account_id") is not None
+        and item.get("external_trading_account_id") is not None
+    }
+    if not sub_account_to_external:
+        return {}
+    symbols_by_external: Dict[int, set[str]] = {}
+    with get_external_trading_db_ctx() as trading_db:
+        rows = (
+            trading_db.query(
+                ExternalTradingLedgerPosition.sub_account_id,
+                ExternalTradingLedgerPosition.symbol,
+            )
+            .filter(
+                ExternalTradingLedgerPosition.sub_account_id.in_(sub_account_to_external),
+                ExternalTradingLedgerPosition.quantity > 0,
+            )
+            .all()
+        )
+    for sub_account_id, symbol in rows:
+        external_account_id = sub_account_to_external.get(int(sub_account_id))
+        normalized = normalize_trading_symbol(symbol)
+        if external_account_id is not None and normalized:
+            symbols_by_external.setdefault(external_account_id, set()).add(normalized)
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for external_account_id, symbols in symbols_by_external.items():
+        try:
+            result.update(await get_realtime_price_details(
+                external_account_id,
+                sorted(symbols),
+                raise_on_missing=False,
+            ))
+        except Exception as exc:  # 单个账户预取失败时，各组合仍可走原有按需兜底
+            logger.warning(
+                "Snowball valuation quote prefetch failed for external account %s: %s",
+                external_account_id,
+                exc,
+            )
+    return result
+
+
 async def sync_snowball_external_trading_config_ids(
     config_ids: Optional[List[int]] = None,
     *,
@@ -1086,6 +1144,7 @@ async def sync_snowball_external_trading_config_ids(
         }
 
     items = _load_snowball_external_sync_items(account_id=account_id, config_ids=config_ids)
+    prefetched_prices = await _prefetch_snowball_valuation_prices(items)
     result = {
         "status": "OK",
         "trigger_source": trigger_source,
@@ -1099,7 +1158,11 @@ async def sync_snowball_external_trading_config_ids(
     affected_accounts = {}
     for item in items:
         try:
-            sync_result = await _sync_one_snowball_external_target(item, trigger_source=trigger_source)
+            sync_result = await _sync_one_snowball_external_target(
+                item,
+                trigger_source=trigger_source,
+                prefetched_prices=prefetched_prices,
+            )
             result["items"].append(sync_result)
             result["synced"] += 1
             if sync_result.get("changed"):

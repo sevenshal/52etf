@@ -762,7 +762,11 @@ def get_market_snapshot(force: bool = False) -> Optional[pd.DataFrame]:
     cached_at, cached = _snapshot_cache
     if not force and cached is not None and time.time() - cached_at < SNAPSHOT_TTL_SECONDS:
         return cached
-    frame = TushareService.get_instance().get_a_stock_realtime_market_frame()
+    service = TushareService.get_instance()
+    frame = (
+        service.get_a_stock_realtime_market_frame(force=True)
+        if force else service.get_a_stock_realtime_market_frame()
+    )
     _snapshot_cache = (time.time(), frame)
     return frame
 

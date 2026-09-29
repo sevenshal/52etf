@@ -87,7 +87,17 @@ TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR = max(
 )
 TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE = max(
     0,
-    int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "450")),
+    # 当前 token 的 rt_k 服务端额度是 50 次/分钟，且生产 token 与外部程序共用。
+    # 本进程默认最多使用 20 个名额；统一缓存后正常负载远低于此值。
+    int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "20")),
+)
+TUSHARE_RT_K_CACHE_TTL_SECONDS = max(
+    1.0,
+    float(os.getenv("TUSHARE_RT_K_CACHE_TTL_SECONDS", "30")),
+)
+TUSHARE_RT_K_BACKOFF_SECONDS = max(
+    1.0,
+    float(os.getenv("TUSHARE_RT_K_BACKOFF_SECONDS", "65")),
 )
 TUSHARE_THS_MEMBER_MAX_REQUESTS_PER_MINUTE = max(
     0,
@@ -233,6 +243,14 @@ class TushareService(QuoteProvider):
         self._balancesheet_frame_cache: Dict[str, pd.DataFrame] = {}
         self._cashflow_frame_cache: Dict[str, pd.DataFrame] = {}
         self._fina_indicator_frame_cache: Dict[str, pd.DataFrame] = {}
+        # rt_k/rt_etf_k 是全站共享的实时行情源。缓存必须放在 service 层，
+        # 才能被扫描、看板、WebSocket、估值和执行器共同命中。
+        self._realtime_cache_lock = threading.RLock()
+        self._realtime_fetch_lock = threading.Lock()
+        self._rt_k_market_cache = (0.0, None)
+        self._rt_k_symbol_cache: Dict[str, tuple[float, Dict]] = {}
+        self._rt_etf_symbol_cache: Dict[str, tuple[float, Optional[Dict]]] = {}
+        self._rt_k_backoff_until = 0.0
 
     @classmethod
     def get_instance(cls, token: Optional[str] = None):
@@ -970,6 +988,95 @@ class TushareService(QuoteProvider):
             and code.startswith(TUSHARE_A_SHARE_ETF_PREFIXES)
         )
 
+    @staticmethod
+    def _prepare_realtime_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy()
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        if "trade_time" in result.columns:
+            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
+        for column in (
+            "close", "pre_close", "open", "high", "low", "vol", "amount", "num",
+            "ask_price1", "ask_volume1", "bid_price1", "bid_volume1",
+        ):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result.dropna(subset=["close"]).sort_values("ts_code")
+
+    @staticmethod
+    def _is_realtime_rate_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "频率超限" in message or ("rate" in message and "limit" in message)
+
+    def _mark_realtime_rate_limited(self, exc: Exception) -> None:
+        with self._realtime_cache_lock:
+            self._rt_k_backoff_until = max(
+                self._rt_k_backoff_until,
+                time.monotonic() + TUSHARE_RT_K_BACKOFF_SECONDS,
+            )
+        self.logger.warning(
+            "Tushare realtime quota exhausted; backing off for %.0fs: %s",
+            TUSHARE_RT_K_BACKOFF_SECONDS,
+            exc,
+        )
+
+    def _realtime_backoff_active(self) -> bool:
+        with self._realtime_cache_lock:
+            return time.monotonic() < self._rt_k_backoff_until
+
+    def _cached_market_frame(self) -> Optional[pd.DataFrame]:
+        with self._realtime_cache_lock:
+            cached_at, cached = self._rt_k_market_cache
+            if (
+                isinstance(cached, pd.DataFrame)
+                and time.monotonic() - cached_at < TUSHARE_RT_K_CACHE_TTL_SECONDS
+            ):
+                return cached.copy()
+        return None
+
+    def _cached_realtime_symbols(
+        self,
+        normalized: List[str],
+        *,
+        etf: bool = False,
+    ) -> tuple[pd.DataFrame, List[str]]:
+        now = time.monotonic()
+        if not etf:
+            market = self._cached_market_frame()
+            if market is not None:
+                return market[market["ts_code"].isin(normalized)].copy(), []
+        cache = self._rt_etf_symbol_cache if etf else self._rt_k_symbol_cache
+        rows = []
+        missing = []
+        with self._realtime_cache_lock:
+            for code in normalized:
+                entry = cache.get(code)
+                if not entry or now - entry[0] >= TUSHARE_RT_K_CACHE_TTL_SECONDS:
+                    missing.append(code)
+                    continue
+                if entry[1] is not None:
+                    rows.append(entry[1])
+        return (pd.DataFrame(rows) if rows else pd.DataFrame()), missing
+
+    def _cache_realtime_symbols(
+        self,
+        requested: List[str],
+        frame: pd.DataFrame,
+        *,
+        etf: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        rows = {
+            str(row.get("ts_code") or "").strip().upper(): row.to_dict()
+            for _, row in frame.iterrows()
+        } if isinstance(frame, pd.DataFrame) and not frame.empty else {}
+        cache = self._rt_etf_symbol_cache if etf else self._rt_k_symbol_cache
+        with self._realtime_cache_lock:
+            # 缓存未返回标的为空值，避免停牌/不支持代码在 TTL 内被反复查询。
+            for code in requested:
+                cache[code] = (now, rows.get(code))
+
     def get_a_stock_realtime_rt_k_frame(self, ts_codes) -> pd.DataFrame:
         """A股实时日线（rt_k），用于非 ETF 股票。
 
@@ -988,48 +1095,72 @@ class TushareService(QuoteProvider):
         ]
         if not normalized:
             return pd.DataFrame()
-        try:
-            self._rt_k_rate_limiter.wait()
-            frame = self.pro.rt_k(
-                ts_code=",".join(normalized),
-                fields="ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
-                "ask_price1,ask_volume1,bid_price1,bid_volume1",
-            )
-        except Exception as exc:
-            self.logger.warning("Tushare rt_k failed for %s: %s", normalized, exc)
-            return pd.DataFrame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return pd.DataFrame()
-        result = frame.copy()
-        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
-        if "trade_time" in result.columns:
-            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
-        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount", "num"):
-            if column in result.columns:
-                result[column] = pd.to_numeric(result[column], errors="coerce")
-        return result.dropna(subset=["close"]).sort_values("ts_code")
+        cached, missing = self._cached_realtime_symbols(normalized)
+        if not missing:
+            return cached.sort_values("ts_code") if not cached.empty else cached
+        with self._realtime_fetch_lock:
+            cached, missing = self._cached_realtime_symbols(normalized)
+            if not missing or self._realtime_backoff_active():
+                return cached.sort_values("ts_code") if not cached.empty else cached
+            try:
+                self._rt_k_rate_limiter.wait()
+                fetched = self.pro.rt_k(
+                    ts_code=",".join(missing),
+                    fields="ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
+                    "ask_price1,ask_volume1,bid_price1,bid_volume1",
+                )
+                fetched = self._prepare_realtime_frame(fetched)
+                self._cache_realtime_symbols(missing, fetched)
+            except Exception as exc:
+                if self._is_realtime_rate_limit_error(exc):
+                    self._mark_realtime_rate_limited(exc)
+                else:
+                    self.logger.warning("Tushare rt_k failed for %s: %s", missing, exc)
+                return cached.sort_values("ts_code") if not cached.empty else cached
+        result, _missing = self._cached_realtime_symbols(normalized)
+        return result.sort_values("ts_code") if not result.empty else result
 
     # rt_k 支持带交易所后缀的通配符，一次就能取回全市场（单次上限 6000 行，A股约 5.6 千只）。
     # 各段不能互相包含（如同时给 6*.SH 和 688*.SH 会重复计数并超限）。
     A_SHARE_WILDCARDS = ("6*.SH", "0*.SZ", "3*.SZ", "4*.BJ", "8*.BJ", "9*.BJ")
 
-    def get_a_stock_realtime_market_frame(self) -> pd.DataFrame:
+    def get_a_stock_realtime_market_frame(self, force: bool = False) -> pd.DataFrame:
         """全市场A股实时日K（rt_k 通配符，单次请求），用于盘中涨跌家数/分布统计。"""
-        self._rt_k_rate_limiter.wait()
-        frame = self.pro.rt_k(
-            ts_code=",".join(self.A_SHARE_WILDCARDS),
-            fields="ts_code,close,pre_close,open,high,low,vol,amount,trade_time",
-        )
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return pd.DataFrame()
-        result = frame.copy()
-        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
-        if "trade_time" in result.columns:
-            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
-        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount"):
-            if column in result.columns:
-                result[column] = pd.to_numeric(result[column], errors="coerce")
-        return result.dropna(subset=["close"])
+        if not force:
+            cached = self._cached_market_frame()
+            if cached is not None:
+                return cached
+        with self._realtime_fetch_lock:
+            if not force:
+                cached = self._cached_market_frame()
+                if cached is not None:
+                    return cached
+            if self._realtime_backoff_active():
+                return pd.DataFrame()
+            try:
+                self._rt_k_rate_limiter.wait()
+                frame = self.pro.rt_k(
+                    ts_code=",".join(self.A_SHARE_WILDCARDS),
+                    fields="ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
+                    "ask_price1,ask_volume1,bid_price1,bid_volume1",
+                )
+                result = self._prepare_realtime_frame(frame)
+            except Exception as exc:
+                if self._is_realtime_rate_limit_error(exc):
+                    self._mark_realtime_rate_limited(exc)
+                else:
+                    self.logger.warning("Tushare full-market rt_k failed: %s", exc)
+                return pd.DataFrame()
+            if result.empty:
+                return result
+            now = time.monotonic()
+            with self._realtime_cache_lock:
+                self._rt_k_market_cache = (now, result.copy())
+                for _, row in result.iterrows():
+                    code = str(row.get("ts_code") or "").strip().upper()
+                    if code:
+                        self._rt_k_symbol_cache[code] = (now, row.to_dict())
+            return result.copy()
 
     def get_a_stock_realtime_etf_rt_k_frame(self, ts_codes) -> pd.DataFrame:
         """ETF实时日线（rt_etf_k），覆盖 rt_k 查不到的沪市 ETF。
@@ -1046,36 +1177,45 @@ class TushareService(QuoteProvider):
         normalized = [code for code in normalized if self._is_a_share_etf_ts_code(code)]
         if not normalized:
             return pd.DataFrame()
-        sh_codes = [code for code in normalized if code.endswith(".SH")]
-        sz_codes = [code for code in normalized if code.endswith(".SZ")]
+        cached, missing = self._cached_realtime_symbols(normalized, etf=True)
+        if not missing:
+            return cached.sort_values("ts_code") if not cached.empty else cached
         fields = (
             "ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
             "ask_price1,ask_volume1,bid_price1,bid_volume1"
         )
-        frames = []
-        try:
-            if sh_codes:
-                self._rt_k_rate_limiter.wait()
-                frame = self.pro.rt_etf_k(ts_code=",".join(sh_codes), topic="HQ_FND_TICK", fields=fields)
-                if isinstance(frame, pd.DataFrame) and not frame.empty:
-                    frames.append(frame)
-            if sz_codes:
-                self._rt_k_rate_limiter.wait()
-                frame = self.pro.rt_etf_k(ts_code=",".join(sz_codes), fields=fields)
-                if isinstance(frame, pd.DataFrame) and not frame.empty:
-                    frames.append(frame)
-        except Exception as exc:
-            self.logger.warning("Tushare rt_etf_k failed for %s: %s", normalized, exc)
-        if not frames:
-            return pd.DataFrame()
-        result = pd.concat(frames, ignore_index=True)
-        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
-        if "trade_time" in result.columns:
-            result["trade_time"] = pd.to_datetime(result["trade_time"], errors="coerce")
-        for column in ("close", "pre_close", "open", "high", "low", "vol", "amount", "num"):
-            if column in result.columns:
-                result[column] = pd.to_numeric(result[column], errors="coerce")
-        return result.dropna(subset=["close"]).sort_values("ts_code")
+        with self._realtime_fetch_lock:
+            cached, missing = self._cached_realtime_symbols(normalized, etf=True)
+            if not missing or self._realtime_backoff_active():
+                return cached.sort_values("ts_code") if not cached.empty else cached
+            sh_codes = [code for code in missing if code.endswith(".SH")]
+            sz_codes = [code for code in missing if code.endswith(".SZ")]
+            frames = []
+            try:
+                if sh_codes:
+                    self._rt_k_rate_limiter.wait()
+                    frame = self.pro.rt_etf_k(
+                        ts_code=",".join(sh_codes), topic="HQ_FND_TICK", fields=fields,
+                    )
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        frames.append(frame)
+                if sz_codes:
+                    self._rt_k_rate_limiter.wait()
+                    frame = self.pro.rt_etf_k(ts_code=",".join(sz_codes), fields=fields)
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        frames.append(frame)
+            except Exception as exc:
+                if self._is_realtime_rate_limit_error(exc):
+                    self._mark_realtime_rate_limited(exc)
+                else:
+                    self.logger.warning("Tushare rt_etf_k failed for %s: %s", missing, exc)
+                return cached.sort_values("ts_code") if not cached.empty else cached
+            fetched = self._prepare_realtime_frame(
+                pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            )
+            self._cache_realtime_symbols(missing, fetched, etf=True)
+        result, _missing = self._cached_realtime_symbols(normalized, etf=True)
+        return result.sort_values("ts_code") if not result.empty else result
 
     def get_a_stock_limit_concepts_frame(self, trade_date: date) -> pd.DataFrame:
         """Fetch the daily strongest limit-up concepts for AI candidate discovery."""
