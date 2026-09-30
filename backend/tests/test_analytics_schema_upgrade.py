@@ -142,3 +142,39 @@ def test_existing_financial_statement_tables_get_the_full_tushare_field_set():
     finally:
         if os.path.exists(path):
             os.unlink(path)
+
+
+def test_announcement_table_is_created_on_existing_analytics_db():
+    """存量分析库里没有 a_stock_announcement，启动时按模型建表并加上 (ts_code, ann_date) 索引。"""
+    fd, path = tempfile.mkstemp(suffix=".duckdb")
+    os.close(fd)
+    os.unlink(path)
+    try:
+        # 只放一个空的 DuckDB 文件（等价于还没有任何业务表的存量库），避免手搓部分表结构
+        duckdb.connect(path).close()
+
+        env = os.environ.copy()
+        env["ANALYTICS_DB_PATH"] = path
+        subprocess.run(
+            [sys.executable, "-c", "import src.core.analytics_database"],
+            env=env,
+            check=True,
+        )
+
+        connection = duckdb.connect(path, read_only=True)
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(a_stock_announcement)").fetchall()
+        }
+        indexes = {row[0] for row in connection.execute(
+            "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'a_stock_announcement'"
+        ).fetchall()}
+        connection.close()
+
+        assert {
+            "art_code", "ts_code", "name", "ann_date", "disclose_at",
+            "event_kind", "category_code", "category_name", "title", "source",
+        } <= columns
+        assert "idx_a_stock_announcement_symbol_date" in indexes
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)

@@ -35,6 +35,12 @@ const GAP_FILTER_OPTIONS = [
   { text: '有缺口·已回补', value: 'filled' },
   { text: '无缺口', value: 'none' },
 ];
+// 增速过滤条件 → 对应的指标列；预告/快报结构性不提供营收和环比，填了也不会生效
+const GROWTH_FILTER_FIELDS = [
+  { metric: 'np_qoq', minKey: 'min_profit_qoq', maxKey: 'max_profit_qoq', label: '净利环比' },
+  { metric: 'or_yoy', minKey: 'min_revenue_yoy', maxKey: 'max_revenue_yoy', label: '营收同比' },
+  { metric: 'or_qoq', minKey: 'min_revenue_qoq', maxKey: 'max_revenue_qoq', label: '营收环比' },
+];
 const gapKey = record => {
   if (!record.has_true_gap) return 'none';
   return record.gap_filled ? 'filled' : 'open';
@@ -88,13 +94,41 @@ const numericColumn = (title, key, extra = {}) => ({
 
 const pctColumn = (title, key, extra = {}) => numericColumn(title, key, { render: renderSignedPct, ...extra });
 
-const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
+const ConfigDrawer = ({ open, config, defaults, sourceLabels, sourceMetrics, onClose, onSaved }) => {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
+  const [formValues, setFormValues] = useState(null);
 
   useEffect(() => {
-    if (open && config) form.setFieldsValue({ ...config, min_amount_wan: config.min_amount_yuan / 1e4 });
+    if (open && config) {
+      const initial = { ...config, min_amount_wan: config.min_amount_yuan / 1e4 };
+      form.setFieldsValue(initial);
+      setFormValues(initial);
+    }
   }, [open, config, form]);
+
+  // 已经填了、但对已选事件源不适用的条件：预告/快报没有营收和环比，填了也不会生效
+  const inapplicableHints = useMemo(() => {
+    const values = formValues || config || {};
+    const sources = values.sources || [];
+    if (!sources.length) return [];
+    return GROWTH_FILTER_FIELDS.reduce((acc, field) => {
+      if (isBlank(values[field.minKey]) && isBlank(values[field.maxKey])) return acc;
+      const missing = sources.filter(source => !(sourceMetrics?.[source] || []).includes(field.metric));
+      if (!missing.length) return acc;
+      acc.push({
+        label: field.label,
+        names: missing.map(source => sourceLabels?.[source] || source).join('/'),
+        everything: missing.length === sources.length,
+      });
+      return acc;
+    }, []);
+  }, [formValues, config, sourceLabels, sourceMetrics]);
+
+  const metricHint = metric => Object.entries(sourceLabels || {})
+    .filter(([source]) => (sourceMetrics?.[source] || []).includes(metric))
+    .map(([, label]) => label)
+    .join('/') || '无';
 
   const submit = async () => {
     const values = await form.validateFields();
@@ -130,7 +164,7 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
         </Space>
       )}
     >
-      <Form form={form} layout="vertical" requiredMark={false}>
+      <Form form={form} layout="vertical" requiredMark={false} onValuesChange={(_, all) => setFormValues(all)}>
         <Form.Item name="sources" label="事件源" rules={[{ required: true, message: '至少选一个事件源' }]}>
           <Checkbox.Group
             options={[
@@ -140,6 +174,21 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
             ]}
           />
         </Form.Item>
+        {inapplicableHints.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="以下条件对已选事件源不会生效"
+            description={inapplicableHints.map(hint => (
+              <div key={hint.label}>
+                {hint.everything
+                  ? `${hint.label}：已选事件源（${hint.names}）都不提供该指标，条件被整条跳过`
+                  : `${hint.label}：${hint.names} 不提供该指标，只对剩下的事件源生效`}
+              </div>
+            ))}
+          />
+        )}
         <Row gutter={12}>
           <Col span={12}>
             <Form.Item name="min_profit_yoy" label="净利同比下限 %">
@@ -154,36 +203,60 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
         </Row>
         <Row gutter={12}>
           <Col span={12}>
-            <Form.Item name="min_profit_qoq" label="净利环比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+            <Form.Item
+              name="min_profit_qoq"
+              label="净利环比下限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('np_qoq')}）`}
+            >
               <InputNumber className="earnings-gap-full" step={5} />
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item name="max_profit_qoq" label="净利环比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
-              <InputNumber className="earnings-gap-full" step={5} />
-            </Form.Item>
-          </Col>
-        </Row>
-        <Row gutter={12}>
-          <Col span={12}>
-            <Form.Item name="min_revenue_yoy" label="营收同比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的预告">
-              <InputNumber className="earnings-gap-full" step={5} />
-            </Form.Item>
-          </Col>
-          <Col span={12}>
-            <Form.Item name="max_revenue_yoy" label="营收同比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的预告">
+            <Form.Item
+              name="max_profit_qoq"
+              label="净利环比上限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('np_qoq')}）`}
+            >
               <InputNumber className="earnings-gap-full" step={5} />
             </Form.Item>
           </Col>
         </Row>
         <Row gutter={12}>
           <Col span={12}>
-            <Form.Item name="min_revenue_qoq" label="营收环比下限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+            <Form.Item
+              name="min_revenue_yoy"
+              label="营收同比下限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('or_yoy')}）`}
+            >
               <InputNumber className="earnings-gap-full" step={5} />
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item name="max_revenue_qoq" label="营收环比上限 %" tooltip="留空表示不限制；设置后会过滤不提供该指标的快报和预告">
+            <Form.Item
+              name="max_revenue_yoy"
+              label="营收同比上限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('or_yoy')}）`}
+            >
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item
+              name="min_revenue_qoq"
+              label="营收环比下限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('or_qoq')}）`}
+            >
+              <InputNumber className="earnings-gap-full" step={5} />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item
+              name="max_revenue_qoq"
+              label="营收环比上限 %"
+              tooltip={`留空表示不限制；只有财报提供该指标，不提供的来源会自动跳过（当前：${metricHint('or_qoq')}）`}
+            >
               <InputNumber className="earnings-gap-full" step={5} />
             </Form.Item>
           </Col>
@@ -215,7 +288,7 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
         <Form.Item
           name="min_amount_ratio"
           label="成交额/均额倍数下限"
-          tooltip="T+1 成交额至少是前 N 个交易日均额的多少倍；0 表示不限制"
+          tooltip="信号日成交额至少是前 N 个交易日均额的多少倍；0 表示不限制"
         >
           <InputNumber className="earnings-gap-full" step={0.5} min={0} />
         </Form.Item>
@@ -227,7 +300,7 @@ const ConfigDrawer = ({ open, config, defaults, onClose, onSaved }) => {
         </Form.Item>
         <Form.Item
           name="require_true_gap"
-          label="要求留真缺口（T+1 最低价 > T 日最高价）"
+          label="要求留真缺口（信号日最低价 > 前一交易日最高价）"
           valuePropName="checked"
           tooltip="历史回测里加这个条件信号减半、收益没提升，默认关闭"
         >
@@ -244,6 +317,8 @@ const MarketEarningsGap = () => {
   const [data, setData] = useState(null);
   const [config, setConfig] = useState(null);
   const [defaults, setDefaults] = useState(null);
+  const [sourceLabels, setSourceLabels] = useState(null);
+  const [sourceMetrics, setSourceMetrics] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [keyword, setKeyword] = useState('');
@@ -270,6 +345,8 @@ const MarketEarningsGap = () => {
       const response = await request.get('/api/market/earnings-gap/config');
       setConfig(response.data.config);
       setDefaults(response.data.defaults);
+      setSourceLabels(response.data.source_labels);
+      setSourceMetrics(response.data.source_metrics);
     } catch (err) {
       // 阈值读不到不影响看列表
     }
@@ -322,6 +399,18 @@ const MarketEarningsGap = () => {
         </Space>
       ),
     },
+    {
+      title: <Tooltip title="公告实际披露到毫秒的时刻（东方财富公告流）。决定信号日：开盘前披露算当天，盘中/盘后披露算次一交易日">披露时刻</Tooltip>,
+      dataIndex: 'disclose_at',
+      key: 'disclose_at',
+      width: 118,
+      sorter: stringSorter('disclose_at'),
+      render: value => (
+        value
+          ? <Text>{String(value).slice(5, 16)}</Text>
+          : <Tooltip title="未取到精确披露时刻（公告流同步前的历史事件），信号日按公告日与次日双候选推导"><Text type="secondary">-</Text></Tooltip>
+      ),
+    },
     pctColumn(
       <Tooltip title="财报/快报为归母净利同比；预告取变动幅度下限">净利同比</Tooltip>,
       'np_yoy',
@@ -341,7 +430,7 @@ const MarketEarningsGap = () => {
     pctColumn(<Tooltip title="单季归母净利环比">净利环比</Tooltip>, 'np_qoq'),
     pctColumn(<Tooltip title="单季营收环比">营收环比</Tooltip>, 'or_qoq'),
     {
-      title: '信号日(T+1)',
+      title: <Tooltip title="公告后第一个能跳空的交易日，也是买入日">信号日(T)</Tooltip>,
       dataIndex: 'signal_date',
       key: 'signal_date',
       width: 116,
@@ -349,10 +438,10 @@ const MarketEarningsGap = () => {
       defaultSortOrder: 'descend',
       render: value => (value === data?.trade_date ? <Tag color="red">{value}</Tag> : value),
     },
-    pctColumn('T+1高开', 't1_open_gap_pct', { width: 92 }),
-    pctColumn('T+1涨跌幅', 't1_pct_chg', { width: 100 }),
+    pctColumn('信号日高开', 't1_open_gap_pct', { width: 92 }),
+    pctColumn('信号日涨跌', 't1_pct_chg', { width: 100 }),
     numericColumn(
-      <Tooltip title="T+1 成交额，括号下方是它相对前 N 个交易日平均成交额的倍数">T+1成交额</Tooltip>,
+      <Tooltip title="信号日成交额，括号下方是它相对前 N 个交易日平均成交额的倍数">信号日成交额</Tooltip>,
       't1_amount_yi',
       {
         width: 108,
@@ -367,11 +456,11 @@ const MarketEarningsGap = () => {
       },
     ),
     numericColumn(<Tooltip title="成交额 ÷ 前 N 个交易日平均成交额">量比</Tooltip>, 'amount_ratio', { width: 84 }),
-    numericColumn(<Tooltip title="T 日（公告日所在交易日）最高价，即缺口下沿">缺口</Tooltip>, 'prev_high', {
+    numericColumn(<Tooltip title="信号日的前一个交易日最高价，即缺口下沿">缺口下沿</Tooltip>, 'prev_high', {
       width: 88, render: value => fmtNumber(value, 3),
     }),
-    numericColumn(<Tooltip title="T+1 跳空开盘价">跳空价</Tooltip>, 't1_open', { width: 88, render: value => fmtNumber(value, 3) }),
-    numericColumn(<Tooltip title="T+1 收盘价，即买入价">跳空收盘价</Tooltip>, 't1_close', {
+    numericColumn(<Tooltip title="信号日跳空开盘价">跳空价</Tooltip>, 't1_open', { width: 88, render: value => fmtNumber(value, 3) }),
+    numericColumn(<Tooltip title="信号日收盘价，即买入价">跳空收盘价</Tooltip>, 't1_close', {
       width: 100, render: value => fmtNumber(value, 3),
     }),
     numericColumn(<Tooltip title="分析库最新交易日收盘价">现价</Tooltip>, 'latest_price', {
@@ -388,9 +477,9 @@ const MarketEarningsGap = () => {
         </Space>
       ),
     }),
-    pctColumn(<Tooltip title="信号后（T+1 之后）最高价相对买入价的涨幅">最大涨幅</Tooltip>, 'max_gain_pct', { width: 100 }),
+    pctColumn(<Tooltip title="信号日之后最高价相对买入价的涨幅">最大涨幅</Tooltip>, 'max_gain_pct', { width: 100 }),
     {
-      title: <Tooltip title="缺口 = T+1 最低价 > T 日最高价；回补 = 之后有一天最低价回落到缺口下沿之下">缺口回补</Tooltip>,
+      title: <Tooltip title="缺口 = 信号日最低价 > 前一交易日最高价；回补 = 之后有一天最低价回落到缺口下沿之下">缺口回补</Tooltip>,
       key: 'gap_status',
       width: 116,
       filters: GAP_FILTER_OPTIONS,
@@ -476,7 +565,7 @@ const MarketEarningsGap = () => {
           loading={loading}
           columns={columns}
           dataSource={items}
-          scroll={{ x: 2200 }}
+          scroll={{ x: 2340 }}
           pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
         />
       </Card>
@@ -486,13 +575,15 @@ const MarketEarningsGap = () => {
           全A上市满 {criteria.min_listed_trade_days} 个交易日；每只股票最新一个报告期的财报/快报/预告（同一报告期多个都触发时只留最早一条），
           净利同比 {criteria.min_profit_yoy}%～{criteria.max_profit_yoy}%（上限剔除基数效应，预告取变动下限）；
           {extraGrowthCriteria.length > 0 ? `${extraGrowthCriteria.join('；')}；` : ''}
-          公告后首个交易日 T+1 跳空高开 ≥ {criteria.min_gap_pct}%
+          T 取「公告后第一个开盘能反映消息的交易日」（按披露时刻：开盘前披露算当天，盘中/盘后披露算次一交易日；
+          同一天不行就顺延一天，两个都试、取最早触发的那天），T 跳空高开 ≥ {criteria.min_gap_pct}%
           {criteria.require_bullish_close ? '、收盘 > 开盘' : ''}
           {criteria.require_unsealed ? '、收盘未封涨停' : ''}
           {criteria.require_true_gap ? '、留真缺口' : ''}
           {criteria.min_amount_ratio ? `、成交额 ≥ ${criteria.min_amount_ratio}× ${criteria.amount_ratio_days}日均额` : ''}
-          、成交额 ≥ {(criteria.min_amount_yuan / 1e4).toFixed(0)} 万，T+1 收盘出买入信号。
-          至今涨跌幅、最大涨幅以 T+1 收盘价为基准、前复权计算；估值取最新交易日，PE/PS 为 TTM，
+          、成交额 ≥ {(criteria.min_amount_yuan / 1e4).toFixed(0)} 万，T 收盘出买入信号。
+          增速过滤按事件源生效：预告/快报只有净利同比，营收和环比条件对它们自动跳过。
+          至今涨跌幅、最大涨幅以 T 收盘价为基准、前复权计算；估值取最新交易日，PE/PS 为 TTM，
           ROE 为扣非 ROE(TTM)。
         </Text>
       )}
@@ -501,6 +592,8 @@ const MarketEarningsGap = () => {
         open={configOpen}
         config={config}
         defaults={defaults}
+        sourceLabels={sourceLabels}
+        sourceMetrics={sourceMetrics}
         onClose={() => setConfigOpen(false)}
         onSaved={response => {
           setConfig(response.config);

@@ -10,17 +10,26 @@
   每只股票取最新一个报告期，该期的预告/快报/财报都作为候选事件（先发的不被后发的覆盖）；
   同一报告期多个事件源都触发断层时只保留最早那条（通常是预告，断层反应的是第一次出现的新消息）；
   同一天多个事件源公告时只留一条，优先级 财报 > 快报 > 预告（数据最全的优先）。
-- T = 公告日，T+1 = 公告日之后的第一个交易日（公告多在盘后/非交易日发布）。
-- T+1 的硬条件（阈值都在页面上可改，见 DEFAULT_CONFIG）：上市满 N 个交易日、成交额 ≥ 下限、
+- 增速过滤**按事件源区分指标是否适用**（见 SOURCE_METRICS）：预告只有净利同比、快报只有净利同比，
+  营收（快报偶尔有）、环比只有财报才结构性地有。启用某指标后，不提供该指标的事件源直接跳过这个
+  条件，而不是判不达标——否则页面上只要填了营收/环比下限，预告和快报就会被整类静默清空。
+- T = 公告后第一个「开盘就能反映消息」的交易日，T+1 = T 的下一个交易日（两个都作为候选，
+  取最早触发的那一天，同一报告期只留最早一条）。
+  精确披露时刻（东方财富公告流的 display_time，见 a_stock_announcement）能区分盘前/盘后：
+  09:30 前披露当天开盘就能跳空 → T = 当天；09:30 及以后披露（含盘后、非交易日）→ T = 下一交易日。
+  拿不到精确时刻时退回「公告日 + 公告日之后第一个交易日」双候选。
+- T 的硬条件（阈值都在页面上可改，见 DEFAULT_CONFIG）：上市满 N 个交易日、成交额 ≥ 下限、
   开盘较前收高开 ≥ 下限、收盘 > 开盘（收阳）、收盘未封涨停（tushare stk_limit 的涨停价）、
-  可选：成交额 ≥ N 日均额的若干倍、必须留真缺口（T+1 最低价 > T 日最高价）。
-- 信号按 T+1 收盘价买入；至今涨跌幅、最大涨幅按前复权口径算到分析库最新一天。
+  可选：成交额 ≥ N 日均额的若干倍、必须留真缺口（T 最低价 > T−1 日最高价）。
+- 信号按 T 收盘价买入；至今涨跌幅、最大涨幅按前复权口径算到分析库最新一天。
 - 缺口回补 = T+1 之后任意一天的最低价回落到 T 日最高价（换算到 T+1 价格口径）之下。
 - 估值列取分析库最新一天：PE(TTM)、PB、PS(TTM) 来自 tushare daily_basic；扣非 ROE(TTM) =
   最新一期扣非净利润滚动 TTM ÷ 该期末归母净资产；ROE/PB = 扣非 ROE(%) ÷ PB。
 
 数据全部来自 DuckDB 分析库（财报/快报/预告、日K、复权因子、交易日），由每晚 A股基础数据同步写入；
-信号任务排在同步之后跑（默认 18:25，定时任务串行排队，同步没跑完会等它）。
+精确披露时刻来自东财公告流同步（a_stock_announcement_sync，每晚 16:00~23:00 每小时）。
+信号任务排在同步之后跑（默认 18:20 / 20 / 22 / 23 各一次，定时任务串行排队，同步没跑完会等它）；
+当晚公告落库后当晚就能出信号，不需要次日早上补跑。
 只有涨停价分析库里没有，用 tushare stk_limit 按信号日取。
 """
 from __future__ import annotations
@@ -29,12 +38,13 @@ import bisect
 import logging
 import math
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from ..database import MarketSignalConfig, MarketSignalSnapshot, get_db_ctx
+from .a_stock_announcement import load_disclosure_times
 from .duckdb_analytics import connect_analytics_db, safe_float
 
 
@@ -43,7 +53,7 @@ logger = logging.getLogger(__name__)
 SIGNAL_KEY = "earnings_gap"
 # 快照结构版本：新增/改动 items 或 criteria 字段时 +1，旧版本快照会被自动重算，
 # 否则页面会一直显示上一版代码算出来的老快照（新列或新条件全是空）
-PAYLOAD_VERSION = 6
+PAYLOAD_VERSION = 7
 
 SOURCE_REPORT = "report"
 SOURCE_EXPRESS = "express"
@@ -103,6 +113,22 @@ GROWTH_FILTERS = (
     ("or_qoq", "min_revenue_qoq", "max_revenue_qoq", "营收环比"),
 )
 
+# 各事件源**结构性**提供哪些增速指标：
+# - 财报 fina_indicator 四项齐全；
+# - 快报 express 只有净利（yoy_sales 名义上有，实测近一年 1243 条里只有 4 条非空，等于没有）；
+# - 预告 forecast 只有净利变动幅度区间。
+# 启用了某指标却要求不提供它的来源也满足，会把整类事件静默清空——2026-09-29 芯联集成
+# 的预告（净利同比 +247%）就是这么被营收/环比条件误杀的。
+SOURCE_METRICS: Dict[str, frozenset] = {
+    SOURCE_REPORT: frozenset({"np_yoy", "np_qoq", "or_yoy", "or_qoq"}),
+    SOURCE_EXPRESS: frozenset({"np_yoy"}),
+    SOURCE_FORECAST: frozenset({"np_yoy"}),
+}
+METRIC_LABELS = {column: label for column, _, _, label in GROWTH_FILTERS}
+
+# 公告在开盘前多久披露，当天开盘还可能跳空；09:30 及以后披露只能等下一交易日
+SESSION_OPEN_TIME = time(9, 30)
+
 # 只在这段时间内找"最近一次业绩公告"，更早的说明公司已长期未披露，不再参与
 REPORT_LOOKBACK_DAYS = 420
 CALENDAR_LOOKBACK_DAYS = 3 * 366
@@ -156,15 +182,73 @@ def normalize_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def growth_filter_mask(data: pd.DataFrame, config: Dict[str, Any]) -> pd.Series:
-    """按已启用的业绩增速上下限筛选；启用某指标后，缺失该指标的事件不视为达标。"""
+    """按已启用的业绩增速上下限筛选，**按事件源区分指标是否适用**。
+
+    某个事件源结构性地不提供某个指标时（预告/快报没有营收和环比），该条件对这类事件
+    直接跳过，而不是判不达标：否则页面上只要填了营收/环比下限，预告和快报就会被整类
+    静默清空（生产 2026-09 的真实故障）。
+    同一来源**应该**提供该指标却取到空值时（数据没同步到），仍然判不达标，避免漏放。
+    """
     mask = pd.Series(True, index=data.index, dtype=bool)
+    if data.empty:
+        return mask
+    sources = data["source"].astype(str) if "source" in data.columns else pd.Series("", index=data.index)
     for column, min_key, max_key, _ in GROWTH_FILTERS:
         lower, upper = config[min_key], config[max_key]
+        if lower is None and upper is None:
+            continue
+        applicable = sources.map(lambda source: column in SOURCE_METRICS.get(source, SOURCE_METRICS[SOURCE_REPORT]))
+        if not applicable.any():
+            # 已选事件源全都不提供这个指标，条件实际未生效（由 empty_metric_warnings 提示）
+            continue
+        values = pd.to_numeric(data[column], errors="coerce")
+        passed = values.notna()
         if lower is not None:
-            mask &= data[column].notna() & (data[column] >= float(lower))
+            passed &= values >= float(lower)
         if upper is not None:
-            mask &= data[column].notna() & (data[column] <= float(upper))
+            passed &= values <= float(upper)
+        mask &= (~applicable) | passed
     return mask
+
+
+def skipped_growth_filters(config: Dict[str, Any], sources: Sequence[str]) -> Dict[str, List[str]]:
+    """已启用、但对某些事件源不适用的条件：``{指标列名: [被跳过的来源]}``。"""
+    skipped: Dict[str, List[str]] = {}
+    for column, min_key, max_key, _ in GROWTH_FILTERS:
+        if config[min_key] is None and config[max_key] is None:
+            continue
+        missing = [
+            source for source in sources
+            if column not in SOURCE_METRICS.get(source, SOURCE_METRICS[SOURCE_REPORT])
+        ]
+        if missing:
+            skipped[column] = missing
+    return skipped
+
+
+def growth_filter_warnings(config: Dict[str, Any]) -> List[str]:
+    """把「哪些过滤条件对哪些事件源不生效」讲清楚，别让配置静默失效。"""
+    sources = list(config.get("sources") or [])
+    skipped = skipped_growth_filters(config, sources)
+    if not skipped:
+        return []
+    warnings: List[str] = []
+    for column, missing in skipped.items():
+        label = METRIC_LABELS.get(column, column)
+        missing_names = "/".join(SOURCE_LABELS.get(item, item) for item in missing)
+        if len(missing) == len(sources):
+            warnings.append(
+                f"「{label}」过滤对已选事件源（{missing_names}）都不适用，该条件本次没有生效："
+                f"{missing_names}不提供{label}，只有财报才有"
+            )
+        else:
+            keep_names = "/".join(
+                SOURCE_LABELS.get(item, item) for item in sources if item not in missing
+            )
+            warnings.append(
+                f"「{label}」过滤只对 {keep_names} 生效，{missing_names} 不提供该指标已跳过"
+            )
+    return warnings
 
 
 def load_config() -> Dict[str, Any]:
@@ -204,7 +288,7 @@ def select_candidate_events(frame: pd.DataFrame) -> pd.DataFrame:
     同一只股票同一天多个事件源公告时只留一条（财报 > 快报 > 预告），避免同一根 T+1 K 线算两次。
     同一报告期多个事件源都触发时只保留最早那条，见 keep_earliest_signal_per_period。
     """
-    columns = ["ts_code", "source", "end_date", "ann_date", "np_yoy"]
+    columns = ["ts_code", "source", "end_date", "ann_date", "disclose_at", "np_yoy"]
     if frame is None or frame.empty:
         return pd.DataFrame(columns=columns)
     data = frame.dropna(subset=["ts_code", "end_date", "ann_date"]).copy()
@@ -223,7 +307,7 @@ def keep_earliest_signal_per_period(signals: Sequence[Dict[str, Any]]) -> List[D
 
     回测（2018-08 至今，同一报告期多源触发的 45 组）：最早那条（35 组是预告）20 日 +6.31%、
     胜率 66.7%，后面的只有 -0.51%、51.1%。断层反应的是市场没预期到的新消息，
-    预告之后的正式财报多半只是确认已知数字。按 T+1 先后比，同一天按 财报 > 快报 > 预告。
+    预告之后的正式财报多半只是确认已知数字。按信号日先后比，同一天按 财报 > 快报 > 预告。
     """
     best: Dict[Tuple[str, date], Dict[str, Any]] = {}
     for signal in signals:
@@ -249,6 +333,75 @@ def next_trade_date(calendar: Sequence[date], value: date) -> Optional[date]:
     """严格晚于 value 的第一个交易日。"""
     index = bisect.bisect_right(calendar, value)
     return calendar[index] if index < len(calendar) else None
+
+
+def _to_datetime(value: Any) -> Optional[datetime]:
+    """把披露时刻统一成 datetime 或 None。
+
+    ``_load_events`` 用列表赋值给 DataFrame 列，匹配不到精确时刻的 None 会被 pandas
+    转成 ``NaT``。``NaT`` 既不是 None 也没有 ``.time()``，直接判 ``is not None``
+    会在遍历时抛 ``ValueError: NaTType does not support time``（生产全市场扫描必然触发）。
+    """
+    if value is None or value is pd.NaT:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return None if pd.isna(value) else value
+    if isinstance(value, date):
+        # 只有日期没有时刻（理论上不会走到，``load_disclosure_times`` 一定带时间）：
+        # 当作当天 00:00，等价于旧的「公告日就是第一个候选交易日」口径。
+        return datetime.combine(value, time.min)
+    try:
+        parsed = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(parsed) else parsed.to_pydatetime()
+
+
+def first_session_after(calendar: Sequence[date], disclose_at: datetime) -> Optional[date]:
+    """精确披露时刻之后，第一个「开盘在它之后」的交易日。
+
+    09:30 前披露 → 当天开盘（09:30）在消息之后，当天就是 T；
+    09:30 及以后披露（含盘后、非交易日）→ 只能次一交易日跳空。
+    """
+    moment = _to_datetime(disclose_at)
+    if moment is None:
+        return None
+    day = moment.date()
+    if moment.time() < SESSION_OPEN_TIME:
+        index = bisect.bisect_left(calendar, day)
+        return calendar[index] if index < len(calendar) else None
+    return next_trade_date(calendar, day)
+
+
+def reaction_candidate_dates(
+    calendar: Sequence[date],
+    ann_date: date,
+    disclose_at: Optional[datetime] = None,
+) -> List[date]:
+    """候选 T 日，按时间先后排：公告后第一个可能跳空的交易日，以及它的下一个交易日。
+
+    两个都作为候选、取最早触发的那一天，是因为跳空也可能延后一天出现（近一年
+    ``ann_date`` 落在交易日的预告事件里，跳空 ≥1.5% 在公告日当天和次日几乎各占一半）。
+    有精确披露时刻时以它为准推第一个交易日；没有时退回「公告日（非交易日取其后第一个
+    交易日）+ 次日」——这样无论公告日期是落在披露当天还是次日，两种情况都覆盖得到。
+    """
+    if not calendar:
+        return []
+    moment = _to_datetime(disclose_at)
+    if moment is not None:
+        first = first_session_after(calendar, moment)
+    else:
+        index = bisect.bisect_left(calendar, ann_date)
+        first = calendar[index] if index < len(calendar) else None
+    if first is None:
+        return []
+    candidates = [first]
+    second = next_trade_date(calendar, first)
+    if second is not None:
+        candidates.append(second)
+    return candidates
 
 
 def listed_trade_days(calendar: Sequence[date], list_date: Optional[date], as_of: date) -> int:
@@ -511,7 +664,43 @@ def _load_events(connection, since: date, sources: Sequence[str], warnings: List
         combined[column] = pd.to_numeric(combined[column], errors="coerce")
     if "forecast_type" not in combined.columns:
         combined["forecast_type"] = None
+    matcher = _disclosure_matcher(load_disclosure_times(connection, since))
+    combined["disclose_at"] = [
+        matcher(row.ts_code, row.ann_date, row.source) for row in combined.itertuples(index=False)
+    ]
     return select_candidate_events(combined)
+
+
+def _disclosure_matcher(
+    disclosures: Dict[Tuple[str, date, str], datetime],
+):
+    """``(ts_code, ann_date, source) -> 精确披露时刻``，允许日期相差一天时就近匹配。
+
+    tushare 的 ann_date 与东财的 notice_date 偶尔会差一天（更正公告、跨日发布），
+    所以精确命中之外再兜一层 ±1 天的同类型公告；匹配不到返回 None，由调用方退回日期口径。
+    """
+    by_code_kind: Dict[Tuple[str, str], List[Tuple[date, datetime]]] = {}
+    for (ts_code, ann_date, kind), disclose_at in disclosures.items():
+        by_code_kind.setdefault((ts_code, kind), []).append((ann_date, disclose_at))
+    for items in by_code_kind.values():
+        items.sort(key=lambda item: item[0])
+
+    def match(ts_code: str, ann_date: Optional[date], kind: str) -> Optional[datetime]:
+        if ann_date is None:
+            return None
+        exact = disclosures.get((ts_code, ann_date, kind))
+        if exact is not None:
+            return exact
+        nearest: Optional[Tuple[int, datetime]] = None
+        for candidate_date, disclose_at in by_code_kind.get((ts_code, kind), ()):
+            delta = abs((candidate_date - ann_date).days)
+            if delta > 1:
+                continue
+            if nearest is None or delta < nearest[0]:
+                nearest = (delta, disclose_at)
+        return nearest[1] if nearest else None
+
+    return match
 
 
 def _load_basic(connection) -> pd.DataFrame:
@@ -732,7 +921,7 @@ def compute_earnings_gap(
     service = service or TushareService.get_instance()
     own_connection = connection is None
     connection = connection or connect_analytics_db()
-    warnings: List[str] = []
+    warnings: List[str] = growth_filter_warnings(config)
     try:
         calendar = _load_trade_calendar(connection, today - timedelta(days=CALENDAR_LOOKBACK_DAYS))
         if not calendar:
@@ -755,23 +944,38 @@ def compute_earnings_gap(
             stats.update({"pending": 0, "listed_passed": 0, "signals": 0})
             return _payload(now, last_trade_date, config, stats, warnings, [])
 
-        data["t1_date"] = data["ann_date"].map(lambda value: next_trade_date(calendar, value))
-        # 空 DataFrame 上 map 出来的是 object 掩码，直接拿去索引会被当成"选列"，必须转成 bool
-        ready = data["t1_date"].map(lambda t1: t1 is not None and t1 <= last_trade_date).astype(bool)
-        stats["pending"] = int((~ready).sum())
-        data = data[ready].copy()
+        # 一条公告最多有两个候选 T 日（公告后第一个交易日 + 它的下一个交易日），
+        # 展开成长表后逐条判定，最后按 (股票, 报告期) 只保留最早触发的那条。
+        data = data.reset_index(drop=True)
+        data["candidate_dates"] = pd.Series(
+            [
+                reaction_candidate_dates(calendar, ann_date, disclose_at)
+                for ann_date, disclose_at in zip(data["ann_date"], data["disclose_at"])
+            ],
+            index=data.index,
+            dtype=object,
+        )
+        # 第一个候选日还没同步到日K → 这条公告还没到可判定的日子，计入 pending 等下一次扫描
+        stats["pending"] = int(sum(
+            1 for candidates in data["candidate_dates"] if not candidates or candidates[0] > last_trade_date
+        ))
+        data["t1_date"] = data["candidate_dates"]
+        data = data.explode("t1_date", ignore_index=True)
+        data = data[data["t1_date"].notna()].copy()
+        data = data[data["t1_date"] <= last_trade_date].copy()
 
         data["listed_days"] = [
             listed_trade_days(calendar, list_date, t1)
             for list_date, t1 in zip(data["list_date"], data["t1_date"])
         ]
         data = data[data["listed_days"] >= int(config["min_listed_trade_days"])].copy()
-        stats["listed_passed"] = int(len(data))
+        # 已展开成候选日，按「事件」去重计数，和 events/growth_passed 同口径
+        stats["listed_passed"] = int(len(data.drop_duplicates(subset=["ts_code", "end_date", "source"])))
         if data.empty:
             stats["signals"] = 0
             return _payload(now, last_trade_date, config, stats, warnings, [])
 
-        # T+1 与 T 两天的日线：T 日最高价用来判断真缺口
+        # T（候选信号日）与它前一个交易日两天的日线：前一日最高价用来判断真缺口
         data["t0_date"] = [
             calendar[calendar_index[t1] - 1] if calendar_index.get(t1) else None
             for t1 in data["t1_date"]
@@ -852,6 +1056,10 @@ def _payload(now, last_trade_date, config, stats, warnings, items) -> Dict[str, 
         "trade_date": last_trade_date.isoformat(),
         "criteria": config,
         "source_labels": SOURCE_LABELS,
+        # 各事件源结构性地提供哪些增速指标；被跳过的过滤条件也一并透出，方便页面提示
+        "source_metrics": {source: sorted(metrics) for source, metrics in SOURCE_METRICS.items()},
+        "metric_labels": METRIC_LABELS,
+        "skipped_growth_filters": skipped_growth_filters(config, config.get("sources") or []),
         "stats": stats,
         "warnings": list(dict.fromkeys(warnings)),
         "items": items,
@@ -887,7 +1095,7 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
         if latest_date is not None and latest_close:
             since_pct = (latest_close * factor_last / t1_close - 1) * 100
 
-        # 买在 T+1 收盘，最大涨幅从 T+2 起算；缺口回补同样只看 T+1 之后
+        # 买在信号日收盘，最大涨幅从次一交易日起算；缺口回补同样只看信号日之后
         max_gain_pct = None
         fill = {"has_true_gap": bool(result.get("true_gap")), "gap_filled": None, "gap_filled_date": None}
         part = series.get(code)
@@ -925,6 +1133,12 @@ def _build_items(connection, signals, calendar) -> List[Dict[str, Any]]:
             "np_yoy_max": _round(getattr(row, "p_change_max", None)),
             "end_date": row.end_date.isoformat(),
             "ann_date": row.ann_date.isoformat(),
+            # 精确披露时刻（东财公告流）；拿不到时为 None，信号日退回按公告日+次日推导
+            "disclose_at": (
+                row.disclose_at.strftime("%Y-%m-%d %H:%M:%S")
+                if getattr(row, "disclose_at", None) is not None and not pd.isna(row.disclose_at)
+                else None
+            ),
             "np_yoy": _round(row.np_yoy),
             "or_yoy": _round(getattr(row, "or_yoy", None)),
             "np_qoq": _round(getattr(row, "np_qoq", None)),

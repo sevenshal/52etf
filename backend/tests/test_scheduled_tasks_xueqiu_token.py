@@ -248,6 +248,7 @@ class XueqiuTokenMonitorTest(TestCase):
             "xueqiu_holdings_refresh": set(),
             "eastmoney_holdings_refresh": set(),
             "a_stock_earnings_gap_scan": set(),
+            "a_stock_announcement_sync": {"lookback_days", "lookahead_days", "sync_tushare", "start_date", "end_date"},
             "market_alert_baseline": {"baseline_days"},
             "market_alert_replay": {"start_date", "end_date", "overwrite", "baseline_days"},
             "market_alert_scan": {"min_volume_ratio", "min_amount_yi"},

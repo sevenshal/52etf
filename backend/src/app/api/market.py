@@ -7,11 +7,15 @@ from pydantic import BaseModel
 
 from ...core.services.earnings_gap import (
     DEFAULT_CONFIG,
+    METRIC_LABELS,
+    SOURCE_LABELS,
+    SOURCE_METRICS,
     EarningsGapDataError,
     get_earnings_gap,
     load_config,
     refresh_earnings_gap,
     save_config,
+    skipped_growth_filters,
 )
 from ...core.services.industry_relation import (
     IndustryRelationDataError,
@@ -174,7 +178,16 @@ class EarningsGapConfigPayload(BaseModel):
 
 @router.get("/earnings-gap/config")
 def get_earnings_gap_config(account_id: str = Depends(valid_market_viewer)):
-    return {"config": load_config(), "defaults": DEFAULT_CONFIG}
+    config = load_config()
+    return {
+        "config": config,
+        "defaults": DEFAULT_CONFIG,
+        # 各事件源结构性地提供哪些增速指标，页面据此提示「填了也不会生效」的条件
+        "source_labels": SOURCE_LABELS,
+        "source_metrics": {source: sorted(metrics) for source, metrics in SOURCE_METRICS.items()},
+        "metric_labels": METRIC_LABELS,
+        "skipped_growth_filters": skipped_growth_filters(config, config.get("sources") or []),
+    }
 
 
 @router.put("/earnings-gap/config")

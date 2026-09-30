@@ -64,6 +64,11 @@ HK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
 XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS = 24
 EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS = 10.0
 
+# 业绩公告流：默认往前回看天数（表里已有数据时按「最新已入库公告日」自适应续拉）
+A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKBACK_DAYS = 7
+# 晚间披露的公告在东财接口里的「公告日期」是次日，增量窗口必须往后多取一天
+A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKAHEAD_DAYS = 1
+
 
 def _truncate_task_message(message: Optional[str], max_length: int = LAST_RUN_MESSAGE_MAX_LENGTH) -> Optional[str]:
     if not message:
@@ -1059,6 +1064,64 @@ def _run_hk_index_fear_greed_backfill(
     )
 
 
+def _run_a_stock_announcement_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    lookback_days: int = A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKBACK_DAYS,
+    lookahead_days: int = A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKAHEAD_DAYS,
+    sync_tushare: bool = True,
+):
+    """同步业绩类公告（预告/快报/定期报告）与其**精确披露时刻**。
+
+    必须在净利润断层扫描之前跑：晚间披露的公告，「公告日期」通常已经是次日，只有
+    东方财富的 display_time 能区分是盘前还是盘后发布，从而定出第一个能跳空的交易日。
+
+    ``sync_tushare`` 打开时顺手把 tushare 的业绩预告/快报**增量**再拉一次：光有披露时刻、
+    没有净利数字一样出不了信号，公告当晚就要把两样都补齐，才不用等次日早上的补跑。
+    """
+    from ..core.services.a_stock_announcement import sync_a_stock_announcements
+
+    today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    if not _is_china_trading_day(today_shanghai):
+        return f"跳过业绩公告流同步: {today_shanghai} 不是A股交易日"
+
+    def _parse(value: Optional[str]):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            raise ValueError(f"日期必须是 YYYY-MM-DD: {text}")
+
+    result = sync_a_stock_announcements(
+        start_date=_parse(start_date),
+        end_date=_parse(end_date),
+        lookback_days=max(1, int(lookback_days)),
+        lookahead_days=max(0, int(lookahead_days)),
+    )
+    message = (
+        f"业绩公告流同步完成: window={result['start_date']}~{result['end_date']} "
+        f"fetched={result['fetched_rows']} saved={result['saved_rows']} kinds={result['kinds']} "
+        f"seconds={result['seconds']}"
+    )
+    if sync_tushare:
+        from .a_stock_base_data_sync import sync_a_stock_express_data, sync_a_stock_forecast_data
+
+        extras = []
+        for label, runner in (("预告", sync_a_stock_forecast_data), ("快报", sync_a_stock_express_data)):
+            try:
+                outcome = runner()
+                extras.append(
+                    f"tushare{label} saved={outcome.get('saved_rows')} fetched={outcome.get('fetched_rows')}"
+                )
+            except Exception as exc:  # 东财时刻已落库，tushare 数字晚一轮不影响整体同步
+                logger.warning("业绩公告流同步: tushare%s 增量失败 %s", label, exc)
+                extras.append(f"tushare{label} failed={exc}")
+        message += "；" + "；".join(extras)
+    return message
+
+
 def _run_a_stock_earnings_gap_scan():
     today_shanghai = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     if not _is_china_trading_day(today_shanghai):
@@ -1068,9 +1131,11 @@ def _run_a_stock_earnings_gap_scan():
 
     payload = refresh_earnings_gap()
     today_signals = sum(1 for item in payload["items"] if item["signal_date"] == payload["trade_date"])
+    with_time = sum(1 for item in payload["items"] if item.get("disclose_at"))
     message = (
         f"净利润断层扫描完成: trade_date={payload['trade_date']} "
-        f"signals={len(payload['items'])} today_signals={today_signals}"
+        f"signals={len(payload['items'])} today_signals={today_signals} "
+        f"precise_disclosure={with_time}/{len(payload['items'])}"
     )
     if payload.get("warnings"):
         message += " warnings=" + "；".join(payload["warnings"])
@@ -2033,15 +2098,70 @@ class ScheduledTaskManager:
                     ),
                 ),
             ),
+            "a_stock_announcement_sync": TaskDefinition(
+                task_key="a_stock_announcement_sync",
+                name="A股业绩公告流同步",
+                description="收盘后到深夜每小时从东方财富公告接口同步业绩预告/快报/定期报告的**精确披露时刻**，写入分析库 a_stock_announcement，并顺手把 tushare 的预告/快报增量再拉一次。净利润断层靠它区分「盘前披露」和「盘后披露」，定出公告后第一个能跳空的交易日，不再依赖次日早上的补跑。",
+                default_time="17:00",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_a_stock_announcement_sync,
+                default_cron_rule="0 16-23 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="lookback_days",
+                        label="回看天数",
+                        value_type="integer",
+                        default=A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKBACK_DAYS,
+                        min_value=1,
+                        max_value=400,
+                        step=1,
+                        suffix="天",
+                        description="未指定开始日期时的回看窗口；库里有数据时会从最新已入库公告日继续，不会漏。",
+                    ),
+                    TaskParameterDefinition(
+                        key="lookahead_days",
+                        label="后取天数",
+                        value_type="integer",
+                        default=A_STOCK_ANNOUNCEMENT_DEFAULT_LOOKAHEAD_DAYS,
+                        min_value=0,
+                        max_value=5,
+                        step=1,
+                        suffix="天",
+                        description="晚间披露的公告在东财接口里的公告日期是次日，需往后多取一天才能在当晚抓到。",
+                    ),
+                    TaskParameterDefinition(
+                        key="sync_tushare",
+                        label="同时增量拉 tushare",
+                        value_type="boolean",
+                        default=True,
+                        description="打开时顺带同步 tushare 业绩预告/快报增量，保证当晚既有披露时刻也有净利数字。",
+                    ),
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；填了就从该日期回补（首次使用可先回补一年）。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时用今天。",
+                    ),
+                ),
+            ),
             "a_stock_earnings_gap_scan": TaskDefinition(
                 task_key="a_stock_earnings_gap_scan",
                 name="净利润断层信号",
-                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的业绩公告（财报/快报/预告）和日K扫描全A：每只股票取最新一个报告期的公告（同期多源触发只留最早一条），净利同比达标且公告后首个交易日(T+1)跳空高开、收阳未封板、成交额达标，按T+1收盘出买入信号。阈值在「市场-净利润断层」页配置。",
-                default_time="18:25",
+                description="A股基础数据同步之后（任务串行排队，同步未完成会等它），用分析库里的业绩公告（财报/快报/预告）和日K扫描全A：每只股票取最新一个报告期的公告（同期多源触发只留最早一条），净利同比达标且公告后首个能跳空的交易日跳空高开、收阳未封板、成交额达标，按该日收盘出买入信号。当晚 18/20/22/23 各跑一次，把盘后陆续披露的公告都接住。阈值在「市场-净利润断层」页配置。",
+                default_time="18:20",
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_a_stock_earnings_gap_scan,
-                default_cron_rule="25 18 * * mon-fri",
+                default_cron_rule="20 18,20,22,23 * * mon-fri",
             ),
             "hk_stock_base_data_sync": TaskDefinition(
                 task_key="hk_stock_base_data_sync",
@@ -2437,6 +2557,13 @@ class ScheduledTaskManager:
                 config.description = task.description
                 config.parameters = self._normalize_task_parameters(task, config.parameters)
                 config.sort_order = task.sort_order
+                if (
+                    task.task_key == "a_stock_earnings_gap_scan"
+                    and str(config.cron_rule or "").strip() in {"25 18 * * mon-fri", "25 18 * * *"}
+                ):
+                    # 老默认只在 18:25 跑一次，接不住盘后陆续披露的公告，升级成当晚多次
+                    config.cron_rule = default_cron_rule
+                    config.schedule_time = task.default_time
                 if (
                     task.task_key == "xueqiu_top_holdings_rebalance"
                     and str(config.cron_rule or "").strip() in {

@@ -135,7 +135,9 @@ class FakeTushare:
         return pd.DataFrame([{"ts_code": code, "up_limit": value} for code, value in rows.items()])
 
 
-def _build_db(bars, reports, basic, adj=None, calendar=(), equity=None, forecasts=None, express=None):
+def _build_db(
+    bars, reports, basic, adj=None, calendar=(), equity=None, forecasts=None, express=None, announcements=None
+):
     connection = duckdb.connect(":memory:")
     connection.execute(
         "CREATE TABLE a_stock_market_daily (ts_code VARCHAR, trade_date DATE, open DOUBLE, high DOUBLE,"
@@ -148,6 +150,11 @@ def _build_db(bars, reports, basic, adj=None, calendar=(), equity=None, forecast
     connection.execute(
         "CREATE TABLE a_stock_express (ts_code VARCHAR, end_date DATE, ann_date DATE, n_income DOUBLE,"
         " yoy_net_profit DOUBLE, yoy_dedu_np DOUBLE, yoy_sales DOUBLE)"
+    )
+    connection.execute(
+        "CREATE TABLE a_stock_announcement (art_code VARCHAR, ts_code VARCHAR, name VARCHAR, ann_date DATE,"
+        " disclose_at TIMESTAMP, event_kind VARCHAR, category_code VARCHAR, category_name VARCHAR,"
+        " title VARCHAR, source VARCHAR, created_at TIMESTAMP, updated_at TIMESTAMP)"
     )
     connection.execute(
         "CREATE TABLE a_stock_balancesheet (ts_code VARCHAR, end_date DATE, ann_date DATE, report_type VARCHAR,"
@@ -180,6 +187,13 @@ def _build_db(bars, reports, basic, adj=None, calendar=(), equity=None, forecast
         connection.execute("INSERT INTO a_stock_forecast VALUES (?, ?, ?, ?, ?, ?)", row)
     for row in express or []:
         connection.execute("INSERT INTO a_stock_express VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+    for row in announcements or []:
+        art_code, ts_code, ann_date, disclose_at, event_kind = row
+        connection.execute(
+            "INSERT INTO a_stock_announcement (art_code, ts_code, ann_date, disclose_at, event_kind, source)"
+            " VALUES (?, ?, ?, ?, ?, 'eastmoney')",
+            [art_code, ts_code, ann_date, disclose_at, event_kind],
+        )
     for row in equity or []:
         connection.execute("INSERT INTO a_stock_balancesheet VALUES (?, ?, ?, '1', ?)", row)
     for row in basic:
@@ -290,17 +304,29 @@ def test_compute_earnings_gap_filters_optional_growth_ranges():
 
 
 def test_announcement_on_latest_synced_day_is_pending():
-    # 分析库最新交易日 9/18 公告的财报，T+1 还没有日K，不出信号也不报错
+    # 分析库最新交易日 9/18（周五）盘后 18:00 披露的财报，T 是 9/21，还没同步 → pending
     calendar = _calendar(date(2024, 1, 1), date(2026, 9, 18))
     connection = _build_db(
         [],
         [("600001.SH", date(2026, 6, 30), date(2026, 9, 18), 45.0)],
         [("600001.SH", "待确认", "电子", date(2018, 1, 2))],
         calendar=calendar,
+        announcements=[("A1", "600001.SH", date(2026, 9, 18), datetime(2026, 9, 18, 18, 0), "report")],
     )
     payload = eg.compute_earnings_gap(now=datetime(2026, 9, 18, 18, 25), service=FakeTushare(), connection=connection)
     assert payload["items"] == []
     assert payload["stats"]["pending"] == 1
+
+    # 拿不到精确披露时刻时，公告日与其次日都作候选；公告日本身已同步 → 不算 pending，只是当天没跳空
+    fallback = _build_db(
+        [],
+        [("600001.SH", date(2026, 6, 30), date(2026, 9, 18), 45.0)],
+        [("600001.SH", "待确认", "电子", date(2018, 1, 2))],
+        calendar=calendar,
+    )
+    payload = eg.compute_earnings_gap(now=datetime(2026, 9, 18, 18, 25), service=FakeTushare(), connection=fallback)
+    assert payload["items"] == []
+    assert payload["stats"]["pending"] == 0
 
 
 def test_missing_stk_limit_falls_back_to_board_rule():
@@ -615,3 +641,166 @@ def test_select_candidate_events_latest_period_and_same_day():
     assert sorted(zip(candidates["source"], candidates["ann_date"].astype(str))) == [
         ("express", "2026-07-20"), ("report", "2026-08-21"),
     ]
+
+
+def test_reaction_candidate_dates_use_precise_disclosure_time():
+    """精确披露时刻决定 T：开盘前披露当天开盘就能跳空，盘后/盘中披露只能等次一交易日。"""
+    calendar = _calendar(date(2026, 9, 1), date(2026, 12, 31))
+    # 9/28（周一）19:34 盘后披露，公告日期已是 9/29（周二）→ T 就是 9/29
+    assert eg.reaction_candidate_dates(
+        calendar, date(2026, 9, 29), datetime(2026, 9, 28, 19, 34, 43)
+    ) == [date(2026, 9, 29), date(2026, 9, 30)]
+    # 09:30 前披露：当天开盘在消息之后，T = 当天
+    assert eg.reaction_candidate_dates(
+        calendar, date(2026, 9, 28), datetime(2026, 9, 28, 8, 0)
+    ) == [date(2026, 9, 28), date(2026, 9, 29)]
+    # 盘中 10:00 披露：当天开盘早于消息，跳空只可能出现在次日
+    assert eg.reaction_candidate_dates(
+        calendar, date(2026, 9, 28), datetime(2026, 9, 28, 10, 0)
+    )[0] == date(2026, 9, 29)
+    # 非交易日披露 → 下一个交易日
+    assert eg.reaction_candidate_dates(
+        calendar, date(2026, 9, 26), datetime(2026, 9, 26, 9, 0)
+    )[0] == date(2026, 9, 28)
+    # 没有精确时刻：公告日与其后第一个交易日都作候选，两种情况都覆盖得到
+    assert eg.reaction_candidate_dates(calendar, date(2026, 9, 25)) == [date(2026, 9, 25), date(2026, 9, 28)]
+    # 日历里没有更晚的交易日时只留一个候选
+    assert eg.reaction_candidate_dates([date(2026, 9, 25)], date(2026, 9, 25)) == [date(2026, 9, 25)]
+
+
+def test_reaction_candidate_dates_tolerates_pandas_nat_and_junk():
+    """匹配不到精确时刻时 pandas 会把 None 存成 NaT；NaT 既不是 None 也没有 .time()。
+
+    生产是全市场扫描，绝大多数事件匹配不到东财公告 → 这一列必定满是 NaT，
+    旧实现直接 ``disclose_at.time()`` 会抛 ``ValueError: NaTType does not support time``。
+    """
+    calendar = _calendar(date(2026, 9, 1), date(2026, 12, 31))
+    expected = [date(2026, 9, 25), date(2026, 9, 28)]
+    for junk in (pd.NaT, float("nan"), "", None, pd.NaT.to_datetime64()):
+        assert eg.reaction_candidate_dates(calendar, date(2026, 9, 25), junk) == expected
+
+    # 真实的混合列：一条命中、一条没命中 → pandas 推断成 datetime64，没命中的变成 NaT
+    frame = pd.DataFrame({
+        "ts_code": ["688469.SH", "600000.SH"], "source": ["forecast", "forecast"],
+        "end_date": [date(2026, 6, 30)] * 2, "ann_date": [date(2026, 9, 25)] * 2,
+        "disclose_at": pd.Series(
+            [datetime(2026, 9, 24, 19, 34, 43), None], dtype="datetime64[ns]"
+        ),
+        "np_yoy": [247.08, 80.0],
+    })
+    assert pd.isna(frame["disclose_at"].iloc[1])
+    assert eg.reaction_candidate_dates(
+        calendar, frame["ann_date"].iloc[1], frame["disclose_at"].iloc[1]
+    ) == expected
+
+
+def test_growth_filter_mask_skips_metrics_source_does_not_provide():
+    """预告/快报结构性没有营收和环比：启用了这些条件也不该把它们整类清空。"""
+    config = eg.normalize_config({
+        "min_profit_qoq": 10, "min_revenue_yoy": 20, "min_revenue_qoq": 0,
+    })
+    frame = pd.DataFrame([
+        {"ts_code": "000001.SZ", "source": "forecast", "np_yoy": 247.08,
+         "np_qoq": None, "or_yoy": None, "or_qoq": None},
+        {"ts_code": "000002.SZ", "source": "express", "np_yoy": 50.0,
+         "np_qoq": None, "or_yoy": None, "or_qoq": None},
+        {"ts_code": "000003.SZ", "source": "report", "np_yoy": 60.0,
+         "np_qoq": None, "or_yoy": 30.0, "or_qoq": 5.0},   # 该有环比的来源却缺失 → 不达标
+        {"ts_code": "000004.SZ", "source": "report", "np_yoy": 60.0,
+         "np_qoq": 15.0, "or_yoy": 30.0, "or_qoq": 5.0},
+        {"ts_code": "000005.SZ", "source": "report", "np_yoy": 10.0,
+         "np_qoq": 15.0, "or_yoy": 30.0, "or_qoq": 5.0},   # 净利同比不达标
+    ])
+    mask = eg.growth_filter_mask(frame, config)
+    assert list(frame.loc[mask, "ts_code"]) == ["000001.SZ", "000002.SZ", "000004.SZ"]
+
+    assert eg.skipped_growth_filters(config, config["sources"]) == {
+        "np_qoq": ["express", "forecast"],
+        "or_yoy": ["express", "forecast"],
+        "or_qoq": ["express", "forecast"],
+    }
+    warnings = eg.growth_filter_warnings(config)
+    assert warnings == [
+        "「净利环比」过滤只对 财报 生效，快报/预告 不提供该指标已跳过",
+        "「营收同比」过滤只对 财报 生效，快报/预告 不提供该指标已跳过",
+        "「营收环比」过滤只对 财报 生效，快报/预告 不提供该指标已跳过",
+    ]
+
+
+def test_growth_filter_warning_when_no_source_provides_metric():
+    """只选了预告+快报时，营收/环比条件整条不生效，必须提示出来而不是静默。"""
+    config = eg.normalize_config({"sources": ["forecast", "express"], "min_revenue_yoy": 20})
+    warnings = eg.growth_filter_warnings(config)
+    assert warnings == [
+        "「营收同比」过滤对已选事件源（快报/预告）都不适用，该条件本次没有生效："
+        "快报/预告不提供营收同比，只有财报才有"
+    ]
+
+
+def test_signal_date_uses_precise_disclosure_time_end_to_end():
+    """芯联集成型：晚间披露、公告日期已是次日。有了精确披露时刻，T 就落在公告日当天。"""
+    calendar = _calendar(date(2024, 1, 1), date(2026, 9, 30))
+    ann_date = date(2026, 9, 29)
+    forecasts = [
+        ("688469.SH", date(2026, 9, 30), ann_date, "扭亏", 247.08, 300.0),
+        # 第二条匹配不到东财公告 → disclosed_at 在 pandas 列里是 NaT。
+        # 生产全市场扫描几乎全是这种行，混合列的 NaT 才是真实路径（见下面 NaT 回归测试）。
+        ("600000.SH", date(2026, 9, 30), ann_date, "预增", 80.0, 120.0),
+    ]
+    # 9/29 高开 +8.49%（9.33 / 8.60），收阳、未封板
+    bars = [("688469.SH", ann_date, 9.33, 9.6, 9.2, 9.4, 8.6, 800000.0)]
+    basic = [("688469.SH", "芯联集成", "半导体", date(2018, 1, 2)),
+             ("600000.SH", "浦发银行", "银行", date(2018, 1, 2))]
+    announcements = [("A1", "688469.SH", ann_date, datetime(2026, 9, 28, 19, 34, 43), "forecast")]
+
+    payload = eg.compute_earnings_gap(
+        now=datetime(2026, 9, 30, 20, 20),
+        service=FakeTushare(limits={ann_date: {"688469.SH": 10.32}}),
+        connection=_build_db(bars, [], basic, calendar=calendar, forecasts=forecasts,
+                             announcements=announcements),
+    )
+    assert [item["symbol"] for item in payload["items"]] == ["688469.SH"]
+    item = payload["items"][0]
+    assert item["ann_date"] == "2026-09-29"
+    assert item["disclose_at"] == "2026-09-28 19:34:43"
+    assert item["signal_date"] == "2026-09-29"
+    assert item["t1_open_gap_pct"] == pytest.approx(8.49, abs=0.01)
+    assert item["source"] == "forecast" and item["np_yoy"] == 247.08
+    assert payload["stats"]["pending"] == 0
+    assert payload["source_metrics"]["forecast"] == ["np_yoy"]
+
+    # 同一条预告若在 09:30 前披露，T 还是 9/29（公告日）；这条断言保证口径不是硬编码
+    same_day = eg.compute_earnings_gap(
+        now=datetime(2026, 9, 30, 20, 20),
+        service=FakeTushare(limits={ann_date: {"688469.SH": 10.32}}),
+        connection=_build_db(bars, [], basic, calendar=calendar, forecasts=forecasts,
+                             announcements=[("A1", "688469.SH", ann_date,
+                                             datetime(2026, 9, 29, 7, 30), "forecast")]),
+    )
+    assert same_day["items"][0]["signal_date"] == "2026-09-29"
+
+def test_forecast_with_box_filter_no_longer_wiped_out():
+    """回归：页面上开着营收/环比下限时，达标预告不再被静默清空（2026-09-29 芯联集成）。"""
+    calendar = _calendar(date(2024, 1, 1), date(2026, 9, 30))
+    ann_date = date(2026, 9, 29)
+    forecasts = [("688469.SH", date(2026, 9, 30), ann_date, "扭亏", 247.08, 300.0)]
+    bars = [("688469.SH", ann_date, 9.33, 9.6, 9.2, 9.4, 8.6, 800000.0)]
+    basic = [("688469.SH", "芯联集成", "半导体", date(2018, 1, 2))]
+    connection = _build_db(bars, [], basic, calendar=calendar, forecasts=forecasts)
+    config = {
+        "min_profit_qoq": 0, "min_revenue_yoy": 0, "min_revenue_qoq": 0,
+    }
+    payload = eg.compute_earnings_gap(
+        now=datetime(2026, 9, 30, 20, 20),
+        service=FakeTushare(limits={ann_date: {"688469.SH": 10.32}}),
+        connection=connection,
+        config=config,
+    )
+    assert [item["symbol"] for item in payload["items"]] == ["688469.SH"]
+    assert payload["stats"]["growth_passed"] == 1
+    assert payload["skipped_growth_filters"] == {
+        "np_qoq": ["express", "forecast"],
+        "or_yoy": ["express", "forecast"],
+        "or_qoq": ["express", "forecast"],
+    }
+    assert len(payload["warnings"]) == 3

@@ -48,6 +48,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_fina_indicator",
         "a_stock_forecast",
         "a_stock_express",
+        "a_stock_announcement",
         "a_stock_report_rc",
         "a_stock_fund_basic",
         "a_stock_fund_daily",
@@ -325,6 +326,34 @@ AStockExpress = _financial_statement_model(
     EXPRESS_NUMERIC_FIELDS,
     long_text_fields=EXPRESS_LONG_TEXT_FIELDS,
 )
+
+
+class AStockAnnouncement(AnalyticsBase):
+    """业绩类公告（预告/快报/定期报告）及其**精确披露时刻**，取自东方财富公告流。
+
+    Tushare/巨潮只给日期粒度：晚间披露的公告，「公告日期」已经是次日，无法分辨
+    「交易日开盘前披露」（当天就能跳空）和「收盘后披露」（次一交易日才跳空）。
+    东方财富公告列表的 display_time 精确到毫秒，是判断 T 日的唯一可靠依据。
+    """
+
+    __tablename__ = "a_stock_announcement"
+
+    # 东方财富公告唯一编号，天然幂等主键
+    art_code = Column(String(40), primary_key=True)
+    ts_code = Column(String(16), nullable=False)
+    name = Column(String(64))
+    # 公告日期（东方财富 notice_date），与 tushare 的 ann_date 同口径
+    ann_date = Column(Date, nullable=False)
+    # 精确披露时刻（东方财富 display_time）
+    disclose_at = Column(DateTime)
+    # 事件类型：forecast 预告 / express 快报 / report 定期报告
+    event_kind = Column(String(16))
+    category_code = Column(String(64))
+    category_name = Column(String(64))
+    title = Column(String(512))
+    source = Column(String(24), default="eastmoney", nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
 class AStockReportRc(AnalyticsBase):
@@ -979,6 +1008,21 @@ def ensure_analytics_table_columns():
         "a_stock_express": _financial_statement_column_types(
             EXPRESS_DATE_FIELDS, EXPRESS_TEXT_FIELDS, EXPRESS_NUMERIC_FIELDS, EXPRESS_LONG_TEXT_FIELDS
         ),
+        # 东方财富公告流（业绩预告/快报/定期报告 + 精确披露时刻），非 tushare 字段集，单独列。
+        "a_stock_announcement": {
+            "art_code": "VARCHAR",
+            "ts_code": "VARCHAR",
+            "name": "VARCHAR",
+            "ann_date": "DATE",
+            "disclose_at": "TIMESTAMP",
+            "event_kind": "VARCHAR",
+            "category_code": "VARCHAR",
+            "category_name": "VARCHAR",
+            "title": "VARCHAR",
+            "source": "VARCHAR",
+            "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
+        },
     }
     with analytics_engine.begin() as conn:
         for table_name, columns in table_columns.items():
@@ -1015,6 +1059,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_forecast_ann ON a_stock_forecast(ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_express_symbol_ann ON a_stock_express(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_express_ann ON a_stock_express(ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_announcement_symbol_date ON a_stock_announcement(ts_code, ann_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_announcement_date ON a_stock_announcement(ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_ann ON a_stock_balancesheet(ts_code, ann_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_balancesheet_symbol_end ON a_stock_balancesheet(ts_code, end_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_cashflow_symbol_ann ON a_stock_cashflow(ts_code, ann_date)",
