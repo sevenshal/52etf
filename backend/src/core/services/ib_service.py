@@ -31,9 +31,24 @@ class IBKRService:
         self.port = int(port or os.getenv('IB_PORT', '4001'))
         self.client_id = int(client_id or os.getenv('IB_CLIENT_ID', '1'))
         self.ib = None
+        self._event_loop = None
 
     async def connect(self, timeout: float = 15.0):
-        if self.ib is not None and self.ib.isConnected():
+        running_loop = asyncio.get_running_loop()
+        # ib_insync 0.9.x does not use get_running_loop() when opening its
+        # socket. It calls policy.get_event_loop(), which can still point at
+        # the import-time loop under Starlette/AnyIO. Make the loop selected
+        # by ib_insync match the coroutine that is awaiting connectAsync.
+        # Otherwise asyncio raises "Future ... attached to a different loop".
+        asyncio.set_event_loop(running_loop)
+
+        if (
+            self.ib is not None
+            and self.ib.isConnected()
+            # _event_loop=None is kept for injected/pre-connected adapters
+            # used by callers that provide their own IB-compatible object.
+            and (self._event_loop is None or self._event_loop is running_loop)
+        ):
             return  # 已连接，直接返回
 
         # 清理旧的损坏实例：旧的 IB() 对象内部可能持有一个已取消的 apiStart future，
@@ -44,10 +59,12 @@ class IBKRService:
             except Exception:
                 pass
             self.ib = None
+            self._event_loop = None
 
         self.ib = IB()
         try:
             await self.ib.connectAsync(self.host, self.port, clientId=self.client_id, timeout=timeout)
+            self._event_loop = running_loop
             logger.info(f"Connected to IB Gateway on {self.host}:{self.port}")
             # 3 表示请求延迟行情 (Delayed)，当没有实时行情订阅时很有用
             self.ib.reqMarketDataType(3)
@@ -59,12 +76,14 @@ class IBKRService:
             except Exception:
                 pass
             self.ib = None
+            self._event_loop = None
             raise
 
     def disconnect(self):
         if self.ib and self.ib.isConnected():
             self.ib.disconnect()
             logger.info("Disconnected from IB Gateway")
+        self._event_loop = None
 
     @staticmethod
     def _normalize_ib_equity_symbol(symbol: str) -> str:

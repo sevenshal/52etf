@@ -1,6 +1,7 @@
+import asyncio
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.core.services.ib_service import IBKRService, IBOrderSubmissionPending
 
@@ -40,7 +41,40 @@ class _FakeIB:
         return list(self.trades_data)
 
 
+class _LoopCapturingIB:
+    def __init__(self):
+        self.connected = False
+        self.connect_loop = None
+
+    def isConnected(self):
+        return self.connected
+
+    async def connectAsync(self, host, port, clientId, timeout):
+        self.connect_loop = asyncio.get_event_loop_policy().get_event_loop()
+        self.connected = True
+
+    def reqMarketDataType(self, market_data_type):
+        return None
+
+    def disconnect(self):
+        self.connected = False
+
+
 class IBKRServiceAsyncTest(IsolatedAsyncioTestCase):
+    async def test_connect_rebinds_ib_insync_to_the_running_loop(self):
+        service = IBKRService(port=4001)
+        fake_ib = _LoopCapturingIB()
+        foreign_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(foreign_loop)
+        try:
+            with patch("src.core.services.ib_service.IB", return_value=fake_ib):
+                await service.connect()
+            self.assertIs(asyncio.get_running_loop(), fake_ib.connect_loop)
+            self.assertIs(asyncio.get_running_loop(), service._event_loop)
+        finally:
+            service.disconnect()
+            foreign_loop.close()
+
     async def test_place_market_order_retries_class_share_symbol_with_ib_format(self):
         service = IBKRService(port=4001)
         service.ib = _FakeIB()
