@@ -40,19 +40,54 @@ test('年报和次年一季报同一天披露，合成一个财报标记', () =>
   expect(financial[0].count).toBe(2);
 });
 
-test('同一根 K 线上两类都有时，研报叠在财报上面', () => {
-  const { financial, research } = buildEventMarkers(
+test('同一根 K 线上多类事件都有时，按 财报/快报/预告/研报 自下而上排', () => {
+  const { financial, express, forecast, research } = buildEventMarkers(
     DATES,
     [
       { date: '2026-09-03', reports: [{ org_name: 'A' }] },
       { date: '2026-09-08', reports: [{ org_name: 'B' }] },
     ],
     [{ date: '2026-09-03', period_label: '2026中报' }],
+    [{ date: '2026-09-03', period_label: '2026中报' }],
+    [{ date: '2026-09-03', period_label: '2026中报' }],
   );
 
   expect(financial[0].slot).toBe(0);
-  expect(research.find(marker => marker.index === 1).slot).toBe(1);
+  expect(express[0].slot).toBe(1);
+  expect(forecast[0].slot).toBe(2);
+  expect(research.find(marker => marker.index === 1).slot).toBe(3);
+  // 只有研报的那天仍然贴在最下面
   expect(research.find(marker => marker.index === 4).slot).toBe(0);
+});
+
+test('只有财报和研报时上下层位和以前一样', () => {
+  const { financial, research } = buildEventMarkers(
+    DATES,
+    [{ date: '2026-09-03', reports: [{ org_name: 'A' }] }],
+    [{ date: '2026-09-03', period_label: '2026中报' }],
+  );
+
+  expect(financial[0].slot).toBe(0);
+  expect(research[0].slot).toBe(1);
+});
+
+test('快报和预告各自成标记，同一报告期的两条预告不合并', () => {
+  const { express, forecast } = buildEventMarkers(
+    DATES,
+    [],
+    [],
+    [{ date: '2026-09-03', period_label: '2026中报', revenue: 1 }],
+    [
+      { date: '2026-09-03', period_label: '2025年报', is_correction: false },
+      { date: '2026-09-07', period_label: '2025年报', is_correction: true },
+    ],
+  );
+
+  expect(express).toHaveLength(1);
+  expect(express[0].items.map(item => item.revenue)).toEqual([1]);
+  expect(forecast).toHaveLength(2);
+  expect(forecast.map(marker => marker.index)).toEqual([1, 3]);
+  expect(forecast.map(marker => marker.count)).toEqual([1, 1]);
 });
 
 test('早于第一根 K 线的事件不堆到第一根上', () => {
@@ -61,6 +96,8 @@ test('早于第一根 K 线的事件不堆到第一根上', () => {
 });
 
 test('空输入不炸', () => {
-  expect(buildEventMarkers(DATES)).toEqual({ financial: [], research: [] });
-  expect(buildEventMarkers([], [{ date: '2026-09-03', reports: [{}] }])).toEqual({ financial: [], research: [] });
+  expect(buildEventMarkers(DATES)).toEqual({ financial: [], express: [], forecast: [], research: [] });
+  expect(buildEventMarkers([], [{ date: '2026-09-03', reports: [{}] }])).toEqual({
+    financial: [], express: [], forecast: [], research: [],
+  });
 });

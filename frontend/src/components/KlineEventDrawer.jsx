@@ -58,6 +58,148 @@ const TargetPrice = ({ report }) => {
 
 const eps3 = value => (toNumber(value) === null ? '--' : Number(value).toFixed(3));
 
+// 业绩预告的类型标签：预增/扭亏一类偏多，预减/首亏一类偏空，其余中性
+const FORECAST_TYPE_COLORS = [
+  [/预增|略增|续盈|扭亏|减亏/, 'red'],
+  [/预减|略减|首亏|续亏|增亏/, 'green'],
+];
+const forecastTypeColor = type => (FORECAST_TYPE_COLORS.find(([pattern]) => pattern.test(type)) || [])[1];
+
+// 快报的 is_audit：1=已审计、0=未经审计、2=无此项（tushare 口径）
+const AUDIT_LABELS = { 1: '已审计', 0: '未经审计' };
+
+/** 预告给的是区间：上下限相同时只说一个数，别显示成 "3.15亿 ~ 3.15亿" */
+const AmountPair = ({ low, high, unit = 1 }) => {
+  const lowValue = toNumber(low);
+  const highValue = toNumber(high);
+  if (lowValue === null && highValue === null) return <Text type="secondary">未披露</Text>;
+  if (lowValue !== null && highValue !== null && Math.abs(lowValue - highValue) < 1e-6) {
+    return <Text strong>{formatChineseAmount(lowValue * unit)}</Text>;
+  }
+  return (
+    <span>
+      <Text strong>{lowValue === null ? '--' : formatChineseAmount(lowValue * unit)}</Text>
+      <Text type="secondary"> ~ </Text>
+      <Text strong>{highValue === null ? '--' : formatChineseAmount(highValue * unit)}</Text>
+    </span>
+  );
+};
+
+const PctPair = ({ low, high }) => {
+  const lowValue = toNumber(low);
+  const highValue = toNumber(high);
+  if (lowValue !== null && highValue !== null && Math.abs(lowValue - highValue) < 1e-6) {
+    return <SignedPct value={lowValue} />;
+  }
+  return (
+    <span>
+      <SignedPct value={lowValue} />
+      <Text type="secondary"> ~ </Text>
+      <SignedPct value={highValue} />
+    </span>
+  );
+};
+
+/** 业绩预告：净利区间 + 同比区间 + 摘要 + 变动原因。金额单位是万元。 */
+const ForecastSummary = ({ report }) => (
+  <div style={{ marginBottom: 16 }}>
+    <Space size={8} wrap style={{ marginBottom: 8 }}>
+      <Text strong style={{ fontSize: 15 }}>{report.period_label}业绩预告</Text>
+      {report.forecast_type && <Tag color={forecastTypeColor(report.forecast_type)}>{report.forecast_type}</Tag>}
+      {report.is_correction && (
+        <Tooltip title={`首次预告 ${report.first_ann_date}`}>
+          <Tag color="orange">修正公告</Tag>
+        </Tooltip>
+      )}
+    </Space>
+    <Descriptions size="small" column={1} bordered labelStyle={{ width: 130 }}>
+      <Descriptions.Item label="本次公告">{report.date}</Descriptions.Item>
+      {report.is_correction && (
+        <Descriptions.Item label="首次预告">{report.first_ann_date}</Descriptions.Item>
+      )}
+      <Descriptions.Item label="预告归母净利润">
+        <AmountPair low={report.net_profit_min} high={report.net_profit_max} unit={1e4} />
+      </Descriptions.Item>
+      <Descriptions.Item label="同比变动">
+        <PctPair low={report.p_change_min} high={report.p_change_max} />
+      </Descriptions.Item>
+      <Descriptions.Item label="上年同期归母净利">
+        {toNumber(report.last_parent_net) === null
+          ? '--'
+          : formatChineseAmount(report.last_parent_net * 1e4)}
+      </Descriptions.Item>
+    </Descriptions>
+    {report.summary && (
+      <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 4, fontSize: 12 }}>
+        {report.summary}
+      </Paragraph>
+    )}
+    {report.change_reason && (
+      <Paragraph style={{ marginBottom: 0 }}>
+        <Text type="secondary">变动原因：</Text>
+        {report.change_reason}
+      </Paragraph>
+    )}
+  </div>
+);
+
+/** 业绩快报：未经审计的初步核算数，比定期报告早几周。金额单位是元。 */
+const ExpressSummary = ({ report }) => {
+  // 去年同期是亏损时百分比没有意义（"同比 -41%"会让减亏看起来像下滑），
+  // 后端在这种情况给 null 而不是硬算，这里把原因说清楚。
+  const lossBase = toNumber(report.netprofit_yoy) === null
+    && toNumber(report.n_income) !== null
+    && toNumber(report.last_year_n_income) !== null
+    && report.last_year_n_income <= 0;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <Space size={8} wrap style={{ marginBottom: 8 }}>
+        <Text strong style={{ fontSize: 15 }}>{report.period_label}业绩快报</Text>
+        {AUDIT_LABELS[report.is_audit] && (
+          <Tag color={report.is_audit === '1' ? 'blue' : undefined}>{AUDIT_LABELS[report.is_audit]}</Tag>
+        )}
+      </Space>
+      <Descriptions size="small" column={1} bordered labelStyle={{ width: 130 }}>
+        <Descriptions.Item label="公告日">{report.date}</Descriptions.Item>
+        <Descriptions.Item label="营业收入">
+          {formatChineseAmount(report.revenue)}　<Text type="secondary">同比</Text> <SignedPct value={report.revenue_yoy} />
+        </Descriptions.Item>
+        <Descriptions.Item label="归母净利润">
+          {formatChineseAmount(report.n_income)}
+          {lossBase ? (
+            <Text type="secondary" style={{ marginInlineStart: 8, fontSize: 12 }}>
+              去年同期亏损 {formatChineseAmount(Math.abs(report.last_year_n_income))}，同比百分比不适用
+            </Text>
+          ) : (
+            <>　<Text type="secondary">同比</Text> <SignedPct value={report.netprofit_yoy} /></>
+          )}
+        </Descriptions.Item>
+        <Descriptions.Item label="营业利润">{formatChineseAmount(report.operate_profit)}</Descriptions.Item>
+        <Descriptions.Item label="利润总额">{formatChineseAmount(report.total_profit)}</Descriptions.Item>
+        <Descriptions.Item label="总资产">{formatChineseAmount(report.total_assets)}</Descriptions.Item>
+        <Descriptions.Item label="归母股东权益">{formatChineseAmount(report.total_hldr_eqy_exc_min_int)}</Descriptions.Item>
+        <Descriptions.Item label="每股收益(摊薄)">{eps3(report.diluted_eps)}</Descriptions.Item>
+        <Descriptions.Item label="净资产收益率(摊薄)">{pct(report.diluted_roe)}</Descriptions.Item>
+        <Descriptions.Item label="每股净资产">{toNumber(report.bps) === null ? '--' : Number(report.bps).toFixed(3)}</Descriptions.Item>
+      </Descriptions>
+      {report.perf_summary && (
+        <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 4, fontSize: 12 }}>
+          {report.perf_summary}
+        </Paragraph>
+      )}
+      {report.remark && (
+        <Paragraph style={{ marginBottom: 0 }}>
+          <Text type="secondary">备注：</Text>
+          {report.remark}
+        </Paragraph>
+      )}
+      <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
+        业绩快报是未经审计的初步核算数据，最终以定期报告为准。
+      </Text>
+    </div>
+  );
+};
+
 // 展开后：这家机构对这一年的历次预测。和当前这篇有共同分析师的行正常显示，换了人的行置灰
 const historyColumns = [
   { title: '日期', dataIndex: 'report_date', key: 'report_date', width: 92 },
@@ -222,22 +364,34 @@ const FinancialSummary = ({ report }) => (
   </div>
 );
 
+const EVENT_TITLES = {
+  research: (event) => `${event.tradeDate} 研报（${event.items.length} 篇）`,
+  financial: (event) => `${event.tradeDate} 财报披露`,
+  express: (event) => `${event.tradeDate} 业绩快报`,
+  forecast: (event) => `${event.tradeDate} 业绩预告`,
+};
+
+const EVENT_BODIES = {
+  research: (items) => <ResearchList items={items} />,
+  financial: (items) => items.map(report => <FinancialSummary key={report.end_date} report={report} />),
+  express: (items) => items.map(report => (
+    <ExpressSummary key={`${report.end_date}-${report.date}`} report={report} />
+  )),
+  forecast: (items) => items.map(report => (
+    <ForecastSummary key={`${report.end_date}-${report.date}`} report={report} />
+  )),
+};
+
 /**
- * K 线上点击研报/财报标记后弹出的侧栏。
- * event: { kind: 'research' | 'financial', tradeDate, items }
+ * K 线上点击研报/财报/快报/预告标记后弹出的侧栏。
+ * event: { kind: 'research' | 'financial' | 'express' | 'forecast', tradeDate, items }
  */
 const KlineEventDrawer = ({ event, onClose }) => {
-  const isResearch = event?.kind === 'research';
-  const title = !event
-    ? ''
-    : isResearch
-      ? `${event.tradeDate} 研报（${event.items.length} 篇）`
-      : `${event.tradeDate} 财报披露`;
+  const kind = event?.kind;
+  const title = !event || !EVENT_TITLES[kind] ? '' : EVENT_TITLES[kind](event);
   return (
     <Drawer open={!!event} onClose={onClose} title={title} width={520} destroyOnClose>
-      {!event || !event.items.length ? <Empty /> : isResearch
-        ? <ResearchList items={event.items} />
-        : event.items.map(report => <FinancialSummary key={report.end_date} report={report} />)}
+      {!event || !event.items.length || !EVENT_BODIES[kind] ? <Empty /> : EVENT_BODIES[kind](event.items)}
     </Drawer>
   );
 };

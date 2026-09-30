@@ -1,4 +1,4 @@
-"""K 线图上的事件标记：卖方研报与定期报告披露。
+"""K 线图上的事件标记：卖方研报、定期报告、业绩快报与业绩预告。
 
 这里不重新定义任何口径，全部复用已有的规范实现：
 
@@ -10,14 +10,26 @@
   `load_a_stock_financials` 为了取最新数字会保留公告日最晚的那条(更正稿)，拿它定位
   标记的话，一份被更正过的年报会被标在更正日而不是市场第一次看到它的那天。
   数值再从 `load_a_stock_financials` 取，和个股详情页的财务数据卡片一致。
+- 快报/预告直接读 `a_stock_express` / `a_stock_forecast` 原表，**每条公告一个事件**。
+  这两张表和财报不一样：预告的"修正公告"是带新数字的新信息（不是对同一份文档的技术性
+  更正），市场会针对修正日再反应一次，所以按公告日各标一个而不是只留首次；
+  `first_ann_date` 一并给出，界面据此区分"首次预告"和"修正预告"。
+  快报的净利同比走 `earnings_gap.express_np_yoy`，和净利润断层策略同一个算法，
+  保证图上点开看到的同比和策略当时用的那个数是同一个。
 - 每篇研报的每个预测年度附带「较上次」与历次预测（见 `_attach_eps_revisions`）。
+
+事件日期一律是**原始公告日**（tushare 的 `ann_date`，已经按交易所口径跨日：
+盘后披露的公告日本身就是次一交易日）。周末/盘后发布的由前端对齐到"市场第一次能
+对它做出反应的"那根 K 线，对齐规则只和 K 线本身有关，接口保持事实原样。
 """
 from __future__ import annotations
 
 import re
 from collections import defaultdict
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from sqlalchemy import text
 
 from .a_stock_consensus import (
     _load_report_rows_by_symbol,
@@ -31,6 +43,8 @@ from .a_stock_consensus import (
     normalize_a_stock_symbol,
 )
 from .a_stock_financials import _period_label, load_a_stock_financials
+from .duckdb_analytics import safe_float
+from .earnings_gap import express_np_yoy
 
 # 5 年窗口约 20 个报告期，多取几期保证窗口最前面那几次披露也有数值
 FINANCIAL_PERIODS_TO_LOAD = 28
@@ -42,6 +56,19 @@ DISCLOSURE_LOOKBACK_DAYS = 400
 REVISION_LOOKBACK_DAYS = 730
 # 每个预测年度展开的历次预测最多带几篇（取最近的），控制接口体积
 REVISION_HISTORY_LIMIT = 12
+
+# 快报/预告原表的取数列。只读展示要用的那些，不 SELECT *：
+# 快报有 30+ 列（含一堆和去年同期的对比原始值），全带出去接口会白胖一圈。
+EXPRESS_COLUMNS = (
+    "ann_date", "end_date", "is_audit", "revenue", "operate_profit", "total_profit",
+    "n_income", "total_assets", "total_hldr_eqy_exc_min_int", "diluted_eps",
+    "diluted_roe", "yoy_net_profit", "bps", "yoy_sales", "yoy_dedu_np",
+    "perf_summary", "remark",
+)
+FORECAST_COLUMNS = (
+    "ann_date", "first_ann_date", "end_date", "type", "p_change_min", "p_change_max",
+    "net_profit_min", "net_profit_max", "last_parent_net", "summary", "change_reason",
+)
 
 _AUTHOR_SEPARATORS = re.compile(r"[,，、;；/\s]+")
 
@@ -283,15 +310,134 @@ def _financial_reports(
     return events
 
 
+def _table_exists(db: Any, table: str) -> bool:
+    """存量分析库可能还没有快报/预告表（同步任务没跑过），缺表时按"没有事件"处理。"""
+    row = db.execute(
+        text("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = :name"),
+        {"name": table},
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _announcement_rows(
+    db: Any,
+    table: str,
+    columns: Sequence[str],
+    symbol: str,
+    start: date,
+    end: date,
+) -> List[Any]:
+    """按公告日取窗口内的公告行。用 ann_date 而不是报告期末筛，和研报/财报标记同一口径：
+    标记画在"什么时候公告的"，不是"属于哪一期"。"""
+    if not _table_exists(db, table):
+        return []
+    return db.execute(
+        text(
+            f"""
+            SELECT {", ".join(columns)}
+            FROM {table}
+            WHERE ts_code = :symbol
+              AND ann_date IS NOT NULL
+              AND end_date IS NOT NULL
+              AND ann_date BETWEEN :start AND :end
+            ORDER BY ann_date, end_date
+            """
+        ),
+        {"symbol": symbol, "start": start, "end": end},
+    ).mappings().all()
+
+
+def _express_reports(db: Any, symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
+    """业绩快报标记（a_stock_express）。数值按公告原样给出，单位是元。
+
+    「净利同比」复用 `express_np_yoy`（净利润 ÷ 去年同期修正后净利润 − 1，基数 ≤ 0 时
+    退回接口的扣非同比）——和净利润断层的快报事件同一个算法，图上看到的百分比就是
+    策略当时用的那个数，不会出现"图上有信号、数字对不上"的分叉。
+    """
+    events = []
+    for row in _announcement_rows(db, "a_stock_express", EXPRESS_COLUMNS, symbol, start, end):
+        announced = _row_to_date(row.get("ann_date"))
+        period = _row_to_date(row.get("end_date"))
+        if announced is None or period is None:
+            continue
+        n_income = safe_float(row.get("n_income"))
+        events.append({
+            "date": announced.isoformat(),
+            "end_date": period.isoformat(),
+            "period_label": _period_label(period),
+            "is_annual": (period.month, period.day) == (12, 31),
+            # "1"=已审计、"0"=未审计、"2"=无此项，原样带出去由界面翻译
+            "is_audit": (str(row.get("is_audit")).strip() or None) if row.get("is_audit") is not None else None,
+            "revenue": safe_float(row.get("revenue")),
+            "revenue_yoy": _rounded(safe_float(row.get("yoy_sales"))),
+            "operate_profit": safe_float(row.get("operate_profit")),
+            "total_profit": safe_float(row.get("total_profit")),
+            "n_income": n_income,
+            "last_year_n_income": safe_float(row.get("yoy_net_profit")),
+            "netprofit_yoy": _rounded(express_np_yoy(n_income, row.get("yoy_net_profit"), row.get("yoy_dedu_np"))),
+            "total_assets": safe_float(row.get("total_assets")),
+            "total_hldr_eqy_exc_min_int": safe_float(row.get("total_hldr_eqy_exc_min_int")),
+            "diluted_eps": safe_float(row.get("diluted_eps")),
+            "diluted_roe": _rounded(safe_float(row.get("diluted_roe"))),
+            "bps": safe_float(row.get("bps")),
+            "perf_summary": row.get("perf_summary"),
+            "remark": row.get("remark"),
+        })
+    return events
+
+
+def _forecast_reports(db: Any, symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
+    """业绩预告标记（a_stock_forecast）。净利润与变动幅度都是 tushare 原样口径：
+    金额单位**万元**，`p_change_min/max` 是净利同比的下限/上限（%）。
+
+    同一报告期可能公告多次（首次预告 + 后续修正），每次公告都是当天的独立信息，
+    所以各标一个；`first_ann_date` 一起带上，界面据此标出"修正预告"。
+    """
+    events = []
+    for row in _announcement_rows(db, "a_stock_forecast", FORECAST_COLUMNS, symbol, start, end):
+        announced = _row_to_date(row.get("ann_date"))
+        period = _row_to_date(row.get("end_date"))
+        if announced is None or period is None:
+            continue
+        first_announced = _row_to_date(row.get("first_ann_date"))
+        events.append({
+            "date": announced.isoformat(),
+            "end_date": period.isoformat(),
+            "first_ann_date": first_announced.isoformat() if first_announced else None,
+            "is_correction": bool(first_announced and first_announced < announced),
+            "period_label": _period_label(period),
+            "is_annual": (period.month, period.day) == (12, 31),
+            "forecast_type": (str(row.get("type")).strip() or None) if row.get("type") is not None else None,
+            "p_change_min": _rounded(safe_float(row.get("p_change_min"))),
+            "p_change_max": _rounded(safe_float(row.get("p_change_max"))),
+            "net_profit_min": safe_float(row.get("net_profit_min")),  # 万元
+            "net_profit_max": safe_float(row.get("net_profit_max")),  # 万元
+            "last_parent_net": safe_float(row.get("last_parent_net")),  # 万元
+            "summary": row.get("summary"),
+            "change_reason": row.get("change_reason"),
+        })
+    return events
+
+
 def load_a_stock_chart_events(db: Any, symbol: str, *, start: date, end: date) -> Dict[str, Any]:
-    """返回 [start, end] 区间内的研报(按研报日期分组)与定期报告首次披露事件。
+    """返回 [start, end] 区间内的研报(按研报日期分组)与三类业绩公告事件。
+
+    - `financial_reports`：定期报告(财报)首次披露；
+    - `express_reports`：业绩快报，按快报公告日；
+    - `forecast_reports`：业绩预告，按预告公告日(修正预告单独成条)。
 
     事件日期是原始日期；周末或盘后发布的，由前端对齐到下一个交易日再画——
     对齐规则只和 K 线本身有关，放在画图的地方做，接口保持事实原样。
     """
     normalized = normalize_a_stock_symbol(symbol)
     if not normalized:
-        return {"ts_code": "", "research_days": [], "financial_reports": []}
+        return {
+            "ts_code": "",
+            "research_days": [],
+            "financial_reports": [],
+            "express_reports": [],
+            "forecast_reports": [],
+        }
     # 披露日只取一次：财报标记用窗口内那部分，研报修正用它标"两次预测之间披露了哪份财报"
     disclosures = load_a_stock_disclosure_dates(
         db,
@@ -302,6 +448,8 @@ def load_a_stock_chart_events(db: Any, symbol: str, *, start: date, end: date) -
         "ts_code": normalized,
         "research_days": _research_days(db, normalized, start, end, disclosures),
         "financial_reports": _financial_reports(db, normalized, start, end, disclosures),
+        "express_reports": _express_reports(db, normalized, start, end),
+        "forecast_reports": _forecast_reports(db, normalized, start, end),
     }
 
 

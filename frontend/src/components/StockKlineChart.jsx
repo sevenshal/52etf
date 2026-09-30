@@ -31,9 +31,23 @@ const DIF_COLOR = '#f5a623';
 const DEA_COLOR = '#1890ff';
 const RESEARCH_SERIES_NAME = '研报';
 const FINANCIAL_SERIES_NAME = '财报';
+const EXPRESS_SERIES_NAME = '快报';
+const FORECAST_SERIES_NAME = '预告';
 const RESEARCH_COLOR = '#f0a54a';
 const FINANCIAL_COLOR = '#7b61c9';
-const EMPTY_EVENTS = { research_days: [], financial_reports: [] };
+const EXPRESS_COLOR = '#12a5a5';
+const FORECAST_COLOR = '#e0658a';
+// 顺序即同一天多类事件时的堆叠顺序（从下往上），和 utils/klineEvents 的 EVENT_KINDS 一致
+const EVENT_SERIES_META = [
+  { kind: 'financial', name: FINANCIAL_SERIES_NAME, color: FINANCIAL_COLOR, glyph: '财' },
+  { kind: 'express', name: EXPRESS_SERIES_NAME, color: EXPRESS_COLOR, glyph: '快' },
+  { kind: 'forecast', name: FORECAST_SERIES_NAME, color: FORECAST_COLOR, glyph: '预' },
+  { kind: 'research', name: RESEARCH_SERIES_NAME, color: RESEARCH_COLOR, glyph: '研' },
+];
+const EVENT_SERIES_KIND = Object.fromEntries(EVENT_SERIES_META.map(meta => [meta.name, meta.kind]));
+const EMPTY_EVENTS = {
+  research_days: [], financial_reports: [], express_reports: [], forecast_reports: [],
+};
 const XUEQIU_WEIGHT_SERIES_NAME = '雪球综合权重';
 const XUEQIU_DIRECTION_SERIES_NAME = '5日权价比方向';
 const XUEQIU_WEIGHT_COLOR = '#1677ff';
@@ -233,7 +247,7 @@ const StockKlineChart = ({
   const [activeEvent, setActiveEvent] = useState(null);
   const zoomRef = useRef(null);
   // 图表点击回调在 onChartReady 时只绑定一次，最新的标记和日期经 ref 传进去
-  const eventMarkersRef = useRef({ dates: [], research: [], financial: [] });
+  const eventMarkersRef = useRef({ dates: [], financial: [], express: [], forecast: [], research: [] });
 
   useEffect(() => {
     setChartEvents(EMPTY_EVENTS);
@@ -251,6 +265,8 @@ const StockKlineChart = ({
           setChartEvents({
             research_days: data?.research_days || [],
             financial_reports: data?.financial_reports || [],
+            express_reports: data?.express_reports || [],
+            forecast_reports: data?.forecast_reports || [],
           });
         }
       })
@@ -662,19 +678,28 @@ const StockKlineChart = ({
       );
     }
 
-    // 研报/财报标记：画在当天 K 线最高价上方，点击打开侧栏
-    const eventMarkers = buildEventMarkers(dates, chartEvents.research_days, chartEvents.financial_reports);
+    // 研报/财报/快报/预告标记：画在当天 K 线最高价上方，点击打开侧栏
+    const eventMarkers = buildEventMarkers(
+      dates,
+      chartEvents.research_days,
+      chartEvents.financial_reports,
+      chartEvents.express_reports,
+      chartEvents.forecast_reports,
+    );
     eventMarkersRef.current = { dates, ...eventMarkers };
     const highs = processedKlines.map(item => toFiniteNumber(item.high));
     const eventLegendNames = [];
-    if (eventMarkers.financial.length) {
-      eventLegendNames.push(FINANCIAL_SERIES_NAME);
-      series.push(buildEventSeries(FINANCIAL_SERIES_NAME, eventMarkers.financial, highs, FINANCIAL_COLOR, '财'));
-    }
-    if (eventMarkers.research.length) {
-      eventLegendNames.push(RESEARCH_SERIES_NAME);
-      series.push(buildEventSeries(RESEARCH_SERIES_NAME, eventMarkers.research, highs, RESEARCH_COLOR, '研'));
-    }
+    // 同一天最多叠了几层：主图顶部留白按它加，别让最上面那颗标记顶到图例上
+    let eventStackDepth = 0;
+    EVENT_SERIES_META.forEach(({ kind, name, color, glyph }) => {
+      const markers = eventMarkers[kind];
+      if (!markers.length) return;
+      eventLegendNames.push(name);
+      markers.forEach(marker => {
+        eventStackDepth = Math.max(eventStackDepth, marker.slot + 1);
+      });
+      series.push(buildEventSeries(name, markers, highs, color, glyph));
+    });
 
     const indicatorLegendNames = [];
     const getSegmentPrice = value => (value && typeof value === 'object' ? value.price : value);
@@ -1079,9 +1104,9 @@ const StockKlineChart = ({
       yAxis: [
         {
           scale: true,
-          // 有研报/财报标记时给顶部留白：标记画在最高价上方(叠两层时约 50px)，
+          // 有事件标记时给顶部留白：标记画在最高价上方，每叠一层再高约 24px，
           // 不留白的话窗口里最高那根 K 线上的标记会顶出主图、压到图例上
-          boundaryGap: ['3%', eventLegendNames.length ? '20%' : '3%'],
+          boundaryGap: ['3%', eventStackDepth >= 4 ? '30%' : eventStackDepth ? '20%' : '3%'],
           splitArea: { show: true }
         },
         {
@@ -1170,11 +1195,11 @@ const StockKlineChart = ({
       if (params?.seriesName !== 'K线') {
         chart.dispatchAction({ type: 'hideTip' });
       }
-      if (params?.seriesName === RESEARCH_SERIES_NAME || params?.seriesName === FINANCIAL_SERIES_NAME) {
-        const { dates, research, financial } = eventMarkersRef.current;
-        const kind = params.seriesName === RESEARCH_SERIES_NAME ? 'research' : 'financial';
-        const marker = (kind === 'research' ? research : financial)[params.dataIndex];
-        if (marker) setActiveEvent({ kind, tradeDate: dates[marker.index], items: marker.items });
+      const eventKind = EVENT_SERIES_KIND[params?.seriesName];
+      if (eventKind) {
+        const state = eventMarkersRef.current;
+        const marker = state[eventKind]?.[params.dataIndex];
+        if (marker) setActiveEvent({ kind: eventKind, tradeDate: state.dates[marker.index], items: marker.items });
       }
     });
     chart.on('datazoom', () => {

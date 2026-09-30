@@ -263,10 +263,10 @@ def get_a_stock_chart_events(
     end_date: Optional[calendar_date] = Query(default=None, description="默认今天"),
     _: str = Depends(valid_account),
 ):
-    """K 线图事件标记：区间内的卖方研报(按日分组)与定期报告首次披露。
+    """K 线图事件标记：区间内的卖方研报(按日分组)、定期报告首次披露、业绩快报与业绩预告。
 
     研报目标价/EPS 已按写研报时的复权因子换算到前复权口径，和 K 线同一口径；
-    财报数值里非年报期是年初至今累计。
+    财报数值里非年报期是年初至今累计。快报数值单位是元，预告的净利润区间单位是万元。
     """
     end = end_date or calendar_date.today()
     start = start_date or (end - timedelta(days=365 * 5 + 2))
