@@ -79,8 +79,8 @@ class DuckDBUtilsTest(TestCase):
                 ANALYTICS_DB_PATH,
                 AnalyticsSession,
                 analytics_engine,
-                connect_duckdb,
             )
+            from src.core.duckdb_utils import connect_duckdb
 
             direct_connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
             try:

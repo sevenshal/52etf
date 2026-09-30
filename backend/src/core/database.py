@@ -5,9 +5,13 @@ from contextlib import contextmanager
 import os
 from datetime import datetime
 
+from .read_only_mode import skip_init_writes
+
 # 创建基础目录
 DB_PATH = os.getenv("QUANT_SQLITE_PATH") or "/var/lib/quant_robot/evc_stocks.db"
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# 只读模式（QUANT_DB_READ_ONLY=true）下不碰文件系统；库不存在时让连接自己报错
+if not skip_init_writes("主库目录 makedirs"):
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # 创建基础引擎和Base类
 engine = create_engine(
@@ -2004,11 +2008,14 @@ class SectorNineTurnBacktestTrade(Base):
     taken = Column(Boolean, nullable=False, default=False)
 
 
-Base.metadata.create_all(engine)
+if not skip_init_writes("主库建表 Base.metadata.create_all"):
+    Base.metadata.create_all(engine)
 
 
 def migrate_system_service_credentials():
     """从旧的账户级表导入系统级凭据，保留旧表用于上线回滚。"""
+    if skip_init_writes("主库凭据迁移 migrate_system_service_credentials"):
+        return
     with engine.begin() as conn:
         tables = {
             row[0]
@@ -2049,6 +2056,8 @@ migrate_system_service_credentials()
 
 def drop_deprecated_tables():
     """删除已经迁移或下线的 SQLite 旧表。"""
+    if skip_init_writes("主库删旧表 drop_deprecated_tables"):
+        return
     deprecated_tables = [
         "stock_klines",
         "etf_emotions",
@@ -2093,6 +2102,8 @@ drop_deprecated_tables()
 
 def drop_deprecated_columns():
     """删除存量库中已经不再由模型定义的旧字段。"""
+    if skip_init_writes("主库删旧列 drop_deprecated_columns"):
+        return
     deprecated_columns = {
         "automated_trading_configs": [
             "fixed_quantity",
@@ -2125,6 +2136,8 @@ drop_deprecated_columns()
 
 def ensure_performance_indexes():
     """为高频查询补充索引（幂等执行，适配存量数据库）。"""
+    if skip_init_writes("主库建索引 ensure_performance_indexes"):
+        return
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_stock_evc_date_symbol ON stock_evc(date, symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_tag_date_symbol ON stock_tags(tag_id, date, stock_symbol)",
@@ -2175,6 +2188,8 @@ ensure_performance_indexes()
 
 def ensure_table_columns():
     """为存量表补充新增字段（幂等执行）。"""
+    if skip_init_writes("主库补列 ensure_table_columns"):
+        return
     table_columns = {
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
@@ -2283,6 +2298,8 @@ ensure_table_columns()
 
 def ensure_soxl_fear_strategy_multi_config_schema():
     """迁移 SOXL 情绪量能策略为多配置模式（幂等执行）。"""
+    if skip_init_writes("SOXL 情绪策略迁移 ensure_soxl_fear_strategy_multi_config_schema"):
+        return
 
     def get_columns(conn, table_name):
         return {
@@ -2544,6 +2561,8 @@ def ensure_a_stock_fear_strategy_schema():
     估值窗口/兜底等列已在生产库升级完成，对应 ALTER 已移除。旧方向的 valuation_buy_min / valuation_sell_max
     列留在表里不再使用（删列需单独确认）；新列首次补上时按 100 − 旧值换算，已保存的闸门含义不变。
     """
+    if skip_init_writes("A股情绪策略迁移 ensure_a_stock_fear_strategy_schema"):
+        return
     with engine.begin() as conn:
         columns = {
             row[1]

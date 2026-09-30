@@ -15,10 +15,16 @@ from typing import Any, Iterable, Mapping, Sequence, Tuple
 import pandas as pd
 
 from ...duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb_for_write
+from ...read_only_mode import skip_init_writes
 
 
 def ensure_tables(*models) -> None:
-    """快照表以 ORM 模型为准；显式建表，不依赖别处先 import 过分析库模块。"""
+    """快照表以 ORM 模型为准；显式建表，不依赖别处先 import 过分析库模块。
+
+    只读模式下不建表——后续写入会由 ``connect_duckdb_for_write`` 直接报更清楚的错。
+    """
+    if skip_init_writes("选股系统快照建表 stock_system.ensure_tables"):
+        return
     from ...analytics_database import AnalyticsBase, analytics_engine
 
     AnalyticsBase.metadata.create_all(analytics_engine, tables=[model.__table__ for model in models])

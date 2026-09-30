@@ -19,13 +19,16 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 
+from .read_only_mode import skip_init_writes
+
 
 EXTERNAL_TRADING_DB_PATH = os.getenv(
     "EXTERNAL_TRADING_DB_PATH",
     "/var/lib/quant_robot/external_trading.db",
 )
 _external_trading_db_dir = os.path.dirname(EXTERNAL_TRADING_DB_PATH)
-if _external_trading_db_dir:
+# 只读模式（QUANT_DB_READ_ONLY=true）下不碰文件系统
+if _external_trading_db_dir and not skip_init_writes("外部交易库目录 makedirs"):
     os.makedirs(_external_trading_db_dir, exist_ok=True)
 
 external_trading_engine = create_engine(
@@ -426,6 +429,8 @@ def get_external_trading_db_ctx():
 
 
 def ensure_external_trading_indexes():
+    if skip_init_writes("外部交易库建索引 ensure_external_trading_indexes"):
+        return
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_account ON external_trading_accounts(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_external_trading_accounts_identifier ON external_trading_accounts(account_id, identifier)",
@@ -456,6 +461,8 @@ def ensure_external_trading_indexes():
 
 
 def ensure_external_trading_columns():
+    if skip_init_writes("外部交易库补列 ensure_external_trading_columns"):
+        return
     table_columns = {
         "external_trading_accounts": {
             "market_type": "ALTER TABLE external_trading_accounts ADD COLUMN market_type VARCHAR(32) NOT NULL DEFAULT 'A_STOCK'",
@@ -538,6 +545,8 @@ def ensure_external_trading_columns():
 
 def drop_deprecated_external_trading_columns():
     """删除存量外部交易库里已经不再由模型定义的旧字段。"""
+    if skip_init_writes("外部交易库删旧列 drop_deprecated_external_trading_columns"):
+        return
     deprecated_columns = {
         "external_trading_accounts": [
             "executor_initial_price_source",
@@ -564,7 +573,8 @@ def drop_deprecated_external_trading_columns():
                     conn.exec_driver_sql(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
 
 
-ExternalTradingBase.metadata.create_all(external_trading_engine)
+if not skip_init_writes("外部交易库建表 ExternalTradingBase.metadata.create_all"):
+    ExternalTradingBase.metadata.create_all(external_trading_engine)
 ensure_external_trading_columns()
 drop_deprecated_external_trading_columns()
 ensure_external_trading_indexes()

@@ -22,6 +22,64 @@
 - 删除旧迁移前必须确认所有生产实例均已运行过对应版本，不能仅凭本地库结构判断。
 - 删除、改类型、重建大表等破坏性迁移不能套用自动加列规则，必须单独评估和获得用户确认。
 
+## 数据库只读模式（`QUANT_DB_READ_ONLY`）
+
+三个库（SQLite 主库 `evc_stocks.db`、SQLite 外部交易库 `external_trading.db`、DuckDB 分析库
+`analytics.duckdb`）的建表/补列/建索引/建视图都发生在 **import 阶段**——「只要 import 就会写库」。
+本地开发想直接读线上库或线上库副本、或者写只读分析脚本时，这既不安全（可能写坏数据），
+也经常因为目录不可写或拿不到写锁直接炸在 import 上。
+
+开关就是 `QUANT_DB_READ_ONLY`，**默认关闭**：
+
+```bash
+QUANT_DB_READ_ONLY=true python your_readonly_script.py
+```
+
+开启后：
+
+- 上表所有初始化写操作全部跳过，每个步骤只记一条 warning，方便确认「确实没写」；
+- 连 `os.makedirs(<库目录>)` 都不执行，import 完全不碰文件系统；
+- DuckDB 一律用 `read_only=True` 打开，不会再去抢写锁；
+- `connect_duckdb_for_write()` 直接抛 `ReadOnlyModeError`，避免「以为写进去了其实没写」的静默失败；
+- 读路径完全不受影响：查询、`get_analytics_db_ctx()`、只读脚本照常用。
+
+### 代码约定
+
+**新增任何 import 阶段的初始化写操作，必须用开关包住**，否则这个约定就会重新失守：
+
+```python
+from .read_only_mode import skip_init_writes
+
+def ensure_table_columns():
+    if skip_init_writes("主库补列 ensure_table_columns"):
+        return
+    ...
+
+if not skip_init_writes("主库建表 Base.metadata.create_all"):
+    Base.metadata.create_all(engine)
+```
+
+`skip_init_writes(step)` 在非只读模式下恒返回 `False`（零副作用）；`step` 是日志里显示的
+中文步骤名，同一个名字只打一次日志。
+
+当前已覆盖：
+
+| 模块 | 被开关包住的写操作 |
+| --- | --- |
+| `core/database.py` | 目录 makedirs、`Base.metadata.create_all`、`migrate_system_service_credentials`、`drop_deprecated_tables`、`drop_deprecated_columns`、`ensure_performance_indexes`、`ensure_table_columns`、`ensure_soxl_fear_strategy_multi_config_schema`、`ensure_a_stock_fear_strategy_schema` |
+| `core/external_trading_database.py` | 目录 makedirs、`create_all`、`ensure_external_trading_columns`、`drop_deprecated_external_trading_columns`、`ensure_external_trading_indexes` |
+| `core/analytics_database.py` | 目录 makedirs、`ensure_analytics_schema`（含 `create_all`、补列、建索引、重建视图、`DROP TABLE us_stock_basic`） |
+| `core/services/stock_system/storage.py` | `ensure_tables` 的 `create_all` |
+
+### 注意事项
+
+- 只读模式**不是**「只读副本」：同步/迁移任务照样会去调 `connect_duckdb_for_write()`，
+  会被直接拒绝并报错，这是预期行为。
+- SQLite 侧只跳过 DDL，不强制把连接设成 `mode=ro`（WAL 库用只读连接容易踩坑），
+  想彻底只读请把路径指向副本文件而不是线上文件。
+- 加新的库/新的初始化入口时，记得同时补一条「子进程 import 后库结构没变」的测试，
+  参考 `backend/tests/test_read_only_mode.py`。
+
 ## SQLAlchemy Session 生命周期（高频坑，务必先读）
 
 项目统一用 `get_db_ctx()` / `get_external_trading_db_ctx()` 提供短事务，退出时 `commit()` 并 `close()`。

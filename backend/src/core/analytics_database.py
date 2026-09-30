@@ -11,6 +11,7 @@ from .duckdb_utils import (
     ANALYTICS_DB_PATH,
     connect_duckdb_engine,
 )
+from .read_only_mode import skip_init_writes
 from .tushare_statement_fields import (
     BALANCESHEET_DATE_FIELDS,
     BALANCESHEET_NUMERIC_FIELDS,
@@ -35,7 +36,8 @@ from .tushare_statement_fields import (
 )
 
 ANALYTICS_DB_DIR = os.path.dirname(ANALYTICS_DB_PATH)
-if ANALYTICS_DB_DIR:
+# 只读模式（QUANT_DB_READ_ONLY=true）下连目录都不创建，保证 import 不碰文件系统
+if ANALYTICS_DB_DIR and not skip_init_writes("分析库目录 makedirs"):
     os.makedirs(ANALYTICS_DB_DIR, exist_ok=True)
 
 ANALYTICS_TABLE_NAMES = frozenset(
@@ -980,6 +982,8 @@ def _financial_statement_column_types(date_fields, text_fields, numeric_fields, 
 
 def ensure_analytics_table_columns():
     """为存量 DuckDB 表补充新增字段（幂等，沿用主库 ensure_table_columns 模式）。"""
+    if skip_init_writes("分析库补列 ensure_analytics_table_columns"):
+        return
     table_columns = {
         "a_stock_market_daily": {
             "turnover_rate_f": "FLOAT",
@@ -1043,6 +1047,9 @@ def ensure_analytics_table_columns():
 
 
 def ensure_analytics_schema():
+    """建表 + 补列 + 建索引 + 重建视图。只读模式下整体跳过。"""
+    if skip_init_writes("分析库建表/索引/视图 ensure_analytics_schema"):
+        return
     AnalyticsBase.metadata.create_all(analytics_engine)
     ensure_analytics_table_columns()
     index_sqls = [

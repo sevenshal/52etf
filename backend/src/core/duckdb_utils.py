@@ -2,6 +2,8 @@ import logging
 import os
 import time
 
+from .read_only_mode import READ_ONLY_ENV_VAR, ReadOnlyModeError, is_read_only
+
 
 ANALYTICS_DB_PATH = os.getenv("ANALYTICS_DB_PATH", "/var/lib/quant_robot/analytics.duckdb")
 DUCKDB_CONFIG_MISMATCH_MESSAGE = "Can't open a connection to same database file with a different configuration than existing connections"
@@ -24,6 +26,11 @@ def is_duckdb_lock_conflict(exc: Exception) -> bool:
 
 def connect_duckdb(database: str = ANALYTICS_DB_PATH, prefer_read_only: bool = True):
     import duckdb
+
+    # 只读模式（QUANT_DB_READ_ONLY=true）：一律严格只读，不再尝试拿写锁，
+    # 也就不可能出现"读个数据把线上库的锁占了"或误写。
+    if is_read_only():
+        return duckdb.connect(database=database, read_only=True)
 
     # DuckDB requires every open connection to the same file in a process to use
     # the same configuration. The backend also writes from scheduler threads, so
@@ -63,7 +70,14 @@ def connect_duckdb_for_write(
     DuckDB 是单写者，定时任务网格里几分钟级的写任务互相撞上是必然事件，而
     ``duckdb.connect`` 撞锁会直接抛 IOException，把整轮写入作废。只对"拿不到锁"
     这一种错误重试，其它异常照常抛出；等满仍拿不到锁时抛出最后一次的异常。
+
+    只读模式下没有写连接可开，直接抛 :class:`ReadOnlyModeError`——比拿到一个只读连接、
+    等到真正 INSERT 时才炸要清楚得多。
     """
+    if is_read_only():
+        raise ReadOnlyModeError(
+            f"只读模式（{READ_ONLY_ENV_VAR}=true）下不允许打开写连接：{database}"
+        )
     total_attempts = max(1, int(attempts))
     for attempt in range(1, total_attempts + 1):
         try:
