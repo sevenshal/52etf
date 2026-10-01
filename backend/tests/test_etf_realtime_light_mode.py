@@ -26,12 +26,7 @@ class ETFRealtimeLightModeTest(TestCase):
         frame = _price_frame()
         with patch.object(calc, "_fetch_recent_price_history", return_value=frame), \
              patch.object(calc, "_append_realtime_quote", side_effect=lambda f, d, q: f), \
-             patch.object(calc, "_latest_stored_component_raw", return_value={}), \
-             patch.object(
-                 calc,
-                 "_fetch_realtime_barchart_put_call_raw",
-                 return_value=(np.nan, None, None),
-             ):
+             patch.object(calc, "_latest_stored_component_raw", return_value={}):
             return calc._build_realtime_raw_row(
                 etf_symbol="SPY.US",
                 holdings=[],
@@ -47,6 +42,9 @@ class ETFRealtimeLightModeTest(TestCase):
         # 强度/宽度留空，由调用方沿用最近日线值
         self.assertTrue(np.isnan(raw_values["stock_price_strength"]))
         self.assertTrue(np.isnan(raw_values["stock_price_breadth"]))
+        # put/call 与信用利差是日频分量，实时行留空、由调用方沿用最近日线值
+        self.assertTrue(np.isnan(raw_values["put_call_options"]))
+        self.assertTrue(np.isnan(raw_values["junk_bond_demand"]))
         # 纯价格分量（动量/波动/避险）有实时值
         self.assertTrue(np.isfinite(raw_values["market_momentum"]))
         self.assertTrue(np.isfinite(raw_values["market_volatility"]))

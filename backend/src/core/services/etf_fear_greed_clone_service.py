@@ -22,7 +22,6 @@ from .fear_greed_clone_service import (
     FearGreedCloneCalculator,
     FearGreedCloneError,
 )
-from .barchat import BarchartService
 from .evc import EVCService
 from .longport import LongPortService
 from .market import MarketService
@@ -34,7 +33,6 @@ from ..database import ETFHolding as DBETFHolding
 from ..database import (
     ETFFearGreedCloneHistory,
     ETFFearGreedCloneHolding,
-    ETFOptionExpiration,
     ETFPutCallRatio,
     Session,
 )
@@ -47,6 +45,9 @@ from ...robot.etf.spdr import SPDRDataFetcher
 
 NASDAQ_OPTION_CHAIN_URL = "https://api.nasdaq.com/api/quote/{symbol}/option-chain"
 DEFAULT_ETF_FEAR_GREED_SYMBOLS = ["SOXX.US", "SPY.US", "QQQ.US", "DIA.US"]
+# put/call 分量用 Cboe 全市场口径（与 CNN 同源），不用标的自身期权：
+# 标的自身 put/call 受做市/对冲行为主导，暴跌时方向常与全市场相反。
+CBOE_TOTAL_PUT_CALL_RATIO = "TOTAL PUT/CALL RATIO"
 
 
 def _a_stock_proxy_etf_map() -> Dict[str, str]:
@@ -407,14 +408,15 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "put_call_options": ComponentSpec(
         key="put_call_options",
-        name="ETF Put/Call Options",
-        raw_label="-5-day average symbol-specific put/call volume ratio",
-        source="Local Barchart ETF put/call history table",
+        name="Market Put/Call Options",
+        raw_label="-5-day average Cboe total put/call ratio",
+        source="Cboe daily options market statistics",
         proxy_note=(
-            "Uses symbol-specific Barchart putCallVolumeRatio rows saved in "
-            "etf_put_call_ratios. If the table has no usable rows for the "
-            "requested range, the calculator falls back to Cboe's "
-            "exchange-traded products put/call ratio."
+            "Same source and definition as CNN's put/call component: Cboe's "
+            "market-wide total put/call ratio, 5-day average. The symbol-specific "
+            "Barchart history in etf_put_call_ratios is kept only as an outage "
+            "fallback, because a single ETF's own option flow is dominated by "
+            "dealer hedging and can move opposite to market-wide sentiment."
         ),
     ),
     "market_volatility": ComponentSpec(
@@ -533,8 +535,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "Scores use rolling z-score/CDF and equal-weighted components.",
             "Holdings-based components read the latest etf_holdings snapshot on or before each trading day; missing prior snapshots will raise an error.",
             (
-                "The option component uses local Barchart ETF put/call history "
-                "from etf_put_call_ratios, with Cboe ETP put/call as an outage fallback."
+                "The option component uses Cboe's market-wide total put/call ratio "
+                "(same source as CNN); the symbol-specific Barchart put/call "
+                "history in etf_put_call_ratios is only an outage fallback."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
@@ -779,7 +782,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         latest_daily = raw_history.iloc[-1]
         stale_components = {
-            "put_call_options": "latest stored option put/call component",
+            "put_call_options": "latest stored Cboe total put/call component",
             "junk_bond_demand": "latest stored FRED credit-spread component",
         }
         if not fetch_holdings_quotes:
@@ -832,10 +835,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 + "."
             ),
             (
-                "Put/call uses Barchart's live expiration snapshot first, then "
-                "today's local Barchart expiration snapshot if the live request "
-                "fails; junk-bond-demand is daily data and is carried forward "
-                "from the latest SQLite backfill row."
+                "Put/call and junk-bond-demand are daily data: Cboe publishes the "
+                "total put/call ratio after the close, so both are carried forward "
+                "from the latest SQLite backfill row in realtime mode."
             ),
             (
                 "Current-row holdings use the latest DB holdings snapshot on or before "
@@ -1276,7 +1278,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "TLT.US", start_date, end_date
         ).reindex(index).ffill()
         fred = self._fetch_fred(["BAMLH0A0HYM2", "BAMLC0A0CM"]).reindex(index).ffill()
-        put_call = self._fetch_symbol_put_call_ratio(
+        put_call = self._fetch_market_put_call_ratio(
             etf_symbol, start_date, end_date
         ).reindex(index).ffill(limit=3)
 
@@ -1899,6 +1901,8 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         raw["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
 
         latest_daily = self._latest_stored_component_raw(etf_symbol)
+        # put/call 用 Cboe 全市场口径、日频收盘后发布，实时行没有当日值，
+        # 由 calculate_realtime 的 stale 逻辑沿用最近入库日值。
         raw["put_call_options"] = np.nan
         raw["junk_bond_demand"] = np.nan
         raw_freshness = {
@@ -1916,25 +1920,6 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "market_volatility": "LongPort realtime quote",
             "safe_haven_demand": "LongPort realtime quote",
         }
-        (
-            realtime_put_call,
-            put_call_snapshot_date,
-            put_call_source,
-        ) = self._fetch_realtime_barchart_put_call_raw(
-            etf_symbol=etf_symbol,
-            current_date=current_date,
-            previous_trading_day=previous_trading_day,
-        )
-        if pd.notna(realtime_put_call):
-            raw.loc[current_timestamp, "put_call_options"] = realtime_put_call
-            snapshot_detail = (
-                f" ({put_call_snapshot_date.isoformat()})"
-                if put_call_snapshot_date
-                else ""
-            )
-            raw_freshness["put_call_options"] = (
-                f"{put_call_source or 'Barchart expiration snapshot'}{snapshot_detail}"
-            )
         if latest_daily:
             raw.loc[current_timestamp, "junk_bond_demand"] = latest_daily.get("junk_bond_demand")
             raw_freshness["junk_bond_demand"] = "latest stored FRED credit-spread component"
@@ -1946,133 +1931,6 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         }
         price_payload = self._realtime_price_payload(etf_prices.loc[current_timestamp], quote_map.get(etf_symbol))
         return raw_values, price_payload, raw_freshness
-
-    def _fetch_realtime_barchart_put_call_raw(
-        self,
-        etf_symbol: str,
-        current_date: date,
-        previous_trading_day: date,
-    ) -> Tuple[float, Optional[date], Optional[str]]:
-        try:
-            snapshot = self._fetch_live_barchart_expiration_put_call_snapshot(etf_symbol)
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Failed to fetch live Barchart option expiration snapshot for %s: %s",
-                etf_symbol,
-                exc,
-            )
-            snapshot = self._today_db_barchart_expiration_put_call_snapshot(etf_symbol)
-
-        try:
-            if not snapshot:
-                return np.nan, None, None
-
-            current_ratio = snapshot.get("put_call_volume_ratio")
-            snapshot_date = snapshot.get("snapshot_date")
-            source = snapshot.get("source")
-            if current_ratio is None or not np.isfinite(float(current_ratio)):
-                return np.nan, snapshot_date, source
-
-            history = self._fetch_db_put_call_ratio(
-                etf_symbol,
-                start_date=current_date - timedelta(days=14),
-                end_date=previous_trading_day,
-            )
-            recent_values = [
-                float(value)
-                for value in history.sort_index().tail(4).tolist()
-                if np.isfinite(float(value))
-            ]
-            recent_values.append(float(current_ratio))
-            if len(recent_values) < 3:
-                return np.nan, snapshot_date, source
-            return -float(np.mean(recent_values)), snapshot_date, source
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Failed to build realtime Barchart option put/call raw for %s: %s",
-                etf_symbol,
-                exc,
-            )
-            return np.nan, None, None
-
-    def _fetch_live_barchart_expiration_put_call_snapshot(
-        self,
-        etf_symbol: str,
-    ) -> Optional[Dict[str, Any]]:
-        ticker = self._nasdaq_symbol(etf_symbol)
-        barchart = BarchartService(timeout=self.timeout)
-        try:
-            rows = barchart.get_options_expirations(
-                ticker,
-                page_limit=1000,
-                sleep_seconds=0,
-            )
-            return self._build_barchart_expiration_put_call_snapshot(
-                etf_symbol=etf_symbol,
-                rows=rows,
-                snapshot_date=date.today(),
-                source="Barchart live expiration snapshot",
-            )
-        finally:
-            barchart.close()
-
-    def _today_db_barchart_expiration_put_call_snapshot(
-        self,
-        etf_symbol: str,
-    ) -> Optional[Dict[str, Any]]:
-        ticker = self._nasdaq_symbol(etf_symbol)
-        today = date.today()
-        db = Session()
-        try:
-            rows = (
-                db.query(ETFOptionExpiration)
-                .filter(
-                    ETFOptionExpiration.symbol == ticker,
-                    ETFOptionExpiration.snapshot_date == today,
-                )
-                .all()
-            )
-            return self._build_barchart_expiration_put_call_snapshot(
-                etf_symbol=etf_symbol,
-                rows=rows,
-                snapshot_date=today,
-                source="today's local Barchart expiration snapshot",
-            )
-        finally:
-            Session.remove()
-
-    def _build_barchart_expiration_put_call_snapshot(
-        self,
-        etf_symbol: str,
-        rows: List[Any],
-        snapshot_date: date,
-        source: str,
-    ) -> Optional[Dict[str, Any]]:
-        put_volume = 0.0
-        call_volume = 0.0
-        total_volume = 0.0
-        row_count = 0
-
-        for row in rows or []:
-            getter = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
-            put_volume += self._number(getter("putVolume", getter("put_volume")), default=0.0)
-            call_volume += self._number(getter("callVolume", getter("call_volume")), default=0.0)
-            total_volume += self._number(getter("totalVolume", getter("total_volume")), default=0.0)
-            row_count += 1
-
-        if row_count == 0 or call_volume <= 0:
-            return None
-
-        return {
-            "symbol": etf_symbol,
-            "source": source,
-            "snapshot_date": snapshot_date,
-            "expiration_count": row_count,
-            "put_volume": put_volume,
-            "call_volume": call_volume,
-            "total_volume": total_volume,
-            "put_call_volume_ratio": put_volume / call_volume,
-        }
 
     def _latest_stored_component_raw(self, etf_symbol: str) -> Dict[str, Optional[float]]:
         db = Session()
@@ -2132,25 +1990,42 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                     quote_map[symbol] = quote
         return quote_map
 
-    def _fetch_symbol_put_call_ratio(
+    def _fetch_market_put_call_ratio(
         self,
         etf_symbol: str,
         start_date: date,
         end_date: date,
     ) -> pd.Series:
+        """put/call 分量取 Cboe 全市场总 put/call 比（与 CNN 同源）。
+
+        标的自身期权 put/call（etf_put_call_ratios 里的 Barchart 数据）受做市与
+        对冲行为主导，暴跌时常与全市场情绪反向，只在 Cboe 取不到/覆盖过薄时兜底。
+        """
+        logger = logging.getLogger(__name__)
         try:
-            return self._fetch_db_put_call_ratio(etf_symbol, start_date, end_date)
+            cboe_ratio = self._fetch_cboe_ratio(
+                start_date,
+                end_date,
+                ratio_name=CBOE_TOTAL_PUT_CALL_RATIO,
+            )
+            expected_days = len(pd.bdate_range(start_date, end_date))
+            if len(cboe_ratio) >= max(60, int(expected_days * 0.6)):
+                return cboe_ratio
+            logger.warning(
+                "Cboe total put/call coverage too thin for %s (%s of %s business days), "
+                "falling back to symbol put/call",
+                etf_symbol,
+                len(cboe_ratio),
+                expected_days,
+            )
         except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Failed to fetch DB option put/call for %s, fallback to Cboe ETP ratio: %s",
+            logger.warning(
+                "Failed to fetch Cboe total put/call for %s, falling back to symbol "
+                "put/call: %s",
                 etf_symbol,
                 exc,
             )
-            return self._fetch_cboe_ratio(
-                start_date,
-                end_date,
-                ratio_name="EXCHANGE TRADED PRODUCTS PUT/CALL RATIO",
-            )
+        return self._fetch_db_put_call_ratio(etf_symbol, start_date, end_date)
 
     def _fetch_db_put_call_ratio(
         self,
@@ -2368,8 +2243,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "on or before each trading day; missing prior snapshots will raise an error."
             ),
             (
-                "The option component uses local Barchart ETF put/call history "
-                "from etf_put_call_ratios, with Cboe ETP put/call as an outage fallback."
+                "The option component uses Cboe's market-wide total put/call ratio "
+                "(same source as CNN); the symbol-specific Barchart put/call "
+                "history in etf_put_call_ratios is only an outage fallback."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
