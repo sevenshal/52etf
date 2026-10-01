@@ -8,7 +8,7 @@ from typing import Dict
 from ..core.database import get_db_ctx, SzdtTradeStock, TradingLog, TradingState, StockCooldown, SZDTTradingConfig, IBKRAccountConfig
 from ..core.services.szdt import SZDTService
 from ..core.services.market import MarketService
-from ..core.services.ib_service import IBKRService
+from ..core.services.ib_service import IBKRService, IBOrderSubmissionPending
 from ..core.utils import mask_account_id, send_alert_email
 import traceback
 
@@ -53,6 +53,27 @@ class SZDTUSTrader:
         service = self.ib_services[key]
         await service.connect()
         return service
+
+    def _set_decision_cooldown(self, account_id: str, cli_id: str, stock_code: str, hours: float, reason: str):
+        """写入「已做出决策」的冷却窗口。
+
+        只要这一轮对该标的做出了买卖决策（无论下单是否成功），都必须写入冷却：
+        若下单后抛异常而跳过冷却，下一轮轮询会立刻重新选中同一只标的并重复下单。
+        """
+        with get_db_ctx() as db:
+            db.add(StockCooldown(
+                account_id=account_id,
+                cli_id=cli_id,
+                stock_code=stock_code,
+                until=datetime.now() + timedelta(hours=hours),
+                reason=reason
+            ))
+
+    @staticmethod
+    def _order_id_of(pending: IBOrderSubmissionPending):
+        """从回执超时异常里取出订单号，仅用于日志追踪。"""
+        order = getattr(getattr(pending, "trade", None), "order", None)
+        return getattr(order, "orderId", None)
 
     def _get_next_stock(self, account_id: str, cli_id: str) -> Dict:
         """按状态索引 + 冷却筛选，每次只取一只。"""
@@ -194,48 +215,55 @@ class SZDTUSTrader:
 
             # 买入条件
             if score <= stock['when_buy']:
-                if position_ratio < stock['max_position']:
-                    score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
-                    score_factor = 3 ** (score_factor ** stock['buy_factor'])
-                    buy_amount = min(available_cash, stock['buy_amount'] * score_factor)
-                    buy_quantity = int(buy_amount / price)
-                    if buy_quantity >= 1:
-                        trade = await ib_service.place_market_order(stock['code'], 'BUY', buy_quantity)
-                        order_id = trade.order.orderId
-                        self._log(account_id, 'INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
-                        logger.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
-                    else:
-                        self._log(account_id, 'INFO', f"{name} 可用现金 {available_cash:.2f} 不足（不融资），跳过买入")
-                with get_db_ctx() as db:
-                    db.add(StockCooldown(
-                        account_id=account_id,
-                        cli_id=cli_id, 
-                        stock_code=stock['code'], 
-                        until=datetime.now() + timedelta(hours=12), 
-                        reason='决策后冷却12h'
-                    ))
+                try:
+                    if position_ratio < stock['max_position']:
+                        score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
+                        score_factor = 3 ** (score_factor ** stock['buy_factor'])
+                        buy_amount = min(available_cash, stock['buy_amount'] * score_factor)
+                        buy_quantity = int(buy_amount / price)
+                        if buy_quantity >= 1:
+                            try:
+                                trade = await ib_service.place_market_order(stock['code'], 'BUY', buy_quantity)
+                            except IBOrderSubmissionPending as pending:
+                                # 订单已经发给网关，只是 IBKR 的 orderStatus 回执在等待窗口内一直是
+                                # PendingSubmit。实测这类单往往随后就成交，若当成失败向上抛，
+                                # 后面的冷却写入会被跳过，60 秒后同一只标的会被重复买入。
+                                # 因此按「已提交」记录并照常冷却，不打断整轮。
+                                order_id = self._order_id_of(pending)
+                                self._log(account_id, 'WARNING', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) 已提交但 IBKR 回执超时({pending.status}) oid={order_id}，按已提交处理")
+                                logger.warning(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id} submitted, ack timeout ({pending.status})")
+                            else:
+                                order_id = trade.order.orderId
+                                self._log(account_id, 'INFO', f"{name} BUY x{buy_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
+                                logger.info(f"{name} BUY x{buy_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
+                        else:
+                            self._log(account_id, 'INFO', f"{name} 可用现金 {available_cash:.2f} 不足（不融资），跳过买入")
+                finally:
+                    self._set_decision_cooldown(account_id, cli_id, stock['code'], 12, '决策后冷却12h')
                 return
 
             # 卖出条件
             if score >= stock['when_sell'] and position_qty > 0:
-                score_factor = min(1, max(0, (score - stock['when_sell']) / (100 - stock['when_sell'])))
-                score_factor = 3 ** (score_factor ** stock['sell_factor'])
-                sell_amount = stock['sell_amount'] * score_factor
-                sell_quantity = int(sell_amount / price)
-                sell_quantity = max(min(sell_quantity, int(position_qty)), 1)
-                if sell_quantity > 0:
-                    trade = await ib_service.place_market_order(stock['code'], 'SELL', sell_quantity)
-                    order_id = trade.order.orderId
-                    self._log(account_id, 'INFO', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
-                    logger.info(f"{name} SELL x{sell_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
-                with get_db_ctx() as db:
-                    db.add(StockCooldown(
-                        account_id=account_id,
-                        cli_id=cli_id, 
-                        stock_code=stock['code'], 
-                        until=datetime.now() + timedelta(hours=12), 
-                        reason='决策后冷却1h'
-                    ))
+                try:
+                    score_factor = min(1, max(0, (score - stock['when_sell']) / (100 - stock['when_sell'])))
+                    score_factor = 3 ** (score_factor ** stock['sell_factor'])
+                    sell_amount = stock['sell_amount'] * score_factor
+                    sell_quantity = int(sell_amount / price)
+                    sell_quantity = max(min(sell_quantity, int(position_qty)), 1)
+                    if sell_quantity > 0:
+                        try:
+                            trade = await ib_service.place_market_order(stock['code'], 'SELL', sell_quantity)
+                        except IBOrderSubmissionPending as pending:
+                            # 同买入：回执超时不等于没卖掉，重复卖会打穿持仓，按已提交处理并冷却。
+                            order_id = self._order_id_of(pending)
+                            self._log(account_id, 'WARNING', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) 已提交但 IBKR 回执超时({pending.status}) oid={order_id}，按已提交处理")
+                            logger.warning(f"{name} SELL x{sell_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id} submitted, ack timeout ({pending.status})")
+                        else:
+                            order_id = trade.order.orderId
+                            self._log(account_id, 'INFO', f"{name} SELL x{sell_quantity} @{price:.2f} (系数{score_factor:.2f}) oid={order_id}")
+                            logger.info(f"{name} SELL x{sell_quantity} @{price:.2f} factor={score_factor:.2f} oid={order_id}")
+                finally:
+                    self._set_decision_cooldown(account_id, cli_id, stock['code'], 12, '决策后冷却1h')
                 return
 
             # 中性区间：设置距离相关冷却
