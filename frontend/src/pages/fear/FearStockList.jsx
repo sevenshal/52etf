@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch } from 'antd';
+import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
@@ -213,7 +213,11 @@ const FearStockList = () => {
     try {
       const response = await request.get(`/api/quant/etf/emotion/history/${record.code}`);
       const rows = response.data?.data || [];
-      setHistoryData(rows.filter(item => item.date && item.score != null && item.price != null));
+      setHistoryData(rows.filter((item) => (
+        item.date
+        && Number.isFinite(Number(item.score))
+        && Number.isFinite(Number(item.price))
+      )));
     } catch (error) {
       const errorMessage = error.response?.detail || error.message || '获取历史曲线失败';
       message.error(errorMessage);
@@ -970,11 +974,17 @@ const FearStockList = () => {
         width={880}
         destroyOnClose
       >
-        <ReactECharts
-          option={historyChartOption}
-          loading={historyLoading}
-          style={{ height: 460 }}
-        />
+        {historyLoading ? <div style={{ height: 460, display: 'grid', placeItems: 'center' }}><Spin /></div>
+          : historyData.length > 0 ? <>
+            <div style={{ color: '#8c8c8c', marginBottom: 8 }}>共 {historyData.length} 个交易日</div>
+            <ReactECharts
+              key={`${historyRecord?.code}-${historyData.length}`}
+              option={historyChartOption}
+              notMerge
+              lazyUpdate={false}
+              style={{ height: 430 }}
+            />
+          </> : <Empty description="该标的暂无可用的贪恐与价格历史数据" style={{ padding: '150px 0' }} />}
       </Modal>
 
       <FactorPreviewModal
