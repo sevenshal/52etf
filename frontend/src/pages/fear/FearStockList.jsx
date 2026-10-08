@@ -24,6 +24,7 @@ const FearStockList = () => {
   const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
   const [historyRecord, setHistoryRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
+  const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
   const [historyLoading, setHistoryLoading] = useState(false);
 
   const tabItems = [
@@ -209,15 +210,46 @@ const FearStockList = () => {
   const handleShowHistory = async (record) => {
     setHistoryRecord(record);
     setHistoryData([]);
+    setHistoryVolumeByDate({});
     setHistoryLoading(true);
     try {
       const response = await request.get(`/api/quant/etf/emotion/history/${record.code}`);
       const rows = response.data?.data || [];
-      setHistoryData(rows.filter((item) => (
+      const validRows = rows.filter((item) => (
         item.date
         && Number.isFinite(Number(item.score))
         && Number.isFinite(Number(item.price))
-      )));
+      ));
+      setHistoryData(validRows);
+
+      if (validRows.length > 0) {
+        const [market, ticker] = String(record.code || '').split('.');
+        const startDate = validRows[0].date;
+        const endDate = validRows[validRows.length - 1].date;
+        let klineUrl = null;
+        if (market === 'SH' || market === 'SZ') {
+          klineUrl = `/api/stock/a-stock/klines/${ticker}.${market}`;
+        } else if (market === 'US' || market === 'HK') {
+          klineUrl = `/api/stock/klines/${ticker}.${market}`;
+        }
+
+        if (klineUrl) {
+          try {
+            const klineResponse = await request.get(klineUrl, {
+              params: { start_date: startDate, end_date: endDate, period: 'd' },
+            });
+            setHistoryVolumeByDate(Object.fromEntries(
+              (klineResponse.data || []).map((item) => [
+                String(item.timestamp || '').slice(0, 10),
+                Number(item.volume),
+              ]).filter(([date, volume]) => date && Number.isFinite(volume))
+            ));
+          } catch (error) {
+            // 不让成交量数据源失败影响贪恐和价格曲线。
+            setHistoryVolumeByDate({});
+          }
+        }
+      }
     } catch (error) {
       const errorMessage = error.response?.detail || error.message || '获取历史曲线失败';
       message.error(errorMessage);
@@ -229,19 +261,22 @@ const FearStockList = () => {
   const historyChartOption = {
     tooltip: { trigger: 'axis' },
     legend: { data: ['贪恐指数', '价格'], top: 4 },
-    grid: { left: 52, right: 58, top: 42, bottom: 58 },
-    xAxis: {
-      type: 'category',
-      data: historyData.map(item => item.date),
-      axisLabel: { hideOverlap: true },
-    },
+    grid: [
+      { left: 52, right: 58, top: 42, height: '46%' },
+      { left: 52, right: 58, top: '62%', height: '19%' },
+    ],
+    xAxis: [
+      { type: 'category', data: historyData.map(item => item.date), axisLabel: { show: false } },
+      { type: 'category', gridIndex: 1, data: historyData.map(item => item.date), axisLabel: { hideOverlap: true } },
+    ],
     yAxis: [
       { type: 'value', name: '贪恐', min: -100, max: 100 },
       { type: 'value', name: '价格', scale: true },
+      { type: 'value', name: '成交量', gridIndex: 1, scale: true, splitNumber: 3 },
     ],
     dataZoom: [
-      { type: 'inside', start: 65, end: 100 },
-      { type: 'slider', start: 65, end: 100 },
+      { type: 'inside', xAxisIndex: [0, 1], start: 65, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1], start: 65, end: 100 },
     ],
     series: [
       {
@@ -266,6 +301,14 @@ const FearStockList = () => {
         smooth: true,
         showSymbol: false,
         lineStyle: { color: '#1677ff', width: 2 },
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 2,
+        data: historyData.map(item => historyVolumeByDate[item.date] ?? null),
+        itemStyle: { color: '#91caff' },
       },
     ],
   };
