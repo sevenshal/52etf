@@ -665,6 +665,8 @@ class SzdtTradeStock(Base):
     sell_amount = Column(Float, nullable=False)
     buy_factor = Column(Float, nullable=False, default=1)
     sell_factor = Column(Float, nullable=False, default=1)
+    # 守猪逮兔列表提供候选标的；本地表仅保存交易配置和启用状态。
+    enabled = Column(Boolean, nullable=False, default=True)
     lever = Column(Integer, nullable=False)
     emo_area = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
@@ -2216,6 +2218,10 @@ def ensure_table_columns():
     if skip_init_writes("主库补列 ensure_table_columns"):
         return
     table_columns = {
+        "szdt_trade_stocks": {
+            # 存量已配置标的保持原有自动交易行为。
+            "enabled": "ALTER TABLE szdt_trade_stocks ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1",
+        },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
             "external_trading_account_id": "ALTER TABLE snowball_copy_configs ADD COLUMN external_trading_account_id INTEGER",

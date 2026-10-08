@@ -23,6 +23,7 @@ class StockModel(BaseModel):
     sell_amount: float = Field(..., gt=0, description="卖出金额必须大于0")
     buy_factor: float = Field(..., ge=0, le=10, description="买入系数0~10")
     sell_factor: float = Field(..., ge=0, le=10, description="卖出系数0~10")
+    enabled: bool = True
     lever: int = Field(..., ge=1, le=4)
     emo_area: str = Field(..., pattern="^(a|us|coin|other)$")
 

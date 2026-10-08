@@ -85,7 +85,8 @@ class SZDTUSTrader:
 
             stocks = db.query(SzdtTradeStock).filter(
                 SzdtTradeStock.account_id == account_id,
-                SzdtTradeStock.type.in_([1, 2, 7])
+                SzdtTradeStock.type.in_([1, 2, 7]),
+                SzdtTradeStock.enabled == True,
             ).all()
             if not stocks:
                 db.commit()

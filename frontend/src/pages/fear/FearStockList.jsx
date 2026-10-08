@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs } from 'antd';
-import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined } from '@ant-design/icons';
+import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch } from 'antd';
+import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
 import { SZDTConfigForm } from '../SZDTAutoTrading';
+
+const normalizeCode = (code) => String(code || '').replace('.', '').toUpperCase();
 
 const FearStockList = () => {
   const navigate = useNavigate();
@@ -20,6 +22,9 @@ const FearStockList = () => {
   const [previewAmount, setPreviewAmount] = useState(0);
   const [activeType, setActiveType] = useState(3);
   const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
+  const [historyRecord, setHistoryRecord] = useState(null);
+  const [historyData, setHistoryData] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -40,7 +45,7 @@ const FearStockList = () => {
         request.get(`/api/quant/etf/emotion/${activeType}`)
       ]);
 
-      // 处理ETF情绪数据作为候选股票列表
+      // 守猪逮兔列表是标的唯一来源；本地表仅覆盖交易配置。
       const formattedCandidates = emoResponse.data.data.map(item => ({
         code: item.code,
         name: item.name,
@@ -51,15 +56,23 @@ const FearStockList = () => {
       }));
       setCandidates(formattedCandidates);
 
-      // 组合数据
-      const stocksWithEmo = stocksResponse.data.map(stock => {
-        const emoData = emoResponse.data.data.find(emo => emo.code === stock.code);
+      const configuredStocks = new Map(
+        stocksResponse.data.map(stock => [normalizeCode(stock.code), stock])
+      );
+      const stocksWithEmo = emoResponse.data.data.map(emoData => {
+        const stock = configuredStocks.get(normalizeCode(emoData.code));
         return {
-          ...stock,
-          etf_scale: emoData?.scale || -1,
-          emo_name: emoData?.name || '-',
-          emo_score: emoData?.emotion?.score || '-',
-          emo_price: emoData?.emotion?.price || '-'
+          ...(stock || {}),
+          ...emoData,
+          // 后续保存统一使用守猪逮兔当前返回的代码格式。
+          code: emoData.code,
+          name: emoData.name,
+          isConfigured: Boolean(stock),
+          enabled: Boolean(stock?.enabled),
+          etf_scale: emoData.scale || -1,
+          emo_name: emoData.name || '-',
+          emo_score: emoData.emotion?.score ?? '-',
+          emo_price: emoData.emotion?.price ?? '-'
         };
       }).sort((a, b) => b.etf_scale - a.etf_scale);
 
@@ -81,12 +94,6 @@ const FearStockList = () => {
     }
     fetchStocks();
   }, [fetchStocks, navigate]);
-
-  // 过滤已添加的股票
-  const getAvailableCandidates = () => {
-    const existingCodes = new Set(data.map(item => item.code));
-    return candidates.filter(item => !existingCodes.has(item.code));
-  };
 
   // 处理编辑
   const handleEdit = (record) => {
@@ -160,6 +167,103 @@ const FearStockList = () => {
     });
     setEditingRecord(null);
     setIsModalVisible(true);
+  };
+
+  const handleAddForRecord = (record) => {
+    handleAdd();
+    form.setFieldsValue({
+      code: record.code,
+      name: record.emo_name || record.name,
+      lever: record.lever || 1,
+      emo_area: record.emo_area || 'a',
+      enabled: true,
+    });
+  };
+
+  const handleEnabledChange = async (record, enabled) => {
+    if (!record.isConfigured) return;
+    try {
+      await request.put(`/api/quant/stocks/${record.id}`, {
+        code: record.code,
+        name: record.name,
+        type: Number(activeType),
+        when_buy: record.when_buy,
+        when_sell: record.when_sell,
+        max_position: record.max_position,
+        buy_amount: record.buy_amount,
+        sell_amount: record.sell_amount,
+        buy_factor: record.buy_factor,
+        sell_factor: record.sell_factor,
+        lever: record.lever,
+        emo_area: record.emo_area,
+        enabled,
+      });
+      message.success(enabled ? '已启用' : '已停用');
+      fetchStocks();
+    } catch (error) {
+      const errorMessage = error.response?.detail || error.message || '更新启用状态失败';
+      message.error(errorMessage);
+    }
+  };
+
+  const handleShowHistory = async (record) => {
+    setHistoryRecord(record);
+    setHistoryData([]);
+    setHistoryLoading(true);
+    try {
+      const response = await request.get(`/api/quant/etf/emotion/history/${record.code}`);
+      const rows = response.data?.data || [];
+      setHistoryData(rows.filter(item => item.date && item.score != null && item.price != null));
+    } catch (error) {
+      const errorMessage = error.response?.detail || error.message || '获取历史曲线失败';
+      message.error(errorMessage);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const historyChartOption = {
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['贪恐指数', '价格'], top: 4 },
+    grid: { left: 52, right: 58, top: 42, bottom: 58 },
+    xAxis: {
+      type: 'category',
+      data: historyData.map(item => item.date),
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: [
+      { type: 'value', name: '贪恐', min: -100, max: 100 },
+      { type: 'value', name: '价格', scale: true },
+    ],
+    dataZoom: [
+      { type: 'inside', start: 65, end: 100 },
+      { type: 'slider', start: 65, end: 100 },
+    ],
+    series: [
+      {
+        name: '贪恐指数',
+        type: 'line',
+        data: historyData.map(item => Number(item.score)),
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { color: '#fa8c16', width: 2 },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          data: [{ yAxis: -60 }, { yAxis: 60 }],
+          lineStyle: { type: 'dashed', color: '#bfbfbf' },
+        },
+      },
+      {
+        name: '价格',
+        type: 'line',
+        yAxisIndex: 1,
+        data: historyData.map(item => Number(item.price)),
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { color: '#1677ff', width: 2 },
+      },
+    ],
   };
 
   // 预览按钮点击
@@ -246,6 +350,22 @@ const FearStockList = () => {
       sorter: (a, b) => a.when_sell - b.when_sell
     },
     {
+      title: '启用',
+      dataIndex: 'enabled',
+      key: 'enabled',
+      width: 70,
+      render: (_, record) => (
+        <Tooltip title={record.isConfigured ? '控制该标的是否参与自动交易' : '请先添加并保存交易参数'}>
+          <Switch
+            size="small"
+            checked={Boolean(record.enabled)}
+            disabled={!record.isConfigured}
+            onChange={(enabled) => handleEnabledChange(record, enabled)}
+          />
+        </Tooltip>
+      ),
+    },
+    {
       title: (
         <Tooltip
           title={<span>3^((0~1)^<span style={{ textDecoration: 'underline dashed', color: 'darkorange' }}>x</span>)</span>}
@@ -310,24 +430,35 @@ const FearStockList = () => {
     {
       title: '操作',
       key: 'action',
-      width: 100,
+      width: 150,
       render: (_, record) => (
         <Space size="small">
-          <Button
-            type="text"
-            icon={<EditOutlined />}
-            onClick={() => handleEdit(record)}
-          />
-          <Popconfirm
-            title="确定删除吗？"
-            onConfirm={() => handleDelete(record.id)}
-          >
+          <Tooltip title="查看贪恐与价格历史曲线">
             <Button
               type="text"
-              danger
-              icon={<DeleteOutlined />}
+              icon={<LineChartOutlined />}
+              onClick={() => handleShowHistory(record)}
             />
-          </Popconfirm>
+          </Tooltip>
+          {record.isConfigured ? <>
+            <Button
+              type="text"
+              icon={<EditOutlined />}
+              onClick={() => handleEdit(record)}
+            />
+            <Popconfirm
+              title="确定删除该标的的交易配置吗？"
+              onConfirm={() => handleDelete(record.id)}
+            >
+              <Button type="text" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </> : <Button
+            type="link"
+            icon={<PlusOutlined />}
+            onClick={() => handleAddForRecord(record)}
+          >
+            添加
+          </Button>}
         </Space>
       ),
     },
@@ -553,13 +684,6 @@ const FearStockList = () => {
           >
             策略配置
           </Button>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={handleAdd}
-          >
-            添加
-          </Button>
         </Space>
       </Layout.Header>
 
@@ -575,7 +699,7 @@ const FearStockList = () => {
         loading={loading}
         columns={columns}
         dataSource={data}
-        rowKey="id"
+        rowKey="code"
         scroll={{ x: 'max-content' }}
         size="small"
         pagination={false}
@@ -619,19 +743,7 @@ const FearStockList = () => {
             label="股票"
             rules={[{ required: true, message: '请选择股票' }]}
           >
-            <Select
-              showSearch
-              placeholder="请选择股票"
-              optionFilterProp="children"
-              disabled={!!editingRecord}
-              options={getAvailableCandidates().map(item => ({
-                value: item.code,
-                label: `${item.code} ${item.name}`
-              }))}
-              filterOption={(input, option) =>
-                (option?.label ?? '').toLowerCase().includes(input.toLowerCase())
-              }
-            />
+            <Input disabled />
           </Form.Item>
           <Form.Item
             name="name"
@@ -834,6 +946,9 @@ const FearStockList = () => {
           >
             <Input />
           </Form.Item>
+          <Form.Item name="enabled" hidden initialValue>
+            <Input />
+          </Form.Item>
           <Form.Item>
             <Space>
               <Button type="primary" htmlType="submit">
@@ -845,6 +960,21 @@ const FearStockList = () => {
             </Space>
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={historyRecord ? `${historyRecord.emo_name || historyRecord.name}（${historyRecord.code}）历史曲线` : '历史曲线'}
+        open={Boolean(historyRecord)}
+        onCancel={() => setHistoryRecord(null)}
+        footer={null}
+        width={880}
+        destroyOnClose
+      >
+        <ReactECharts
+          option={historyChartOption}
+          loading={historyLoading}
+          style={{ height: 460 }}
+        />
       </Modal>
 
       <FactorPreviewModal
