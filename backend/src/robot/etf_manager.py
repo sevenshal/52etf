@@ -1,7 +1,7 @@
 from datetime import datetime, date, timedelta
 from typing import Dict, Optional, List
 from ..core.database import ETFHolding as DBETFHolding
-from ..core.database import ETFAnalysis, StockEVC, Session
+from ..core.database import ETFAnalysis, StockEVC, USStockCorporateAction, Session
 from ..core.models.etf import ETFHolding, ETFHoldingsData
 from ..core.static_info import get_static_info_snapshot, get_static_info_snapshot_map
 from ..core.utils import normalize_us_equity_symbol
@@ -12,6 +12,10 @@ from .etf.spdr import SPDRDataFetcher
 import logging
 from ..core.services.quote import QuoteService, QuoteProvider
 from ..core.services.szdt import SZDTService
+from ..core.services.us_stock_corporate_actions import (
+    adjust_or_reject_evc_values,
+    evc_values_need_review,
+)
 import asyncio
 import traceback
 # 添加三倍做多ETF映射关系
@@ -274,6 +278,12 @@ class ETFManager:
             
             # 批量从数据库快照读取所有持仓股票的 static_info
             equity_symbols = [holding.symbol for holding in holdings_data.holdings if holding.asset_class == 'Equity' and holding.symbol]
+            corporate_action_symbols = {
+                symbol
+                for (symbol,) in self.db_session.query(USStockCorporateAction.symbol).filter(
+                    USStockCorporateAction.symbol.in_(equity_symbols)
+                ).distinct().all()
+            } if equity_symbols else set()
             static_info_map = get_static_info_snapshot_map(self.db_session, equity_symbols) if equity_symbols else {}
             holding_quotes = self.quote_service.get_quote_batch(equity_symbols) if equity_symbols else []
             quote_price_map = {}
@@ -336,6 +346,50 @@ class ETFManager:
                             fair_value_hi = evc_info.fair_value_hi
                             forward_next_fy_lo = evc_info.forward_next_fy_lo
                             forward_next_fy_hi = evc_info.forward_next_fy_hi
+                            if (
+                                holding.symbol in corporate_action_symbols
+                                or evc_values_need_review(price, fair_value_lo, fair_value_hi)
+                            ):
+                                adjustment = adjust_or_reject_evc_values(
+                                    self.db_session,
+                                    self.quote_service,
+                                    symbol=holding.symbol,
+                                    price=price,
+                                    valuation_date=evc_info.fair_value_date,
+                                    basis_date=date.today(),
+                                    values={
+                                        "fair_value_lo": fair_value_lo,
+                                        "fair_value_hi": fair_value_hi,
+                                        "forward_next_fy_lo": forward_next_fy_lo,
+                                        "forward_next_fy_hi": forward_next_fy_hi,
+                                    },
+                                )
+                                if adjustment.values is None:
+                                    self.logger.warning(
+                                        "隔离疑似拆合股口径异常的EVC估值: etf=%s symbol=%s price=%s fair_lo=%s fair_hi=%s fair_value_date=%s reason=%s",
+                                        etf_symbol,
+                                        holding.symbol,
+                                        price,
+                                        fair_value_lo,
+                                        fair_value_hi,
+                                        evc_info.fair_value_date,
+                                        adjustment.reason,
+                                    )
+                                    fair_value_lo = fair_value_hi = None
+                                    forward_next_fy_lo = forward_next_fy_hi = None
+                                else:
+                                    fair_value_lo = adjustment.values.get("fair_value_lo")
+                                    fair_value_hi = adjustment.values.get("fair_value_hi")
+                                    forward_next_fy_lo = adjustment.values.get("forward_next_fy_lo")
+                                    forward_next_fy_hi = adjustment.values.get("forward_next_fy_hi")
+                                    if adjustment.action_ratio != 1.0:
+                                        self.logger.warning(
+                                            "按拆合股比例修正EVC估值: etf=%s symbol=%s ratio=%s fair_value_date=%s",
+                                            etf_symbol,
+                                            holding.symbol,
+                                            adjustment.action_ratio,
+                                            evc_info.fair_value_date,
+                                        )
                             market_value = shares * price if price is not None else market_value
                             eps = (price / evc_info.pe_ratio) if (price is not None and evc_info.pe_ratio) else 0.0
                             eps_forword = (price / evc_info.forward_pe_ratio) if (price is not None and evc_info.forward_pe_ratio) else 0.0

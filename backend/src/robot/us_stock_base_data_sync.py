@@ -15,6 +15,10 @@ from ..core.analytics_database import USStockDaily
 from ..core.duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb
 from ..core.database import ETFHolding, Session, StockEVC, StockStaticInfoHistory, StockStaticInfoSnapshot
 from ..core.services.longport import LongPortKlineQuotaExceeded, LongPortService
+from ..core.services.us_stock_corporate_actions import (
+    detect_corporate_actions,
+    save_corporate_actions,
+)
 from ..core.static_info import STATIC_INFO_FIELDS
 from ..core.utils import normalize_us_equity_symbol
 
@@ -704,6 +708,19 @@ class USStockBaseDataSyncService:
                     }
         return None
 
+    @staticmethod
+    def _is_large_adjusted_price_change(change: Optional[Dict]) -> bool:
+        if not change:
+            return False
+        try:
+            old_value = float(change.get("old_value"))
+            new_value = float(change.get("new_value"))
+        except (TypeError, ValueError):
+            return False
+        if old_value <= 0 or new_value <= 0:
+            return False
+        return max(old_value / new_value, new_value / old_value) >= 1.4
+
     def _build_daily_rows(self, symbol: str, klines: List[Dict], start_date: date, end_date: date, now: datetime) -> List[Dict]:
         rows = []
         for kline in klines or []:
@@ -763,6 +780,8 @@ class USStockBaseDataSyncService:
         skipped_symbols = 0
         adjustment_refresh_symbols: List[str] = []
         adjustment_refresh_errors: List[Dict] = []
+        corporate_action_symbols: List[str] = []
+        corporate_action_count = 0
         errors: List[Dict] = []
         total = len(symbols)
 
@@ -788,6 +807,32 @@ class USStockBaseDataSyncService:
                 if start_date is None and latest_daily_dates.get(symbol):
                     price_change = self._find_adjusted_price_change(symbol, rows)
                     if price_change:
+                        if self._is_large_adjusted_price_change(price_change):
+                            try:
+                                raw_klines = self.longport.get_candlesticks_by_date(
+                                    symbol,
+                                    symbol_start,
+                                    end_date,
+                                    "d",
+                                    adjust_type="none",
+                                )
+                                actions = detect_corporate_actions(klines, raw_klines)
+                                if actions:
+                                    save_corporate_actions(symbol, actions)
+                                    corporate_action_symbols.append(symbol)
+                                    corporate_action_count += len(actions)
+                                    self.logger.warning(
+                                        "Detected US corporate actions for %s: %s",
+                                        symbol,
+                                        actions,
+                                    )
+                            except Exception as exc:
+                                # Corporate-action confirmation is a quality enhancement; it must not block daily bars.
+                                self.logger.warning(
+                                    "Confirm US corporate action failed for %s: %s",
+                                    symbol,
+                                    exc,
+                                )
                         full_refresh_start = daily_date_bounds[symbol][0]
                         self.logger.info(
                             "Detected adjusted US daily price change for %s on %s %s old=%s new=%s; full refresh from %s",
@@ -853,6 +898,8 @@ class USStockBaseDataSyncService:
             "daily_adjustment_refresh_symbols": adjustment_refresh_symbols,
             "daily_adjustment_refresh_count": len(adjustment_refresh_symbols),
             "daily_adjustment_refresh_errors": adjustment_refresh_errors,
+            "daily_corporate_action_symbols": corporate_action_symbols,
+            "daily_corporate_action_count": corporate_action_count,
             "daily_saved_rows": saved_rows,
             "daily_errors": errors,
         }

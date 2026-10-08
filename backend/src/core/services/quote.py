@@ -185,13 +185,36 @@ class QuoteService:
             return value
         return None
 
-    def _get_klines_by_date(self, symbol: str, start_date: date, end_date: date, period: Optional[str]) -> List[Dict]:
+    def _get_klines_by_date(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        period: Optional[str],
+        adjust_type: str = "forward",
+    ) -> List[Dict]:
         if not hasattr(self.provider, "get_candlesticks_by_date"):
             raise NotImplementedError("Provider does not support date range fetching")
-        data = self.provider.get_candlesticks_by_date(symbol, start_date, end_date, period)
+        if adjust_type == "forward":
+            data = self.provider.get_candlesticks_by_date(symbol, start_date, end_date, period)
+        else:
+            data = self.provider.get_candlesticks_by_date(
+                symbol,
+                start_date,
+                end_date,
+                period,
+                adjust_type=adjust_type,
+            )
         return [self._normalize_kline(k) for k in data or []]
 
-    def get_klines(self, symbol: str, start_date: date, end_date: date, period: Optional[str] = 'd') -> List[Dict]:
+    def get_klines(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        period: Optional[str] = 'd',
+        adjust_type: str = "forward",
+    ) -> List[Dict]:
         """获取K线数据
         
         Args:
@@ -208,7 +231,13 @@ class QuoteService:
             raise ValueError("get_klines only supports date range fetching: start_date and end_date are required")
         if parsed_start_date > parsed_end_date:
             return []
-        return self._get_klines_by_date(symbol, parsed_start_date, parsed_end_date, period)
+        return self._get_klines_by_date(
+            symbol,
+            parsed_start_date,
+            parsed_end_date,
+            period,
+            adjust_type=adjust_type,
+        )
     
     def subscribe(self, symbols: List[str], sub_types: List[str], is_first_push: bool = False) -> None:
         self.provider.subscribe(symbols, sub_types, is_first_push)

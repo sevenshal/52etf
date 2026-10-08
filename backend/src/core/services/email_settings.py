@@ -105,6 +105,12 @@ EMAIL_SCENARIOS = [
         "category": "报告",
         "description": "雪球年榜组合持仓任务执行失败。",
     },
+    {
+        "key": "fear_greed_turn_signal",
+        "name": "自算贪恐顶底信号",
+        "category": "提醒",
+        "description": "自算贪恐日更完成后，指数触发顶或底信号时发送提醒。",
+    },
 ]
 
 EMAIL_SCENARIO_BY_KEY = {item["key"]: item for item in EMAIL_SCENARIOS}

@@ -1,0 +1,300 @@
+{
+  "method": {
+    "start": "2023-03-22",
+    "requested_end": "2026-10-07",
+    "effective_end": "2026-09-30",
+    "top_n": 10,
+    "selection": "latest index snapshot <= signal date; rank signal-date amount descending",
+    "execution": "production signal schedule; next-session BUY high / SELL low; 100-share lots",
+    "gross_costs": "none, isolates constituent-selection effect",
+    "net_costs": "commission 2.5bp min CNY5 + transfer 0.1bp; stock sell stamp 10bp before 2023-08-28 else 5bp",
+    "direct_etfs": [
+      "159509.SZ"
+    ],
+    "etf_to_index": {
+      "510880.SH": "000015.SH",
+      "512480.SH": "H30184.CSI",
+      "516510.SH": "930851.CSI"
+    }
+  },
+  "baseline": {
+    "total_return": 375.7528954690099,
+    "annualized_return": 58.191571571193904,
+    "annualized_volatility": 22.79008346678006,
+    "max_drawdown": 17.38913107798735,
+    "max_drawdown_duration_days": 171,
+    "sharpe_ratio": 2.1301239006474457,
+    "sortino_ratio": 3.5819909960234533,
+    "calmar_ratio": 3.3464335457714602,
+    "win_rate": 57.702349869451695,
+    "profit_loss_ratio": 1.3627932861828627,
+    "ending_value": 4757528.954690099,
+    "trade_count": 27,
+    "buy_count": 14,
+    "sell_count": 13,
+    "idle_days": 481
+  },
+  "component_top10_gross": {
+    "total_return": 286.2319442760944,
+    "annualized_return": 48.78602057824119,
+    "annualized_volatility": 23.282411391571134,
+    "max_drawdown": 17.38834960982785,
+    "max_drawdown_duration_days": 171,
+    "sharpe_ratio": 1.8258476699456845,
+    "sortino_ratio": 3.0235041283083794,
+    "calmar_ratio": 2.8056728598709255,
+    "win_rate": 55.95854922279793,
+    "profit_loss_ratio": 1.3282583744341647,
+    "ending_value": 3862319.4427609444,
+    "total_fees": 0.0,
+    "stock_trade_count": 189,
+    "missing_execution_price_count": 0,
+    "missing_execution_prices": []
+  },
+  "component_top10_net": {
+    "total_return": 282.66379058885514,
+    "annualized_return": 48.3805133818348,
+    "annualized_volatility": 23.33303023114028,
+    "max_drawdown": 17.431740359676205,
+    "max_drawdown_duration_days": 171,
+    "sharpe_ratio": 1.8106597434141458,
+    "sortino_ratio": 2.9956356368318016,
+    "calmar_ratio": 2.775426456772528,
+    "win_rate": 55.95854922279793,
+    "profit_loss_ratio": 1.3217211113119198,
+    "ending_value": 3826637.9058885514,
+    "total_fees": 20575.601692204473,
+    "stock_trade_count": 189,
+    "missing_execution_price_count": 0,
+    "missing_execution_prices": []
+  },
+  "completed_cycle_comparison": [
+    {
+      "buy_date": "2023-06-27",
+      "sell_date": "2023-08-01",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 6.027403756622274,
+      "component_return_pct": 3.1898913052038624,
+      "component_minus_etf_pct_points": -2.8375124514184114
+    },
+    {
+      "buy_date": "2023-12-22",
+      "sell_date": "2024-01-04",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 1.4869834152765993,
+      "component_return_pct": 1.3351154584295033,
+      "component_minus_etf_pct_points": -0.15186795684709598
+    },
+    {
+      "buy_date": "2024-01-23",
+      "sell_date": "2024-01-29",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 6.153294549443822,
+      "component_return_pct": 4.39631480086633,
+      "component_minus_etf_pct_points": -1.7569797485774918
+    },
+    {
+      "buy_date": "2024-02-05",
+      "sell_date": "2024-03-26",
+      "etf_symbol": "516510.SH",
+      "holding_count": 10,
+      "etf_return_pct": 27.566803517026006,
+      "component_return_pct": 25.57880552330363,
+      "component_minus_etf_pct_points": -1.987997993722379
+    },
+    {
+      "buy_date": "2024-04-22",
+      "sell_date": "2024-05-24",
+      "etf_symbol": "159509.SZ",
+      "holding_count": 1,
+      "etf_return_pct": 13.102893336047172,
+      "component_return_pct": 13.102893336047172,
+      "component_minus_etf_pct_points": 0.0
+    },
+    {
+      "buy_date": "2024-08-02",
+      "sell_date": "2024-09-13",
+      "etf_symbol": "159509.SZ",
+      "holding_count": 1,
+      "etf_return_pct": 0.521513429501197,
+      "component_return_pct": 0.521513429501197,
+      "component_minus_etf_pct_points": 0.0
+    },
+    {
+      "buy_date": "2024-09-13",
+      "sell_date": "2024-10-08",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 15.299034342781038,
+      "component_return_pct": 9.283025501027375,
+      "component_minus_etf_pct_points": -6.016008841753662
+    },
+    {
+      "buy_date": "2025-03-11",
+      "sell_date": "2025-05-21",
+      "etf_symbol": "159509.SZ",
+      "holding_count": 1,
+      "etf_return_pct": 8.99854509303255,
+      "component_return_pct": 8.99854509303255,
+      "component_minus_etf_pct_points": 0.0
+    },
+    {
+      "buy_date": "2025-09-19",
+      "sell_date": "2025-11-11",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 6.840069599195675,
+      "component_return_pct": 7.770823288633921,
+      "component_minus_etf_pct_points": 0.9307536894382462
+    },
+    {
+      "buy_date": "2025-11-21",
+      "sell_date": "2025-12-09",
+      "etf_symbol": "159509.SZ",
+      "holding_count": 1,
+      "etf_return_pct": 6.941838837984515,
+      "component_return_pct": 6.941838837984515,
+      "component_minus_etf_pct_points": 0.0
+    },
+    {
+      "buy_date": "2025-12-09",
+      "sell_date": "2026-03-03",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 7.679587331982751,
+      "component_return_pct": -6.802605278906581,
+      "component_minus_etf_pct_points": -14.482192610889333
+    },
+    {
+      "buy_date": "2026-03-24",
+      "sell_date": "2026-05-18",
+      "etf_symbol": "512480.SH",
+      "holding_count": 10,
+      "etf_return_pct": 39.54609003008458,
+      "component_return_pct": 46.06903311402186,
+      "component_minus_etf_pct_points": 6.522943083937283
+    },
+    {
+      "buy_date": "2026-06-22",
+      "sell_date": "2026-07-30",
+      "etf_symbol": "510880.SH",
+      "holding_count": 10,
+      "etf_return_pct": 4.677896421247518,
+      "component_return_pct": 7.003139312436124,
+      "component_minus_etf_pct_points": 2.325242891188606
+    }
+  ],
+  "quality": [
+    {
+      "trade_index": 0,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2023-06-26",
+      "execution_date": "2023-06-27",
+      "snapshot_date": "2023-05-31",
+      "snapshot_lag_days": 26,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 2,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2023-12-21",
+      "execution_date": "2023-12-22",
+      "snapshot_date": "2023-11-30",
+      "snapshot_lag_days": 21,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 4,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2024-01-22",
+      "execution_date": "2024-01-23",
+      "snapshot_date": "2023-12-29",
+      "snapshot_lag_days": 24,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 6,
+      "etf_symbol": "516510.SH",
+      "index_code": "930851.CSI",
+      "signal_date": "2024-02-02",
+      "execution_date": "2024-02-05",
+      "snapshot_date": "2024-01-31",
+      "snapshot_lag_days": 2,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 12,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2024-09-12",
+      "execution_date": "2024-09-13",
+      "snapshot_date": "2024-08-30",
+      "snapshot_lag_days": 13,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 16,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2025-09-18",
+      "execution_date": "2025-09-19",
+      "snapshot_date": "2025-08-29",
+      "snapshot_lag_days": 20,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 20,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2025-12-08",
+      "execution_date": "2025-12-09",
+      "snapshot_date": "2025-11-28",
+      "snapshot_lag_days": 10,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 22,
+      "etf_symbol": "512480.SH",
+      "index_code": "H30184.CSI",
+      "signal_date": "2026-03-23",
+      "execution_date": "2026-03-24",
+      "snapshot_date": "2026-02-27",
+      "snapshot_lag_days": 24,
+      "constituent_count": 86,
+      "rankable_count": 86,
+      "selected_count": 10
+    },
+    {
+      "trade_index": 24,
+      "etf_symbol": "510880.SH",
+      "index_code": "000015.SH",
+      "signal_date": "2026-06-18",
+      "execution_date": "2026-06-22",
+      "snapshot_date": "2026-05-29",
+      "snapshot_lag_days": 20,
+      "constituent_count": 50,
+      "rankable_count": 50,
+      "selected_count": 10
+    }
+  ]
+}

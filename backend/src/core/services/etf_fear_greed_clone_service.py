@@ -33,11 +33,12 @@ from ..database import ETFHolding as DBETFHolding
 from ..database import (
     ETFFearGreedCloneHistory,
     ETFFearGreedCloneHolding,
+    ETFFearGreedSignalNotification,
     ETFPutCallRatio,
     Session,
 )
 from ..models.etf import ETFHolding
-from ..utils import normalize_us_equity_symbol
+from ..utils import normalize_us_equity_symbol, send_configured_email
 from ...robot.etf.ishares import ISharesETFFetcher
 from ...robot.etf.qqq import QQQDataFetcher
 from ...robot.etf.spdr import SPDRDataFetcher
@@ -142,6 +143,14 @@ SIGNAL_KINDS = (
     "volume_bottom",
     "volume_top",
 )
+
+FEAR_GREED_SIGNAL_EMAIL_SCENARIO = "fear_greed_turn_signal"
+ETF_FEAR_GREED_SIGNAL_NAMES = {
+    "SOXX.US": "SOXX 半导体",
+    "SPY.US": "SPY 标普500",
+    "QQQ.US": "QQQ 纳指100",
+    "DIA.US": "DIA 道琼斯",
+}
 
 
 def _finite(value: Any) -> bool:
@@ -306,6 +315,131 @@ def compute_turn_signals(
         if signals:
             result[date_str] = signals
     return result
+
+
+def _fear_greed_signal_display_name(symbol: str) -> str:
+    """返回邮件中展示的指数名称；A 股指数优先复用既有目标配置。"""
+    normalized = str(symbol or "").strip().upper()
+    target = A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL.get(normalized) or {}
+    return str(
+        target.get("label") or target.get("name")
+        or ETF_FEAR_GREED_SIGNAL_NAMES.get(normalized) or normalized
+    )
+
+
+def _reserve_fear_greed_signal_notification(
+    symbol: str,
+    signal_date: date,
+    signal_kind: str,
+) -> bool:
+    """登记待发送信号；已成功发送的同一信号不再重复通知。"""
+    db = Session()
+    try:
+        notification = db.get(
+            ETFFearGreedSignalNotification,
+            (symbol, signal_date, signal_kind),
+        )
+        if notification and notification.sent_at:
+            return False
+        if notification is None:
+            db.add(ETFFearGreedSignalNotification(
+                symbol=symbol,
+                signal_date=signal_date,
+                signal_kind=signal_kind,
+            ))
+            db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        Session.remove()
+
+
+def _mark_fear_greed_signal_notifications_sent(
+    notifications: List[Tuple[str, date, str]],
+) -> None:
+    """仅在邮件实际投递成功后标记，失败时下次日更可重试。"""
+    if not notifications:
+        return
+    db = Session()
+    try:
+        sent_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+        for symbol, signal_date, signal_kind in notifications:
+            notification = db.get(
+                ETFFearGreedSignalNotification,
+                (symbol, signal_date, signal_kind),
+            )
+            if notification:
+                notification.sent_at = sent_at
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        Session.remove()
+
+
+def notify_latest_turn_signals(symbols: List[str]) -> int:
+    """对本次日更的指数检查最新日的既有顶/底信号并邮件提醒。
+
+    直接复用 ``load_history_from_db``，所以信号参数、A 股成交量代理和冷却规则均与
+    贪恐历史曲线完全一致。邮件成功后才写入发送记录，按 ``指数 + 日期 + 信号类型``
+    去重；未配置收件人或投递失败时保留待发送状态供下一次日更重试。
+    """
+    calculator = ETFFearGreedCloneCalculator()
+    pending: List[Dict[str, Any]] = []
+    notification_keys: List[Tuple[str, date, str]] = []
+    for raw_symbol in dict.fromkeys(symbols or []):
+        symbol = calculator._normalize_etf_symbol(raw_symbol)
+        history = calculator.load_history_from_db(
+            symbol=symbol,
+            include_components=False,
+            include_latest_holdings=False,
+        )
+        latest = history.get("latest") or {}
+        date_text = latest.get("date")
+        if not date_text:
+            continue
+        signal_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+        for signal in latest.get("signals") or []:
+            signal_kind = str(signal.get("kind") or "").strip()
+            if signal_kind not in SIGNAL_KINDS:
+                continue
+            if not _reserve_fear_greed_signal_notification(
+                symbol, signal_date, signal_kind
+            ):
+                continue
+            pending.append({
+                "symbol": symbol,
+                "name": _fear_greed_signal_display_name(symbol),
+                "date": date_text,
+                "score": latest.get("score"),
+                "label": signal.get("label") or signal_kind,
+            })
+            notification_keys.append((symbol, signal_date, signal_kind))
+
+    if not pending:
+        return 0
+
+    lines = [
+        "自算贪恐日更已完成，以下指数触发顶/底信号：",
+        "",
+    ]
+    for item in pending:
+        score = "-" if item["score"] is None else f"{float(item['score']):.2f}"
+        lines.append(
+            f"- {item['name']}（{item['symbol']}）：{item['date']} {item['label']}，恐贪 {score}"
+        )
+    sent = send_configured_email(
+        FEAR_GREED_SIGNAL_EMAIL_SCENARIO,
+        f"[52etf] 自算贪恐顶底信号 {pending[0]['date']}",
+        "\n".join(lines),
+    )
+    if sent:
+        _mark_fear_greed_signal_notifications_sent(notification_keys)
+        return len(pending)
+    return 0
 
 
 def _load_proxy_etf_bars(

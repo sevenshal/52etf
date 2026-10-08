@@ -107,6 +107,19 @@ class StockEVC(Base):
     # 添加与标签的关系
     tags = relationship('StockTag', secondary=stock_tags, backref='stocks')
 
+
+class USStockCorporateAction(Base):
+    """从 LongPort 不复权/前复权日线差异推导出的美股拆股、合股事件。"""
+    __tablename__ = "us_stock_corporate_actions"
+
+    symbol = Column(String(32), primary_key=True)
+    effective_date = Column(Date, primary_key=True)
+    action_ratio = Column(Float, nullable=False)
+    action_type = Column(String(16), nullable=False)
+    source = Column(String(64), nullable=False)
+    confidence = Column(Float, nullable=False, default=1.0)
+    detected_at = Column(DateTime, nullable=False, default=datetime.now)
+
 class _StaticInfoColumnsMixin:
     __abstract__ = True
 
@@ -385,6 +398,17 @@ class ETFFearGreedCloneHistory(Base):
     warnings = Column(JSON)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+
+class ETFFearGreedSignalNotification(Base):
+    """已发送的自算贪恐顶/底信号邮件，用于防止日更重复提醒。"""
+    __tablename__ = "etf_fear_greed_signal_notifications"
+
+    symbol = Column(String(32), primary_key=True)
+    signal_date = Column(Date, primary_key=True)
+    signal_kind = Column(String(32), primary_key=True)
+    sent_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 class ETFFearGreedCloneHolding(Base):
     """ETF恐贪复刻指数使用的每日持仓快照"""
@@ -2140,6 +2164,7 @@ def ensure_performance_indexes():
         return
     index_sqls = [
         "CREATE INDEX IF NOT EXISTS idx_stock_evc_date_symbol ON stock_evc(date, symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_us_stock_corporate_actions_symbol_date ON us_stock_corporate_actions(symbol, effective_date)",
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_tag_date_symbol ON stock_tags(tag_id, date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_tags_date_symbol ON stock_tags(date, stock_symbol)",
         "CREATE INDEX IF NOT EXISTS idx_stock_favorites_account_symbol ON stock_favorites(account_id, symbol)",

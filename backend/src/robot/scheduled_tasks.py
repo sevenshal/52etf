@@ -443,6 +443,7 @@ def _run_etf_fear_greed_backfill(
     from ..core.services.etf_fear_greed_clone_service import (
         DEFAULT_ETF_FEAR_GREED_SYMBOLS,
         ETFFearGreedCloneCalculator,
+        notify_latest_turn_signals,
     )
 
     end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
@@ -475,6 +476,12 @@ def _run_etf_fear_greed_backfill(
             result.get("start_date"),
             result.get("end_date"),
         )
+    try:
+        notified = notify_latest_turn_signals(DEFAULT_ETF_FEAR_GREED_SYMBOLS)
+        if notified:
+            logger.info("ETF fear greed turn-signal email sent for %s signals", notified)
+    except Exception as exc:
+        logger.warning("ETF fear greed turn-signal email check failed: %s", exc)
 
 
 def _format_a_stock_base_data_sync_result(result: Dict) -> str:
@@ -784,6 +791,7 @@ def _run_a_stock_etf_fear_greed_backfill(
         A_STOCK_FEAR_GREED_TARGETS,
         AStockInnovation100FearGreedCloneCalculator,
     )
+    from ..core.services.etf_fear_greed_clone_service import notify_latest_turn_signals
 
     end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
     if start_date:
@@ -830,6 +838,12 @@ def _run_a_stock_etf_fear_greed_backfill(
             errors.append({"symbol": symbol, "error": str(exc)})
             logger.warning("%s fear greed backfill failed: %s", symbol, exc)
     saved = sum(int(item.get("saved") or 0) for item in results)
+    try:
+        notified = notify_latest_turn_signals([item["symbol"] for item in results])
+        if notified:
+            logger.info("A stock fear greed turn-signal email sent for %s signals", notified)
+    except Exception as exc:
+        logger.warning("A stock fear greed turn-signal email check failed: %s", exc)
     symbols = ",".join(str(item.get("symbol")) for item in results)
     return (
         "A stock index fear greed backfill "

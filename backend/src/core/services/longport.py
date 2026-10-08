@@ -541,7 +541,17 @@ class LongPortService(QuoteProvider, TradeService):
                     return value, False
         raise ValueError(f"Unsupported candlestick period: {period}")
 
-    def get_candlesticks(self, symbol: str, count: int, period = 'd') -> List[Dict]:
+    @staticmethod
+    def _resolve_adjust_type(adjust_type):
+        if adjust_type in (None, "forward", "forward_adjust"):
+            return AdjustType.ForwardAdjust
+        if adjust_type in ("none", "no_adjust", "raw"):
+            return AdjustType.NoAdjust
+        if adjust_type in (AdjustType.ForwardAdjust, AdjustType.NoAdjust):
+            return adjust_type
+        raise ValueError(f"Unsupported candlestick adjust type: {adjust_type}")
+
+    def get_candlesticks(self, symbol: str, count: int, period = 'd', adjust_type="forward") -> List[Dict]:
         """实现QuoteProvider接口"""
         if symbol in self.invalid_kline_symbols:
             return []
@@ -557,7 +567,7 @@ class LongPortService(QuoteProvider, TradeService):
                         symbol=symbol,
                         period=resolved_period,
                         count=request_count,
-                        adjust_type=AdjustType.ForwardAdjust
+                        adjust_type=self._resolve_adjust_type(adjust_type)
                     )
                     if resp:
                         return [{
@@ -595,7 +605,14 @@ class LongPortService(QuoteProvider, TradeService):
             logging.error(f"获取{symbol} K线数据失败: {str(e)}")
             return []
 
-    def get_candlesticks_by_date(self, symbol: str, start: datetime.date, end: datetime.date, period = 'd') -> List[Dict]:
+    def get_candlesticks_by_date(
+        self,
+        symbol: str,
+        start: datetime.date,
+        end: datetime.date,
+        period='d',
+        adjust_type="forward",
+    ) -> List[Dict]:
         """根据日期范围获取K线数据(自动分页, 从后向前获取)"""
         if symbol in self.invalid_kline_symbols:
             return []
@@ -614,7 +631,7 @@ class LongPortService(QuoteProvider, TradeService):
                         period=resolved_period,
                         start=start,
                         end=current_end,
-                        adjust_type=AdjustType.ForwardAdjust
+                        adjust_type=self._resolve_adjust_type(adjust_type)
                     )
                     rate_limit_retries = 0
                 except Exception as e:
