@@ -1592,7 +1592,12 @@ def load_a_stock_klines(
     normalized_symbol = normalize_a_stock_symbol(symbol)
     if not normalized_symbol or start_date > end_date:
         return []
-    def query_rows(table_name: str, volume_column: str, turnover_column: str):
+    def query_rows(
+        table_name: str,
+        volume_column: str,
+        turnover_column: str,
+        turnover_rate_expression: str = "turnover_rate",
+    ):
         return db.execute(
             text(
                 f"""
@@ -1604,7 +1609,7 @@ def load_a_stock_klines(
                 close,
                 {volume_column} AS volume,
                 {turnover_column} AS turnover,
-                turnover_rate
+                {turnover_rate_expression} AS turnover_rate
             FROM {table_name}
             WHERE ts_code = :symbol
               AND trade_date >= :start_date
@@ -1625,9 +1630,9 @@ def load_a_stock_klines(
     # 场内 ETF 日线单独同步到 fund_daily；详情页和贪恐历史曲线都通过此
     # 通用入口读取，不能因个股表无记录而只退回到当天实时 K 线。
     if not rows:
-        rows = query_rows("a_stock_fund_daily_qfq", "volume", "turnover")
+        rows = query_rows("a_stock_fund_daily_qfq", "volume", "turnover", "NULL")
     if not rows:
-        rows = query_rows("a_stock_fund_daily", "vol", "amount")
+        rows = query_rows("a_stock_fund_daily", "vol", "amount", "NULL")
 
     result: List[Dict[str, Any]] = []
     for row in rows:
