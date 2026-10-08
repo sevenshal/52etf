@@ -1622,6 +1622,12 @@ def load_a_stock_klines(
     rows = query_rows("a_stock_market_daily_qfq", "volume", "turnover")
     if not rows:
         rows = query_rows("a_stock_market_daily", "vol", "amount")
+    # 场内 ETF 日线单独同步到 fund_daily；详情页和贪恐历史曲线都通过此
+    # 通用入口读取，不能因个股表无记录而只退回到当天实时 K 线。
+    if not rows:
+        rows = query_rows("a_stock_fund_daily_qfq", "volume", "turnover")
+    if not rows:
+        rows = query_rows("a_stock_fund_daily", "vol", "amount")
 
     result: List[Dict[str, Any]] = []
     for row in rows:

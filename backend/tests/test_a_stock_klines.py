@@ -19,11 +19,17 @@ class _Result:
 
 
 class _FakeDb:
-    def __init__(self, rows):
+    def __init__(self, rows, fund_rows=None):
         self.rows = rows
+        self.fund_rows = fund_rows or []
 
     def execute(self, statement, params=None):
-        return _Result(self.rows if "a_stock_market_daily_qfq" in str(statement) else [])
+        query = str(statement)
+        if "a_stock_market_daily_qfq" in query:
+            return _Result(self.rows)
+        if "a_stock_fund_daily_qfq" in query:
+            return _Result(self.fund_rows)
+        return _Result([])
 
 
 def test_turnover_rate_is_converted_from_tushare_percent_to_fraction():
@@ -60,3 +66,19 @@ def test_batch_loader_uses_the_same_turnover_fraction():
         _FakeDb(rows), ["300750.SZ"], start_date=date(2026, 9, 1), end_date=date(2026, 9, 10)
     )
     assert result["300750.SZ"][0]["turnover_rate"] == pytest.approx(0.0122)
+
+
+def test_etf_daily_history_falls_back_to_fund_daily_table():
+    """ETF 不在个股日线表时，历史 K 线不能只剩实时当天一根。"""
+    fund_rows = [{
+        "trade_date": date(2024, 6, 17), "open": 3.8, "high": 3.9, "low": 3.7,
+        "close": 3.85, "volume": 123456.0, "turnover": 456789.0, "turnover_rate": None,
+    }]
+
+    result = load_a_stock_klines(
+        _FakeDb([], fund_rows=fund_rows), "510300.SH",
+        start_date=date(2024, 6, 1), end_date=date(2024, 6, 30),
+    )
+
+    assert len(result) == 1
+    assert result[0]["volume"] == 123456.0
