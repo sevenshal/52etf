@@ -68,6 +68,8 @@ const FearStockList = () => {
           // 后续保存统一使用守猪逮兔当前返回的代码格式。
           code: emoData.code,
           name: emoData.name,
+          // 守猪逮兔也有自己的 id；编辑/删除必须使用本地配置表的主键。
+          id: stock?.id,
           isConfigured: Boolean(stock),
           enabled: Boolean(stock?.enabled),
           etf_scale: emoData.scale || -1,
