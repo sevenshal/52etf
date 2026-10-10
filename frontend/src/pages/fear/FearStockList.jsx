@@ -927,6 +927,7 @@ const FearStockList = () => {
               { title: '夏普', dataIndex: 'sharpe', render: value => value ?? '-' },
               { title: '成交', dataIndex: 'trade_count', render: (_, row) => `${row.trade_count}（买 ${row.buy_count} / 卖 ${row.sell_count}）` },
               { title: '平均资金利用率', dataIndex: 'avg_gross_exposure_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '最大杠杆率', dataIndex: 'max_leverage_ratio', render: value => value == null ? '-' : `${Number(value).toFixed(2)}×` },
               { title: '资金利用效率', dataIndex: 'capital_efficiency_pct', render: value => value == null ? '-' : `${Number(value).toFixed(2)}%` },
             ]}
             dataSource={[{ key: 'metrics', ...backtestResult.metrics }]}

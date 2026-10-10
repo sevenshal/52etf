@@ -37,3 +37,4 @@ def test_backtest_waits_for_ema5_breakdown_before_greed_sell(monkeypatch):
 
     assert [trade["side"] for trade in result["trades"]] == ["BUY", "SELL"]
     assert result["trades"][1]["date"] == "2026-01-07"
+    assert result["metrics"]["max_leverage_ratio"] == 0.2788

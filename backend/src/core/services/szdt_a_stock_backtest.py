@@ -209,6 +209,8 @@ async def run_szdt_a_stock_backtest(
             "max_drawdown_pct": round(drawdown * 100, 2), "sharpe": round(float(sharpe), 2) if sharpe is not None else None,
             "trade_count": len(trades), "buy_count": sum(item["side"] == "BUY" for item in trades), "sell_count": sum(item["side"] == "SELL" for item in trades),
             "avg_gross_exposure_pct": round(float(gross.mean() * 100), 2), "peak_gross_exposure_pct": round(float(gross.max() * 100), 2),
+            # 总多头市值 / 当日权益。不开杠杆时最高为 1.00 倍；允许杠杆后可超过 1。
+            "max_leverage_ratio": round(float(gross.max()), 4),
             "capital_efficiency_pct": round(float(annualized / gross.mean() * 100), 2) if gross.mean() > 0 else None,
             "financing_cost": round(financing_cost, 2),
         },
