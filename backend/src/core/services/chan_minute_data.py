@@ -250,8 +250,8 @@ def normalize_minute_frame(frame: pd.DataFrame, source: str = "tushare_stk_mins"
     return result.loc[valid, columns].drop_duplicates(["ts_code", "trade_time"], keep="last").sort_values("trade_time")
 
 
-def upsert_minute_frame(frame: pd.DataFrame) -> int:
-    normalized = normalize_minute_frame(frame)
+def upsert_minute_frame(frame: pd.DataFrame, source: str = "tushare_stk_mins") -> int:
+    normalized = normalize_minute_frame(frame, source=source)
     if normalized.empty:
         return 0
     with _MINUTE_WRITE_LOCK:

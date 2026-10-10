@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Optional
 from ...core.database import get_db, SzdtTradeStock
 from ...core.services.szdt import SZDTService
+from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/quant")
@@ -23,6 +24,7 @@ class StockModel(BaseModel):
     sell_amount: float = Field(..., gt=0, description="卖出金额必须大于0")
     buy_factor: float = Field(..., ge=0, le=10, description="买入系数0~10")
     sell_factor: float = Field(..., ge=0, le=10, description="卖出系数0~10")
+    buy_volume_ratio: float = Field(0, ge=0, le=20, description="A股ETF买入量比下限，0表示不限制")
     enabled: bool = True
     lever: int = Field(..., ge=1, le=4)
     emo_area: str = Field(..., pattern="^(a|us|coin|other)$")
@@ -33,7 +35,7 @@ class StockModel(BaseModel):
             return int(float(v))
         return v
 
-    @validator('buy_amount', 'sell_amount', 'buy_factor', 'sell_factor', pre=True)
+    @validator('buy_amount', 'sell_amount', 'buy_factor', 'sell_factor', 'buy_volume_ratio', pre=True)
     def convert_to_float(cls, v):
         if isinstance(v, str):
             return float(v)
@@ -266,6 +268,12 @@ async def get_etf_emotion(
             msg=f"获取ETF情绪数据失败: {str(e)}",
             data=None
         )
+
+
+@router.get("/etf/volume-metrics")
+async def get_etf_volume_metrics(codes: str = Query(..., description="逗号分隔的 SH.510300 / 510300.SH 代码")):
+    """A 股 ETF 实时成交量与提示看板同口径的盘中量比（批量、进程缓存）。"""
+    return {"data": get_a_share_etf_volume_metrics(codes.split(","))}
 
 class ETFEmotionHistoryResponse(BaseModel):
     status: int

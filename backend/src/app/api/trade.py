@@ -6,6 +6,7 @@ import random
 from ...core.database import get_db, TradingState, StockCooldown, SzdtTradeStock, TradingLog, Session, SZDTTradingConfig
 from .account import valid_account
 from .szdt import szdt_service
+from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics, normalize_etf_symbol
 from sqlalchemy import and_
 
 router = APIRouter(prefix="/api/trade")
@@ -138,6 +139,18 @@ async def get_trade_opportunities(
 
     score = emotion['data']['score']
     price = emotion['data']['price']
+
+    volume_ratio_threshold = float(trade_stock.buy_volume_ratio or 0)
+    if score <= trade_stock.when_buy and volume_ratio_threshold > 0:
+        metric = get_a_share_etf_volume_metrics([trade_stock.code]).get(
+            normalize_etf_symbol(trade_stock.code), {}
+        )
+        volume_ratio = float(metric.get("volume_ratio") or 0)
+        if volume_ratio < volume_ratio_threshold:
+            return TradeResponse(
+                opportunities=[],
+                msg=f"{name}量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}",
+            )
 
     # 生成交易机会
     opportunities = []

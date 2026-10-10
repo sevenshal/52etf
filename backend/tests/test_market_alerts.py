@@ -221,6 +221,56 @@ def test_baseline_at_falls_back_to_nearest_earlier_minute():
     assert baseline_at(pd.DataFrame(), "10:00") == {}
 
 
+def test_etf_intraday_baseline_is_persisted_and_read_without_scanner(monkeypatch):
+    """ETF 策略重启后直接查盘前任务落库的基准，不依赖进程内 scanner。"""
+    import duckdb
+
+    from src.core.services import market_alerts as module
+
+    class _Connection:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def execute(self, *args, **kwargs):
+            return self.raw.execute(*args, **kwargs)
+
+        def register(self, *args, **kwargs):
+            return self.raw.register(*args, **kwargs)
+
+        def close(self):
+            pass
+
+    raw = duckdb.connect()
+    raw.execute("CREATE TABLE a_stock_fund_daily (ts_code VARCHAR)")
+    raw.execute("INSERT INTO a_stock_fund_daily VALUES ('510300.SH')")
+    raw.execute(
+        """
+        CREATE TABLE a_stock_etf_intraday_volume_baseline (
+          baseline_date DATE, lookback_days INTEGER, ts_code VARCHAR,
+          minute_label VARCHAR, avg_cum_volume DOUBLE, created_at TIMESTAMP
+        )
+        """
+    )
+    connection = _Connection(raw)
+    monkeypatch.setattr(module, "connect_analytics_db", lambda: connection)
+    monkeypatch.setattr(module, "connect_duckdb_for_write", lambda _path: connection)
+
+    baseline = pd.DataFrame(
+        [[100.0, 250.0], [999.0, 888.0]],
+        index=["510300.SH", "000001.SZ"],
+        columns=["09:31", "10:00"],
+    )
+    assert module.persist_etf_intraday_volume_baseline(
+        baseline, baseline_date=date(2026, 10, 12), lookback_days=20,
+    ) == 2
+
+    # 10:01 没有精确分钟时回退到不晚于它的最后一个持久化分钟。
+    assert module.get_persisted_etf_intraday_volume_baseline(
+        "10:01", baseline_date=date(2026, 10, 12), lookback_days=20,
+    ) == {"510300.SH": 250.0}
+    raw.close()
+
+
 def test_limits_does_not_cache_empty_result(monkeypatch):
     """盘前 stk_limit 还没发布时会返回空，不能把空结果缓存一整天。"""
     from datetime import date as date_cls

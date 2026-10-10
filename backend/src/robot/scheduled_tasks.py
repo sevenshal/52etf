@@ -690,7 +690,7 @@ def _run_market_alert_baseline(baseline_days: int = 20):
     from ..core.services.market_alerts import prepare_alert_baseline
 
     result = prepare_alert_baseline(baseline_days=int(baseline_days))
-    return (f"个股结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} "
+    return (f"个股结构 {result.get('structures')} 只 · 基准点 {result.get('baseline_points')} · ETF持久化 {result.get('etf_baseline_rows', 0)} 行 "
             f"· 申万一二级结构 {result.get('sw_structures')} 个 · 基准点 {result.get('sw_baseline_points')} "
             f"· 基准取前 {result.get('baseline_days')} 个交易日")
 
@@ -709,10 +709,15 @@ def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
             state = ChanMinuteSyncManager.snapshot()
     if state.get("status") not in {"SUCCESS", "PARTIAL_SUCCESS"}:
         raise RuntimeError(f"分钟行情同步失败: {state}")
+    # 守猪逮兔 ETF 共用同一张分钟表；在个股分钟任务完成后用 ETF 专用 etf_mins 补齐缺口。
+    from ..core.services.szdt_etf_volume import sync_registered_etf_minutes
+
+    etf_result = sync_registered_etf_minutes()
     logging.getLogger("ScheduledTaskManager").info("Minute data synced: %s", state)
     return (
         f"{state.get('status')} 个股分钟 {state.get('saved_rows', 0)} 行 · "
-        f"错误 {len(state.get('errors') or [])} 条"
+        f"错误 {len(state.get('errors') or [])} 条 · "
+        f"ETF分钟 {etf_result.get('saved_rows', 0)} 行"
     )
 
 
@@ -1745,8 +1750,8 @@ class ScheduledTaskManager:
             ),
             "market_alert_baseline": TaskDefinition(
                 task_key="market_alert_baseline",
-                name="提示看板盘前基准",
-                description="盘前用分析库分钟线算同时段量能基准，并算好全市场九转计数结构。",
+                name="盘前量比基准",
+                description="盘前用分析库分钟线算同时段量能基准，持久化 ETF 基准，并算好全市场九转计数结构。",
                 default_time="09:15",
                 default_enabled=True,
                 sort_order=26,

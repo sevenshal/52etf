@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from ..database import MarketAlertEvent, MarketAlertHit, get_db_ctx
+from ..duckdb_utils import ANALYTICS_DB_PATH, connect_duckdb_for_write
+from ..read_only_mode import ReadOnlyModeError
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .tushare import TushareService
 
@@ -899,6 +901,97 @@ def attach_latest_returns(rows: List[Dict[str, Any]], hit_date: date,
 _scanner = AlertScanner()
 
 
+def get_intraday_volume_baseline(
+    minute_label: str,
+    *,
+    today: Optional[date] = None,
+) -> Dict[str, float]:
+    """提示看板与其他盘中策略共用的「同一时刻累计成交量」20 日基准。
+
+    ETF 分钟线写入与个股相同的 ``a_stock_minute_bar`` 后会自然进入同一个矩阵，
+    因而不会出现两套量比算法或不同时间点分母的情况。
+    """
+    target_date = today or datetime.now().date()
+    if _scanner._baseline_date != target_date:
+        _scanner.prepare(target_date)
+    return baseline_at(_scanner._baseline, minute_label)
+
+
+def persist_etf_intraday_volume_baseline(
+    baseline: pd.DataFrame,
+    *,
+    baseline_date: date,
+    lookback_days: int,
+) -> int:
+    """把盘前算好的 ETF 分钟累计量基准持久化，供盘中重启后直接读取。"""
+    if baseline is None or baseline.empty:
+        return 0
+    connection = connect_analytics_db()
+    try:
+        etf_rows = connection.execute("SELECT DISTINCT ts_code FROM a_stock_fund_daily").fetchall()
+    finally:
+        connection.close()
+    etf_codes = {str(row[0]).upper() for row in etf_rows}
+    subset = baseline.loc[baseline.index.intersection(etf_codes)]
+    if subset.empty:
+        return 0
+    rows = (
+        subset.rename_axis(index="ts_code", columns="minute_label")
+        .stack(dropna=True)
+        .reset_index(name="avg_cum_volume")
+    )
+    rows["baseline_date"] = baseline_date
+    rows["lookback_days"] = int(lookback_days)
+    rows["created_at"] = datetime.now()
+    try:
+        writer = connect_duckdb_for_write(ANALYTICS_DB_PATH)
+    except ReadOnlyModeError:
+        return 0
+    try:
+        writer.execute(
+            "DELETE FROM a_stock_etf_intraday_volume_baseline WHERE baseline_date = ? AND lookback_days = ?",
+            [baseline_date, int(lookback_days)],
+        )
+        writer.register("etf_volume_baseline_rows", rows)
+        writer.execute(
+            """
+            INSERT INTO a_stock_etf_intraday_volume_baseline
+              (baseline_date, lookback_days, ts_code, minute_label, avg_cum_volume, created_at)
+            SELECT baseline_date, lookback_days, ts_code, minute_label, avg_cum_volume, created_at
+            FROM etf_volume_baseline_rows
+            """
+        )
+    finally:
+        writer.close()
+    return len(rows)
+
+
+def get_persisted_etf_intraday_volume_baseline(
+    minute_label: str,
+    *,
+    baseline_date: date,
+    lookback_days: int = BASELINE_TRADING_DAYS,
+) -> Dict[str, float]:
+    """读取不晚于当前分钟的 ETF 基准，午休/收盘后规则与 ``baseline_at`` 一致。"""
+    connection = connect_analytics_db()
+    try:
+        rows = connection.execute(
+            """
+            SELECT ts_code, avg_cum_volume
+            FROM (
+              SELECT ts_code, avg_cum_volume,
+                     ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY minute_label DESC) AS rn
+              FROM a_stock_etf_intraday_volume_baseline
+              WHERE baseline_date = ? AND lookback_days = ? AND minute_label <= ?
+            ) WHERE rn = 1
+            """,
+            [baseline_date, int(lookback_days), minute_label],
+        ).fetchall()
+    finally:
+        connection.close()
+    return {str(code).upper(): float(value) for code, value in rows if value and float(value) > 0}
+
+
 def get_scanner_state(today: date) -> Dict[str, Any]:
     """行业关联复用扫描器盘前算好的结构/基准/涨跌停价，没准备好就现算。"""
     if _scanner._baseline_date != today:
@@ -917,7 +1010,14 @@ def run_alert_scan(now: Optional[datetime] = None,
 
 def prepare_alert_baseline(today: Optional[date] = None,
                            baseline_days: int = BASELINE_TRADING_DAYS) -> Dict[str, Any]:
-    return _scanner.prepare(today or date.today(), baseline_days=baseline_days)
+    target_date = today or date.today()
+    result = _scanner.prepare(target_date, baseline_days=baseline_days)
+    result["etf_baseline_rows"] = persist_etf_intraday_volume_baseline(
+        _scanner._baseline,
+        baseline_date=target_date,
+        lookback_days=baseline_days,
+    )
+    return result
 
 
 def _row_to_dict(row: MarketAlertHit) -> Dict[str, Any]:

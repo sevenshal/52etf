@@ -7,6 +7,18 @@ import ReactECharts from 'echarts-for-react';
 import { SZDTConfigForm } from '../SZDTAutoTrading';
 
 const normalizeCode = (code) => String(code || '').replace('.', '').toUpperCase();
+const toAStockTsCode = (code) => {
+  const [market, ticker] = String(code || '').toUpperCase().split('.');
+  return market && ticker ? `${ticker}.${market}` : String(code || '').toUpperCase();
+};
+
+const formatVolume = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '-';
+  if (numeric >= 1e8) return `${(numeric / 1e8).toFixed(2)}亿`;
+  if (numeric >= 1e4) return `${(numeric / 1e4).toFixed(2)}万`;
+  return numeric.toFixed(0);
+};
 
 const FearStockList = () => {
   const navigate = useNavigate();
@@ -26,6 +38,9 @@ const FearStockList = () => {
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [enabledFilter, setEnabledFilter] = useState('all');
+  const [scaleMin, setScaleMin] = useState('');
+  const [scaleMax, setScaleMax] = useState('');
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -57,6 +72,18 @@ const FearStockList = () => {
       }));
       setCandidates(formattedCandidates);
 
+      let volumeMetrics = {};
+      if (activeType === 3 && formattedCandidates.length > 0) {
+        try {
+          const volumeResponse = await request.get('/api/quant/etf/volume-metrics', {
+            params: { codes: formattedCandidates.map(item => item.code).join(',') },
+          });
+          volumeMetrics = volumeResponse.data?.data || {};
+        } catch (error) {
+          // 实时行情失败不影响贪恐主列表；下次刷新会走后端的短缓存重试。
+        }
+      }
+
       const configuredStocks = new Map(
         stocksResponse.data.map(stock => [normalizeCode(stock.code), stock])
       );
@@ -75,7 +102,9 @@ const FearStockList = () => {
           etf_scale: emoData.scale || -1,
           emo_name: emoData.name || '-',
           emo_score: emoData.emotion?.score ?? '-',
-          emo_price: emoData.emotion?.price ?? '-'
+          emo_price: emoData.emotion?.price ?? '-',
+          volume: volumeMetrics[toAStockTsCode(emoData.code)]?.volume ?? null,
+          volume_ratio: volumeMetrics[toAStockTsCode(emoData.code)]?.volume_ratio ?? null,
         };
       }).sort((a, b) => b.etf_scale - a.etf_scale);
 
@@ -131,6 +160,7 @@ const FearStockList = () => {
         when_sell: Number(values.when_sell),
         buy_factor: Number(values.buy_factor),
         sell_factor: Number(values.sell_factor),
+        buy_volume_ratio: Number(values.buy_volume_ratio || 0),
         max_position: Number(values.max_position),
         buy_amount: Number(values.buy_amount),
         sell_amount: Number(values.sell_amount)
@@ -164,6 +194,7 @@ const FearStockList = () => {
       buy_factor: 1,
       sell_factor: 1,
       max_position: 5,
+      buy_volume_ratio: activeType === 3 ? 1 : 0,
       lever: 1,
       emo_area: 'a',
       type: Number(activeType)
@@ -197,6 +228,7 @@ const FearStockList = () => {
         sell_amount: record.sell_amount,
         buy_factor: record.buy_factor,
         sell_factor: record.sell_factor,
+        buy_volume_ratio: record.buy_volume_ratio || 0,
         lever: record.lever,
         emo_area: record.emo_area,
         enabled,
@@ -385,6 +417,23 @@ const FearStockList = () => {
       }
     },
     {
+      title: '成交量',
+      dataIndex: 'volume',
+      key: 'volume',
+      width: 100,
+      align: 'right',
+      render: (value) => formatVolume(value),
+    },
+    {
+      title: <Tooltip title="当日截至当前分钟累计成交量 ÷ 前20个交易日同一分钟累计成交量均值（与市场提示看板完全一致）">量比</Tooltip>,
+      dataIndex: 'volume_ratio',
+      key: 'volume_ratio',
+      width: 95,
+      align: 'right',
+      sorter: (a, b) => (a.volume_ratio || -1) - (b.volume_ratio || -1),
+      render: (value) => (Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '-'),
+    },
+    {
       title: '何时买',
       dataIndex: 'when_buy',
       key: 'when_buy',
@@ -512,6 +561,18 @@ const FearStockList = () => {
       ),
     },
   ];
+
+  const filteredData = data.filter((record) => {
+    if (enabledFilter === 'enabled' && !record.enabled) return false;
+    if (enabledFilter === 'disabled' && record.enabled) return false;
+
+    const scale = Number(record.etf_scale);
+    const min = Number(scaleMin);
+    const max = Number(scaleMax);
+    if (scaleMin !== '' && (!Number.isFinite(scale) || scale < min)) return false;
+    if (scaleMax !== '' && (!Number.isFinite(scale) || scale > max)) return false;
+    return true;
+  });
 
   const FactorPreviewModal = ({
     visible,
@@ -744,10 +805,52 @@ const FearStockList = () => {
         items={tabItems.map(t => ({ key: t.key, label: t.label }))}
       />
 
+      <div style={{ padding: '0 16px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>筛选：</span>
+        <Select
+          value={enabledFilter}
+          onChange={setEnabledFilter}
+          style={{ width: 110 }}
+          options={[
+            { value: 'all', label: '全部状态' },
+            { value: 'enabled', label: '仅已启用' },
+            { value: 'disabled', label: '仅未启用' },
+          ]}
+        />
+        <Input
+          value={scaleMin}
+          onChange={(event) => setScaleMin(event.target.value)}
+          type="number"
+          min="0"
+          placeholder="最小市值(亿)"
+          style={{ width: 130 }}
+        />
+        <span>至</span>
+        <Input
+          value={scaleMax}
+          onChange={(event) => setScaleMax(event.target.value)}
+          type="number"
+          min="0"
+          placeholder="最大市值(亿)"
+          style={{ width: 130 }}
+        />
+        <Button
+          type="link"
+          onClick={() => {
+            setEnabledFilter('all');
+            setScaleMin('');
+            setScaleMax('');
+          }}
+        >
+          重置
+        </Button>
+        <span style={{ color: '#8c8c8c' }}>显示 {filteredData.length} / {data.length}</span>
+      </div>
+
       <Table
         loading={loading}
         columns={columns}
-        dataSource={data}
+        dataSource={filteredData}
         rowKey="code"
         scroll={{ x: 'max-content' }}
         size="small"
@@ -960,6 +1063,14 @@ const FearStockList = () => {
           >
             <Input type="number" />
           </Form.Item>
+          {activeType === 3 && <Form.Item
+            name="buy_volume_ratio"
+            label="买入量比下限(>=)"
+            tooltip="与市场提示看板同口径的同时段累计量比达到该值后，恐贪买入条件才会触发；填 0 表示不限制。"
+            rules={[{ required: true, message: '请输入买入量比下限' }]}
+          >
+            <Input type="number" min="0" max="20" step="0.05" />
+          </Form.Item>}
           <Form.Item
             name="lever"
             label="杠杆"

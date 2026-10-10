@@ -41,6 +41,7 @@ from ..core.services.external_trading_market import (
 )
 from ..core.services.external_trading_valuation import get_realtime_reference_prices
 from ..core.services.szdt import SZDTService
+from ..core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
 from ..core.utils import send_alert_email
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,8 @@ class SZDTAStockExternalTrader:
                     key: getattr(stock, key)
                     for key in (
                         "code", "name", "type", "when_buy", "when_sell", "max_position",
-                        "buy_amount", "sell_amount", "buy_factor", "sell_factor", "lever", "emo_area",
+                        "buy_amount", "sell_amount", "buy_factor", "sell_factor", "buy_volume_ratio",
+                        "lever", "emo_area",
                     )
                 }
                 break
@@ -203,7 +205,11 @@ class SZDTAStockExternalTrader:
         )
         return f"目标仓位={target_quantity}；执行器={result.get('status')}"
 
-    async def run_config_once(self, config: Dict[str, Any]) -> None:
+    async def run_config_once(
+        self,
+        config: Dict[str, Any],
+        volume_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         account_id = config["account_id"]
         cli_id = f"szdt-a-external-{account_id}"
         stock = self._select_next_stock(account_id, cli_id)
@@ -242,6 +248,21 @@ class SZDTAStockExternalTrader:
                 return
 
             if score <= stock["when_buy"]:
+                volume_ratio_threshold = safe_float(stock.get("buy_volume_ratio"))
+                if volume_ratio_threshold > 0:
+                    metrics = volume_metrics
+                    if metrics is None:
+                        metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, [stock["code"]])
+                    volume_metric = metrics.get(symbol, {})
+                    volume_ratio = safe_float(volume_metric.get("volume_ratio"))
+                    if volume_ratio <= 0 or volume_ratio < volume_ratio_threshold:
+                        self._log(
+                            account_id,
+                            "DEBUG",
+                            f"{name} 量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}，跳过",
+                        )
+                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(minutes=5), "量比未达买入阈值")
+                        return
                 if position_ratio < stock["max_position"]:
                     factor = min(1, max(0, (stock["when_buy"] - score) / (stock["when_buy"] + 100)))
                     buy_amount = min(snapshot["cash"], stock["buy_amount"] * (3 ** (factor ** stock["buy_factor"])))
@@ -287,8 +308,19 @@ class SZDTAStockExternalTrader:
                             SZDTTradingConfig.external_trading_account_id.isnot(None),
                             SZDTTradingConfig.live_sub_account_id.isnot(None),
                         ).all()]
+                        configured_accounts = [config["account_id"] for config in configs]
+                        volume_codes = [
+                            row.code for row in db.query(SzdtTradeStock).filter(
+                                SzdtTradeStock.account_id.in_(configured_accounts),
+                                SzdtTradeStock.type == 3,
+                                SzdtTradeStock.enabled == True,  # noqa: E712
+                                SzdtTradeStock.buy_volume_ratio > 0,
+                            ).all()
+                        ] if configured_accounts else []
+                    # 每分钟最多按沪/深两批拉一次实时 ETF 行情；服务内部再缓存 30 秒。
+                    volume_metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, volume_codes)
                     for config in configs:
-                        await self.run_config_once(config)
+                        await self.run_config_once(config, volume_metrics)
             except Exception:
                 logger.exception("SZDT A股外部交易主循环异常")
             await asyncio.sleep(60)

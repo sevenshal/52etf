@@ -32,6 +32,7 @@ def test_existing_szdt_trade_stocks_default_to_enabled_after_schema_upgrade():
 
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE szdt_trade_stocks DROP COLUMN enabled"))
+        connection.execute(text("ALTER TABLE szdt_trade_stocks DROP COLUMN buy_volume_ratio"))
 
     with patch.object(database, "engine", engine):
         database.ensure_table_columns()
@@ -45,9 +46,14 @@ def test_existing_szdt_trade_stocks_default_to_enabled_after_schema_upgrade():
         enabled = connection.execute(
             text("SELECT enabled FROM szdt_trade_stocks WHERE code = 'SH.510300'")
         ).scalar_one()
+        buy_volume_ratio = connection.execute(
+            text("SELECT buy_volume_ratio FROM szdt_trade_stocks WHERE code = 'SH.510300'")
+        ).scalar_one()
 
     assert "enabled" in columns
+    assert "buy_volume_ratio" in columns
     assert enabled is True or enabled == 1
+    assert buy_volume_ratio == 0
 
 
 def test_existing_szdt_config_auto_adds_external_account_binding_columns():

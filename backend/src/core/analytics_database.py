@@ -62,6 +62,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_market_daily_qfq",
         "a_stock_minute_bar",
         "a_stock_minute_bar_qfq",
+        "a_stock_etf_intraday_volume_baseline",
         "chan_scan_run",
         "chan_scan_signal",
         "a_stock_fund_flow_daily",
@@ -548,6 +549,18 @@ class AStockFundDaily(AnalyticsBase):
     amount = Column(Float)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockEtfIntradayVolumeBaseline(AnalyticsBase):
+    """提示看板盘前预计算的 ETF 同时段累计量基准，供重启后直接读取。"""
+    __tablename__ = "a_stock_etf_intraday_volume_baseline"
+
+    baseline_date = Column(Date, primary_key=True)
+    lookback_days = Column(Integer, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    minute_label = Column(String(5), primary_key=True)
+    avg_cum_volume = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
 class AStockFundBasic(AnalyticsBase):
@@ -1083,6 +1096,7 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_symbol_date ON a_stock_market_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_minute_symbol_time ON a_stock_minute_bar(ts_code, trade_time)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_minute_time_symbol ON a_stock_minute_bar(trade_time, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_etf_intraday_baseline_lookup ON a_stock_etf_intraday_volume_baseline(baseline_date, lookback_days, ts_code, minute_label)",
         "CREATE INDEX IF NOT EXISTS idx_chan_scan_signal_run ON chan_scan_signal(run_id, signal_type)",
         "CREATE INDEX IF NOT EXISTS idx_chan_scan_signal_symbol_time ON chan_scan_signal(ts_code, bar_time)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
