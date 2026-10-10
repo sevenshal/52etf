@@ -27,6 +27,14 @@ _sync_pending: set[str] = set()
 _sync_running = False
 
 
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def normalize_etf_symbol(value: Any) -> str:
     return TushareService.normalize_symbol(str(value or ""))
 
@@ -158,6 +166,65 @@ def sync_registered_etf_minutes() -> Dict[str, Any]:
     return _sync_symbols(_missing_history_symbols(symbols, datetime.now().date()))
 
 
+def _latest_daily_metrics(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """休市或行情快照过期时，返回最近日线的成交量、成交额和日线量比。
+
+    ``rt_etf_k`` 在周末、节假日会继续返回上一交易日的快照。盘中量比不能把这份
+    旧快照拿去和今天的分钟基准相比；此时改为最近日线成交量除以前 20 个交易日均量。
+    日线 ``vol`` 单位为手、``amount`` 单位为千元，统一换算成实时行情的股、元口径。
+    """
+    if not symbols:
+        return {}
+    placeholders = ", ".join("?" for _ in symbols)
+    connection = connect_analytics_db()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT ts_code, trade_date, vol, amount
+            FROM a_stock_fund_daily
+            WHERE ts_code IN ({placeholders})
+              AND vol IS NOT NULL AND vol >= 0
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) <= 21
+            ORDER BY ts_code, trade_date DESC
+            """,
+            symbols,
+        ).fetchall()
+    finally:
+        connection.close()
+
+    grouped: Dict[str, List[tuple[Any, Any, Any]]] = {}
+    for ts_code, trade_date, volume, amount in rows:
+        grouped.setdefault(str(ts_code).upper(), []).append((trade_date, volume, amount))
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for symbol, values in grouped.items():
+        latest_date, latest_volume, latest_amount = values[0]
+        try:
+            volume = float(latest_volume) * 100.0
+            turnover = float(latest_amount) * 1000.0 if latest_amount is not None else None
+        except (TypeError, ValueError):
+            continue
+        prior_volumes = []
+        for _, prior_volume, _ in values[1:]:
+            try:
+                number = float(prior_volume) * 100.0
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number > 0:
+                prior_volumes.append(number)
+        baseline = sum(prior_volumes) / len(prior_volumes) if prior_volumes else None
+        ratio = volume / baseline if baseline and baseline > 0 else None
+        result[symbol] = {
+            "volume": volume,
+            "turnover": turnover if turnover is not None and math.isfinite(turnover) else None,
+            "volume_ratio": round(ratio, 3) if ratio is not None and math.isfinite(ratio) else None,
+            "volume_baseline_20d": baseline,
+            "volume_ratio_mode": "daily_20d",
+            "trade_date": latest_date.isoformat() if hasattr(latest_date, "isoformat") else str(latest_date),
+        }
+    return result
+
+
 def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
     """提示看板同口径：当日累计量 ÷ 前20交易日同一时刻累计量均值。"""
     symbols = list(dict.fromkeys(
@@ -178,6 +245,8 @@ def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, 
         realtime = pd.DataFrame()
     baselines: Dict[tuple[date, str], Dict[str, float]] = {}
     result: Dict[str, Dict[str, Any]] = {}
+    stale_symbols: List[str] = []
+    today = datetime.now().date()
     for _, row in realtime.iterrows():
         symbol = normalize_etf_symbol(row.get("ts_code"))
         if symbol not in symbols:
@@ -191,6 +260,9 @@ def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, 
         stamp = pd.to_datetime(row.get("trade_time"), errors="coerce")
         if pd.isna(stamp):
             continue
+        if stamp.date() != today:
+            stale_symbols.append(symbol)
+            continue
         key = (stamp.date(), stamp.strftime("%H:%M"))
         if key not in baselines:
             baselines[key] = get_persisted_etf_intraday_volume_baseline(key[1], baseline_date=key[0])
@@ -198,10 +270,16 @@ def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, 
         ratio = volume / baseline if baseline and baseline > 0 else None
         result[symbol] = {
             "volume": volume,
+            # rt_etf_k: vol=股、amount=元，与页面展示和成交量统一口径。
+            "turnover": _finite_number(row.get("amount")),
             "volume_ratio": round(ratio, 3) if ratio is not None and math.isfinite(ratio) else None,
             "volume_baseline_20d": baseline,
             "volume_ratio_mode": "same_time_cumulative_20d",
         }
+    # 休市日和开盘前 rt_etf_k 返回的是上一交易日快照；用日线口径展示而非 0/错误量比。
+    missing_symbols = [symbol for symbol in symbols if symbol not in result]
+    if stale_symbols or missing_symbols:
+        result.update(_latest_daily_metrics(list(dict.fromkeys([*stale_symbols, *missing_symbols]))))
     with _cache_lock:
         _cache["at"] = now_monotonic
         _cache["metrics"].update(result)

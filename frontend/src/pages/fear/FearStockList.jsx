@@ -119,7 +119,8 @@ const FearStockList = () => {
           isConfigured: Boolean(stock),
           enabled: Boolean(stock?.enabled),
           etf_scale: emoData.scale || -1,
-          turnover: emoData.turnover ?? emoData.amount ?? emoData.emotion?.turnover ?? emoData.emotion?.amount ?? null,
+          // 守猪逮兔列表没有成交额，A 股 ETF 统一从实时/日线行情指标读取。
+          turnover: volumeMetrics[toAStockTsCode(emoData.code)]?.turnover ?? null,
           emo_name: emoData.name || '-',
           emo_score: emoData.emotion?.score ?? '-',
           emo_price: emoData.emotion?.price ?? '-',
@@ -470,7 +471,7 @@ const FearStockList = () => {
       render: (value) => formatVolume(value),
     },
     {
-      title: <Tooltip title="当日截至当前分钟累计成交量 ÷ 前20个交易日同一分钟累计成交量均值（与市场提示看板完全一致）">量比</Tooltip>,
+      title: <Tooltip title="盘中：当日截至当前分钟累计成交量 ÷ 前20个交易日同一分钟累计成交量均值（与市场提示看板完全一致）；休市时显示最近日线 ÷ 前20日均量。">量比</Tooltip>,
       dataIndex: 'volume_ratio',
       key: 'volume_ratio',
       width: 95,
