@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from .szdt_us_trader import start_szdt_us_trader
+from .szdt_a_stock_external_trader import start_szdt_a_stock_external_trader
 from .lev_etf_trader import start_lev_etf_trader
 from .portfolio_copy_trader import start_portfolio_copy_trader
 from .soxl_fear_strategy_trader import start_soxl_fear_strategy_trader
@@ -153,6 +154,8 @@ def robot():
   logging.info("listening deal")
   # 启动 SZDT 贪恐策略美股自动交易（每分钟轮询，限美股开盘时段，检查所有开启配置）
   start_szdt_us_trader()
+  # 启动 SZDT 贪恐策略 A 股外部子账户自动交易（每分钟轮询，限 A 股开盘时段）
+  start_szdt_a_stock_external_trader()
   # 启动杠杆ETF均线策略（收盘前10s检查）
   start_lev_etf_trader()
 

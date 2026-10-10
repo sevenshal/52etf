@@ -15,6 +15,7 @@ from ...core.database import (
     PortfolioCopyConfig,
     SnowballCopyConfig,
     SoxlFearStrategyConfig,
+    SZDTTradingConfig,
     ValuationSimConfig,
     get_db,
 )
@@ -84,6 +85,7 @@ from ...core.services.external_trading_ledger import (
     STRATEGY_PORTFOLIO_COPY,
     STRATEGY_FACTOR_LIVE,
     STRATEGY_SOXL_FEAR,
+    STRATEGY_SZDT_A_STOCK,
     STRATEGY_VALUATION_SIM,
     STRATEGY_W20,
     build_netted_target_execution_plan,
@@ -630,6 +632,12 @@ def _strategy_binding_name(main_db: OrmSession, sub_account: ExternalTradingSubA
         if config:
             return f"SOXL情绪量能自动交易 {config.symbol or ''}".strip()
         return "SOXL情绪量能自动交易（配置已删除）"
+    if sub_account.strategy_type == STRATEGY_SZDT_A_STOCK:
+        config = main_db.query(SZDTTradingConfig).filter(
+            SZDTTradingConfig.id == sub_account.strategy_config_id,
+            SZDTTradingConfig.account_id == sub_account.account_id,
+        ).first()
+        return "守猪逮兔A股自动交易" if config else "守猪逮兔A股自动交易（配置已删除）"
     if sub_account.strategy_type == STRATEGY_VALUATION_SIM:
         config = main_db.query(ValuationSimConfig).filter(
             ValuationSimConfig.id == sub_account.strategy_config_id,
@@ -662,6 +670,7 @@ _BINDING_CONFIG_SPECS = [
         lambda c: f"SOXL情绪量能自动交易 {c.symbol or ''}".strip(),
         "SOXL情绪量能自动交易（配置已删除）",
     ),
+    (STRATEGY_SZDT_A_STOCK, SZDTTradingConfig, lambda _c: "守猪逮兔A股自动交易", "守猪逮兔A股自动交易（配置已删除）"),
     (STRATEGY_VALUATION_SIM, ValuationSimConfig, lambda c: c.name, "估值模拟盘（配置已删除）"),
 ]
 

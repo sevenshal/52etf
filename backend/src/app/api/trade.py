@@ -60,6 +60,8 @@ async def get_trade_opportunities(
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     if not config or not config.enabled_a:
         return TradeResponse(opportunities=[], msg="自动交易未启用")
+    if config.external_trading_account_id and config.live_sub_account_id:
+        return TradeResponse(opportunities=[], msg="A股策略已改由后端外部交易子账户自动执行")
     
     cli_id = request.cli_id
     

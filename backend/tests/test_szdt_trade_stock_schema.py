@@ -48,3 +48,29 @@ def test_existing_szdt_trade_stocks_default_to_enabled_after_schema_upgrade():
 
     assert "enabled" in columns
     assert enabled is True or enabled == 1
+
+
+def test_existing_szdt_config_auto_adds_external_account_binding_columns():
+    """存量策略配置表启动时自动补外部账户和虚拟子账户绑定字段。"""
+    engine = create_engine("sqlite:///:memory:")
+    database.Base.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE szdt_trading_configs DROP COLUMN external_trading_account_id"
+        ))
+        connection.execute(text(
+            "ALTER TABLE szdt_trading_configs DROP COLUMN live_sub_account_id"
+        ))
+
+    with patch.object(database, "engine", engine):
+        database.ensure_table_columns()
+        database.ensure_table_columns()
+
+    with engine.connect() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(szdt_trading_configs)"))
+        }
+
+    assert {"external_trading_account_id", "live_sub_account_id"}.issubset(columns)

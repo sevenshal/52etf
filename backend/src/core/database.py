@@ -982,6 +982,9 @@ class SZDTTradingConfig(Base):
     enabled = Column(Boolean, default=False) # 美股开关
     enabled_a = Column(Boolean, default=False) # A股开关
     ib_account_id = Column(Integer, nullable=True) # 关联的 IB 账户 ID
+    # A 股守猪逮兔策略通过外部交易账户的专属虚拟子账户执行。
+    external_trading_account_id = Column(Integer, nullable=True)
+    live_sub_account_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -2221,6 +2224,10 @@ def ensure_table_columns():
         "szdt_trade_stocks": {
             # 存量已配置标的保持原有自动交易行为。
             "enabled": "ALTER TABLE szdt_trade_stocks ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1",
+        },
+        "szdt_trading_configs": {
+            "external_trading_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN external_trading_account_id INTEGER",
+            "live_sub_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN live_sub_account_id INTEGER",
         },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
