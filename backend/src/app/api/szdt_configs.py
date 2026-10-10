@@ -26,6 +26,7 @@ class SZDTConfigBase(BaseModel):
     ib_account_id: Optional[int] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
+    a_sell_on_ema5_breakdown: bool = False
 
 class SZDTConfigCreate(SZDTConfigBase):
     pass
@@ -132,6 +133,7 @@ def update_config(
     config.ib_account_id = config_in.ib_account_id
     config.external_trading_account_id = config_in.external_trading_account_id
     config.live_sub_account_id = config_in.live_sub_account_id
+    config.a_sell_on_ema5_breakdown = config_in.a_sell_on_ema5_breakdown
     
     try:
         db.flush()

@@ -68,6 +68,9 @@ def test_existing_szdt_config_auto_adds_external_account_binding_columns():
         connection.execute(text(
             "ALTER TABLE szdt_trading_configs DROP COLUMN live_sub_account_id"
         ))
+        connection.execute(text(
+            "ALTER TABLE szdt_trading_configs DROP COLUMN a_sell_on_ema5_breakdown"
+        ))
 
     with patch.object(database, "engine", engine):
         database.ensure_table_columns()
@@ -79,4 +82,4 @@ def test_existing_szdt_config_auto_adds_external_account_binding_columns():
             for row in connection.execute(text("PRAGMA table_info(szdt_trading_configs)"))
         }
 
-    assert {"external_trading_account_id", "live_sub_account_id"}.issubset(columns)
+    assert {"external_trading_account_id", "live_sub_account_id", "a_sell_on_ema5_breakdown"}.issubset(columns)

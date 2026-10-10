@@ -987,6 +987,8 @@ class SZDTTradingConfig(Base):
     # A 股守猪逮兔策略通过外部交易账户的专属虚拟子账户执行。
     external_trading_account_id = Column(Integer, nullable=True)
     live_sub_account_id = Column(Integer, nullable=True)
+    # A 股卖出确认：贪婪达到阈值后，等待价格跌破日线 EMA5 再卖出。
+    a_sell_on_ema5_breakdown = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -2231,6 +2233,7 @@ def ensure_table_columns():
         "szdt_trading_configs": {
             "external_trading_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN external_trading_account_id INTEGER",
             "live_sub_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN live_sub_account_id INTEGER",
+            "a_sell_on_ema5_breakdown": "ALTER TABLE szdt_trading_configs ADD COLUMN a_sell_on_ema5_breakdown BOOLEAN NOT NULL DEFAULT 0",
         },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",

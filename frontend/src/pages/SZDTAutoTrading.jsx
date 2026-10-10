@@ -96,6 +96,15 @@ export const SZDTConfigForm = ({ onSuccess }) => {
                 </Text>
             </div>
 
+            <Form.Item
+                label="A股贪婪 EMA5 卖出确认"
+                name="a_sell_on_ema5_breakdown"
+                valuePropName="checked"
+                extra="开启后，贪恐达到卖出阈值时不会立即卖出，只有实时价格跌破日线 EMA5 才卖出。"
+            >
+                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+            </Form.Item>
+
             <Form.Item label="启用A股自动化交易" name="enabled_a" valuePropName="checked">
                 <Switch checkedChildren="开启" unCheckedChildren="关闭" />
             </Form.Item>

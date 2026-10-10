@@ -206,3 +206,35 @@ def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, 
         _cache["at"] = now_monotonic
         _cache["metrics"].update(result)
     return {symbol: result.get(symbol, _cache["metrics"].get(symbol, {})) for symbol in symbols}
+
+
+def get_a_share_etf_ema5(symbol: Any, current_price: Any) -> float | None:
+    """以日线收盘价和当前价格计算 ETF EMA5，供贪婪卖出确认复用。"""
+    code = normalize_etf_symbol(symbol)
+    try:
+        price = float(current_price)
+    except (TypeError, ValueError):
+        return None
+    if not code or not math.isfinite(price) or price <= 0:
+        return None
+    connection = connect_analytics_db()
+    try:
+        rows = connection.execute(
+            """
+            SELECT close FROM a_stock_fund_daily
+            WHERE ts_code = ? AND trade_date < ? AND close IS NOT NULL AND close > 0
+            ORDER BY trade_date DESC LIMIT 60
+            """,
+            [code, datetime.now().date()],
+        ).fetchall()
+    finally:
+        connection.close()
+    closes = [float(row[0]) for row in reversed(rows) if row[0] is not None]
+    if len(closes) < 5:
+        return None
+    # adjust=False EMA 与回测 pandas ewm(span=5, adjust=False) 保持一致。
+    ema = closes[0]
+    alpha = 2 / 6
+    for close in closes[1:]:
+        ema = alpha * close + (1 - alpha) * ema
+    return alpha * price + (1 - alpha) * ema

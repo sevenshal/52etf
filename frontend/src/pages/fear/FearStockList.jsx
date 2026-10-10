@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin } from 'antd';
-import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined, ExperimentOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
@@ -20,6 +20,24 @@ const formatVolume = (value) => {
   return numeric.toFixed(0);
 };
 
+const ScaleRangeFilter = ({ selectedKeys, setSelectedKeys, confirm, clearFilters }) => {
+  const [min = '', max = ''] = String(selectedKeys[0] || '').split('|');
+  const update = (nextMin, nextMax) => setSelectedKeys((nextMin !== '' || nextMax !== '') ? [`${nextMin}|${nextMax}`] : []);
+  return (
+    <div style={{ padding: 8, width: 250 }} onKeyDown={(event) => event.stopPropagation()}>
+      <Space size={4}>
+        <Input type="number" min="0" value={min} placeholder="最小(亿)" onChange={(event) => update(event.target.value, max)} style={{ width: 100 }} />
+        <span>至</span>
+        <Input type="number" min="0" value={max} placeholder="最大(亿)" onChange={(event) => update(min, event.target.value)} style={{ width: 100 }} />
+      </Space>
+      <Space style={{ marginTop: 8 }}>
+        <Button type="primary" size="small" onClick={() => confirm()}>筛选</Button>
+        <Button size="small" onClick={() => { clearFilters?.(); confirm(); }}>重置</Button>
+      </Space>
+    </div>
+  );
+};
+
 const FearStockList = () => {
   const navigate = useNavigate();
   const [data, setData] = useState([]);
@@ -34,13 +52,14 @@ const FearStockList = () => {
   const [previewAmount, setPreviewAmount] = useState(0);
   const [activeType, setActiveType] = useState(3);
   const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
+  const [backtestVisible, setBacktestVisible] = useState(false);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestResult, setBacktestResult] = useState(null);
+  const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, allow_leverage: false });
   const [historyRecord, setHistoryRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [enabledFilter, setEnabledFilter] = useState('all');
-  const [scaleMin, setScaleMin] = useState('');
-  const [scaleMax, setScaleMax] = useState('');
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -100,6 +119,7 @@ const FearStockList = () => {
           isConfigured: Boolean(stock),
           enabled: Boolean(stock?.enabled),
           etf_scale: emoData.scale || -1,
+          turnover: emoData.turnover ?? emoData.amount ?? emoData.emotion?.turnover ?? emoData.emotion?.amount ?? null,
           emo_name: emoData.name || '-',
           emo_score: emoData.emotion?.score ?? '-',
           emo_price: emoData.emotion?.price ?? '-',
@@ -292,6 +312,31 @@ const FearStockList = () => {
     }
   };
 
+  const runBacktest = async () => {
+    setBacktestLoading(true);
+    try {
+      const { data: result } = await request.post('/api/quant/a-stock-backtest', backtestParams);
+      setBacktestResult(result);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '回测失败');
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  const backtestChartOption = {
+    tooltip: { trigger: 'axis' },
+    grid: { left: 55, right: 28, top: 28, bottom: 42 },
+    xAxis: { type: 'category', data: (backtestResult?.curve || []).map(item => item.date), axisLabel: { hideOverlap: true } },
+    yAxis: { type: 'value', name: '净值', scale: true },
+    dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+    series: [{
+      type: 'line', name: '组合净值', showSymbol: false, smooth: true,
+      data: (backtestResult?.curve || []).map(item => item.nav),
+      lineStyle: { color: '#1677ff', width: 2 },
+    }],
+  };
+
   const historyChartOption = {
     tooltip: { trigger: 'axis' },
     legend: { data: ['贪恐指数', '价格'], top: 4 },
@@ -452,6 +497,11 @@ const FearStockList = () => {
       dataIndex: 'enabled',
       key: 'enabled',
       width: 70,
+      filters: [
+        { text: '已启用', value: 'enabled' },
+        { text: '未启用', value: 'disabled' },
+      ],
+      onFilter: (value, record) => value === 'enabled' ? Boolean(record.enabled) : !record.enabled,
       render: (_, record) => (
         <Tooltip title={record.isConfigured ? '控制该标的是否参与自动交易' : '请先添加并保存交易参数'}>
           <Switch
@@ -523,7 +573,24 @@ const FearStockList = () => {
       dataIndex: 'etf_scale',
       key: 'etf_scale',
       width: 80,
-      sorter: (a, b) => a.etf_scale - b.etf_scale
+      sorter: (a, b) => a.etf_scale - b.etf_scale,
+      filterDropdown: (props) => <ScaleRangeFilter {...props} />,
+      onFilter: (value, record) => {
+        const [minText, maxText] = String(value || '').split('|');
+        const scale = Number(record.etf_scale);
+        return Number.isFinite(scale)
+          && (minText === '' || scale >= Number(minText))
+          && (maxText === '' || scale <= Number(maxText));
+      },
+    },
+    {
+      title: '成交额',
+      dataIndex: 'turnover',
+      key: 'turnover',
+      width: 100,
+      align: 'right',
+      sorter: (a, b) => (Number(a.turnover) || -1) - (Number(b.turnover) || -1),
+      render: (value) => formatVolume(value),
     },
     {
       title: '操作',
@@ -561,18 +628,6 @@ const FearStockList = () => {
       ),
     },
   ];
-
-  const filteredData = data.filter((record) => {
-    if (enabledFilter === 'enabled' && !record.enabled) return false;
-    if (enabledFilter === 'disabled' && record.enabled) return false;
-
-    const scale = Number(record.etf_scale);
-    const min = Number(scaleMin);
-    const max = Number(scaleMax);
-    if (scaleMin !== '' && (!Number.isFinite(scale) || scale < min)) return false;
-    if (scaleMax !== '' && (!Number.isFinite(scale) || scale > max)) return false;
-    return true;
-  });
 
   const FactorPreviewModal = ({
     visible,
@@ -794,6 +849,9 @@ const FearStockList = () => {
           >
             策略配置
           </Button>
+          <Button icon={<ExperimentOutlined />} onClick={() => setBacktestVisible(true)}>
+            回测
+          </Button>
         </Space>
       </Layout.Header>
 
@@ -805,52 +863,10 @@ const FearStockList = () => {
         items={tabItems.map(t => ({ key: t.key, label: t.label }))}
       />
 
-      <div style={{ padding: '0 16px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>筛选：</span>
-        <Select
-          value={enabledFilter}
-          onChange={setEnabledFilter}
-          style={{ width: 110 }}
-          options={[
-            { value: 'all', label: '全部状态' },
-            { value: 'enabled', label: '仅已启用' },
-            { value: 'disabled', label: '仅未启用' },
-          ]}
-        />
-        <Input
-          value={scaleMin}
-          onChange={(event) => setScaleMin(event.target.value)}
-          type="number"
-          min="0"
-          placeholder="最小市值(亿)"
-          style={{ width: 130 }}
-        />
-        <span>至</span>
-        <Input
-          value={scaleMax}
-          onChange={(event) => setScaleMax(event.target.value)}
-          type="number"
-          min="0"
-          placeholder="最大市值(亿)"
-          style={{ width: 130 }}
-        />
-        <Button
-          type="link"
-          onClick={() => {
-            setEnabledFilter('all');
-            setScaleMin('');
-            setScaleMax('');
-          }}
-        >
-          重置
-        </Button>
-        <span style={{ color: '#8c8c8c' }}>显示 {filteredData.length} / {data.length}</span>
-      </div>
-
       <Table
         loading={loading}
         columns={columns}
-        dataSource={filteredData}
+        dataSource={data}
         rowKey="code"
         scroll={{ x: 'max-content' }}
         size="small"
@@ -866,6 +882,68 @@ const FearStockList = () => {
         destroyOnClose
       >
         <SZDTConfigForm onSuccess={() => setIsConfigModalVisible(false)} />
+      </Modal>
+
+      <Modal
+        title="守猪逮兔 A股ETF 回测"
+        open={backtestVisible}
+        onCancel={() => setBacktestVisible(false)}
+        width={920}
+        footer={null}
+        destroyOnClose={false}
+      >
+        <Space wrap style={{ marginBottom: 16 }}>
+          <span>初始资金</span>
+          <Input
+            type="number"
+            min="10000"
+            value={backtestParams.initial_capital}
+            onChange={(event) => setBacktestParams(prev => ({ ...prev, initial_capital: Number(event.target.value) || 0 }))}
+            style={{ width: 130 }}
+          />
+          <span>开始日期</span>
+          <Input type="date" value={backtestParams.start_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, start_date: event.target.value || undefined }))} style={{ width: 145 }} />
+          <span>结束日期</span>
+          <Input type="date" value={backtestParams.end_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, end_date: event.target.value || undefined }))} style={{ width: 145 }} />
+          <span>允许杠杆</span>
+          <Switch checked={backtestParams.allow_leverage} onChange={(allow_leverage) => setBacktestParams(prev => ({ ...prev, allow_leverage }))} />
+          <Button type="primary" loading={backtestLoading} onClick={runBacktest}>开始回测</Button>
+        </Space>
+        <div style={{ color: '#8c8c8c', marginBottom: 12 }}>
+          使用当前启用 A股ETF 的贪恐阈值、金额、系数、最大仓位及量比配置；日线信号在下一交易日开盘成交。
+          {backtestResult?.rules?.sell_on_ema5_breakdown ? ' 当前已启用“贪婪且跌破 EMA5 才卖”。' : ' 当前为贪婪达到阈值即卖。'}
+        </div>
+        {backtestResult && <>
+          <Table
+            size="small"
+            pagination={false}
+            rowKey="key"
+            style={{ marginBottom: 12 }}
+            columns={[
+              { title: '累计收益', dataIndex: 'total_return_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '年化收益', dataIndex: 'annualized_return_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '最大回撤', dataIndex: 'max_drawdown_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '夏普', dataIndex: 'sharpe', render: value => value ?? '-' },
+              { title: '成交', dataIndex: 'trade_count', render: (_, row) => `${row.trade_count}（买 ${row.buy_count} / 卖 ${row.sell_count}）` },
+              { title: '平均资金利用率', dataIndex: 'avg_gross_exposure_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '资金利用效率', dataIndex: 'capital_efficiency_pct', render: value => value == null ? '-' : `${Number(value).toFixed(2)}%` },
+            ]}
+            dataSource={[{ key: 'metrics', ...backtestResult.metrics }]}
+          />
+          <ReactECharts option={backtestChartOption} style={{ height: 310 }} />
+          <Table
+            size="small"
+            rowKey={(record, index) => `${record.date}-${record.code}-${index}`}
+            pagination={{ pageSize: 8, showSizeChanger: false }}
+            columns={[
+              { title: '日期', dataIndex: 'date' }, { title: '标的', dataIndex: 'name' }, { title: '代码', dataIndex: 'code' },
+              { title: '方向', dataIndex: 'side', render: value => value === 'BUY' ? '买入' : '卖出' },
+              { title: '数量', dataIndex: 'quantity' }, { title: '价格', dataIndex: 'price' }, { title: '贪恐', dataIndex: 'score' },
+              { title: '金额', dataIndex: 'amount', render: value => Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) },
+            ]}
+            dataSource={backtestResult.trades}
+          />
+        </>}
       </Modal>
 
       <Modal

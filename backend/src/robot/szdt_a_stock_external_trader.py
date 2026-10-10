@@ -41,7 +41,7 @@ from ..core.services.external_trading_market import (
 )
 from ..core.services.external_trading_valuation import get_realtime_reference_prices
 from ..core.services.szdt import SZDTService
-from ..core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
+from ..core.services.szdt_etf_volume import get_a_share_etf_ema5, get_a_share_etf_volume_metrics
 from ..core.utils import send_alert_email
 
 logger = logging.getLogger(__name__)
@@ -136,6 +136,7 @@ class SZDTAStockExternalTrader:
             "account_id": config.account_id,
             "external_trading_account_id": config.external_trading_account_id,
             "live_sub_account_id": config.live_sub_account_id,
+            "a_sell_on_ema5_breakdown": bool(config.a_sell_on_ema5_breakdown),
         }
 
     async def _load_external_snapshot(self, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,6 +279,17 @@ class SZDTAStockExternalTrader:
                 return
 
             if score >= stock["when_sell"]:
+                if config.get("a_sell_on_ema5_breakdown"):
+                    ema5 = await asyncio.to_thread(get_a_share_etf_ema5, stock["code"], price)
+                    if ema5 is None or price >= ema5:
+                        self._log(
+                            account_id,
+                            "DEBUG",
+                            f"{name} 贪婪={score:.0f}，价格 {price:.3f} 未跌破EMA5 {ema5:.3f}" if ema5 else
+                            f"{name} 贪婪={score:.0f}，EMA5 数据不足，继续持有",
+                        )
+                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(minutes=5), "贪婪等待跌破EMA5")
+                        return
                 if quantity >= 100:
                     factor = min(1, max(0, (score - stock["when_sell"]) / (100 - stock["when_sell"])))
                     sell_amount = stock["sell_amount"] * (3 ** (factor ** stock["sell_factor"]))

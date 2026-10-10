@@ -1,9 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends, Header, Query, Path
 from pydantic import BaseModel, Field, validator
+from datetime import date
 from typing import List, Dict, Optional
-from ...core.database import get_db, SzdtTradeStock
+from ...core.database import get_db, SZDTTradingConfig, SzdtTradeStock
 from ...core.services.szdt import SZDTService
 from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
+from ...core.services.szdt_a_stock_backtest import run_szdt_a_stock_backtest
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/quant")
@@ -274,6 +276,50 @@ async def get_etf_emotion(
 async def get_etf_volume_metrics(codes: str = Query(..., description="逗号分隔的 SH.510300 / 510300.SH 代码")):
     """A 股 ETF 实时成交量与提示看板同口径的盘中量比（批量、进程缓存）。"""
     return {"data": get_a_share_etf_volume_metrics(codes.split(","))}
+
+
+class AStockSzdtBacktestRequest(BaseModel):
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    initial_capital: float = Field(1_000_000, gt=0, le=100_000_000)
+    allow_leverage: bool = False
+
+
+@router.post("/a-stock-backtest")
+async def run_a_stock_backtest(
+    payload: AStockSzdtBacktestRequest,
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db),
+):
+    """回测当前账户启用的守猪逮兔 A 股 ETF 配置。"""
+    rows = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.account_id == account_id,
+        SzdtTradeStock.type == 3,
+        SzdtTradeStock.enabled == True,  # noqa: E712
+    ).order_by(SzdtTradeStock.id.asc()).all()
+    stocks = [{
+        "code": row.code, "name": row.name, "enabled": bool(row.enabled),
+        "when_buy": row.when_buy, "when_sell": row.when_sell, "max_position": row.max_position,
+        "buy_amount": row.buy_amount, "sell_amount": row.sell_amount,
+        "buy_factor": row.buy_factor, "sell_factor": row.sell_factor,
+        "buy_volume_ratio": row.buy_volume_ratio,
+    } for row in rows]
+    config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
+    sell_on_ema5_breakdown = bool(config and config.a_sell_on_ema5_breakdown)
+    db.close()
+    try:
+        return await run_szdt_a_stock_backtest(
+            stocks,
+            sell_on_ema5_breakdown=sell_on_ema5_breakdown,
+            initial_capital=payload.initial_capital,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            allow_leverage=payload.allow_leverage,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"守猪逮兔A股回测失败: {exc}") from exc
 
 class ETFEmotionHistoryResponse(BaseModel):
     status: int
