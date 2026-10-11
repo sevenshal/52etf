@@ -75,6 +75,51 @@ class StockCandidate(BaseModel):
     tag: Optional[str] = None
     index: Optional[str] = None
 
+
+class BatchStockCandidate(BaseModel):
+    """守猪逮兔列表里的一个标的，供批量创建缺失配置时使用。"""
+    code: str
+    name: str
+    lever: int = Field(1, ge=1, le=4)
+    emo_area: str = Field("a", pattern="^(a|us|coin|other)$")
+
+
+class BatchStockUpdateRequest(BaseModel):
+    type: int = Field(..., ge=-1, le=8)
+    stocks: List[BatchStockCandidate] = Field(..., min_length=1, max_length=200)
+    include_unconfigured: bool = True
+    when_buy: Optional[int] = Field(None, ge=-100, le=100)
+    when_sell: Optional[int] = Field(None, ge=-100, le=100)
+    max_position: Optional[int] = Field(None, ge=0, le=100)
+    buy_amount: Optional[float] = Field(None, gt=0)
+    sell_amount: Optional[float] = Field(None, gt=0)
+    buy_factor: Optional[float] = Field(None, ge=0, le=10)
+    sell_factor: Optional[float] = Field(None, ge=0, le=10)
+    buy_volume_ratio: Optional[float] = Field(None, ge=0, le=20)
+    enabled: Optional[bool] = None
+
+    @validator('when_buy', 'when_sell', 'max_position', 'type', pre=True)
+    def convert_optional_int(cls, value):
+        if value is None:
+            return value
+        return int(float(value)) if isinstance(value, str) else value
+
+    @validator('buy_amount', 'sell_amount', 'buy_factor', 'sell_factor', 'buy_volume_ratio', pre=True)
+    def convert_optional_float(cls, value):
+        if value is None:
+            return value
+        return float(value) if isinstance(value, str) else value
+
+    def update_fields(self) -> Dict[str, object]:
+        return {
+            field: getattr(self, field)
+            for field in (
+                "when_buy", "when_sell", "max_position", "buy_amount", "sell_amount",
+                "buy_factor", "sell_factor", "buy_volume_ratio", "enabled",
+            )
+            if getattr(self, field) is not None
+        }
+
 class StockEmotionData(BaseModel):
     name: str
     price: float
@@ -137,6 +182,62 @@ async def create_stock(
     db.add(db_stock)
     db.commit()
     return {"message": "Stock Saved"}
+
+
+@router.patch("/stocks/batch")
+async def batch_update_stocks(
+    payload: BatchStockUpdateRequest,
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db),
+):
+    """批量更新当前标签的配置；可选择把尚未配置的标的以停用状态加入。"""
+    updates = payload.update_fields()
+    if not updates:
+        raise HTTPException(status_code=400, detail="请至少填写一个要批量更新的参数")
+
+    candidates = {}
+    for candidate in payload.stocks:
+        code = candidate.code.upper()
+        candidates.setdefault(code, candidate)
+    codes = list(candidates)
+    existing = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.account_id == account_id,
+        SzdtTradeStock.type == payload.type,
+        SzdtTradeStock.code.in_(codes),
+    ).all()
+    existing_by_code = {stock.code.upper(): stock for stock in existing}
+    updated = created = skipped = 0
+    defaults = {
+        "when_buy": -60, "when_sell": 60, "max_position": 5,
+        "buy_amount": 2000.0, "sell_amount": 2000.0,
+        "buy_factor": 1.0, "sell_factor": 1.0, "buy_volume_ratio": 0.0,
+    }
+
+    for code, candidate in candidates.items():
+        stock = existing_by_code.get(code)
+        if stock:
+            for field, value in updates.items():
+                setattr(stock, field, value)
+            updated += 1
+            continue
+        if not payload.include_unconfigured:
+            skipped += 1
+            continue
+        values = {**defaults, **updates}
+        # 新增配置默认停用，只有批量表单显式选择启用时才参与自动交易。
+        values["enabled"] = updates.get("enabled", False)
+        db.add(SzdtTradeStock(
+            account_id=account_id,
+            code=code,
+            name=candidate.name,
+            type=payload.type,
+            lever=candidate.lever,
+            emo_area=candidate.emo_area,
+            **values,
+        ))
+        created += 1
+    db.commit()
+    return {"message": "批量设置完成", "updated": updated, "created": created, "skipped": skipped}
 
 @router.put("/stocks/{stock_id}")
 async def update_stock(

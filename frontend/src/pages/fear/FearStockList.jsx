@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin } from 'antd';
-import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined, ExperimentOutlined, SettingOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
 import ReactECharts from 'echarts-for-react';
@@ -45,6 +45,7 @@ const FearStockList = () => {
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [editingRecord, setEditingRecord] = useState(null);
   const [form] = Form.useForm();
+  const [batchForm] = Form.useForm();
   const [candidates, setCandidates] = useState([]);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewType, setPreviewType] = useState('buy'); // 'buy' or 'sell'
@@ -63,6 +64,8 @@ const FearStockList = () => {
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [batchModalVisible, setBatchModalVisible] = useState(false);
+  const [batchUpdating, setBatchUpdating] = useState(false);
 
   const tabItems = [
     { key: '1', label: '美股杠杆' },
@@ -262,6 +265,49 @@ const FearStockList = () => {
     } catch (error) {
       const errorMessage = error.response?.detail || error.message || '更新启用状态失败';
       message.error(errorMessage);
+    }
+  };
+
+  const openBatchModal = () => {
+    batchForm.resetFields();
+    batchForm.setFieldsValue({ include_unconfigured: true });
+    setBatchModalVisible(true);
+  };
+
+  const handleBatchUpdate = async () => {
+    try {
+      const values = await batchForm.validateFields();
+      const fields = ['when_buy', 'when_sell', 'buy_factor', 'sell_factor', 'buy_amount', 'sell_amount', 'max_position', 'buy_volume_ratio'];
+      const payload = {
+        type: Number(activeType),
+        include_unconfigured: Boolean(values.include_unconfigured),
+        stocks: data.map((record) => ({
+          code: record.code,
+          name: record.emo_name || record.name,
+          lever: Number(record.lever || 1),
+          emo_area: record.emo_area || 'a',
+        })),
+      };
+      fields.forEach((field) => {
+        if (values[field] !== undefined && values[field] !== null && values[field] !== '') {
+          payload[field] = Number(values[field]);
+        }
+      });
+      if (values.enabled !== undefined) payload.enabled = values.enabled;
+      if (!fields.some((field) => payload[field] !== undefined) && payload.enabled === undefined) {
+        message.warning('请至少填写一个要批量设置的参数');
+        return;
+      }
+      setBatchUpdating(true);
+      const { data: result } = await request.patch('/api/quant/stocks/batch', payload);
+      message.success(`已更新 ${result.updated || 0} 个，新增 ${result.created || 0} 个${result.skipped ? `，跳过 ${result.skipped} 个` : ''}`);
+      setBatchModalVisible(false);
+      fetchStocks();
+    } catch (error) {
+      if (error?.errorFields) return;
+      message.error(error.response?.data?.detail || error.message || '批量设置失败');
+    } finally {
+      setBatchUpdating(false);
     }
   };
 
@@ -882,6 +928,9 @@ const FearStockList = () => {
           >
             策略配置
           </Button>
+          <Button icon={<SettingOutlined />} onClick={openBatchModal}>
+            批量设置
+          </Button>
           <Button icon={<ExperimentOutlined />} onClick={() => setBacktestVisible(true)}>
             回测
           </Button>
@@ -915,6 +964,42 @@ const FearStockList = () => {
         destroyOnClose
       >
         <SZDTConfigForm onSuccess={() => setIsConfigModalVisible(false)} />
+      </Modal>
+
+      <Modal
+        title={`${tabItems.find(item => Number(item.key) === Number(activeType))?.label || ''} 批量设置`}
+        open={batchModalVisible}
+        onCancel={() => setBatchModalVisible(false)}
+        onOk={handleBatchUpdate}
+        okText="应用到当前标签"
+        confirmLoading={batchUpdating}
+        destroyOnClose
+        width={580}
+      >
+        <div style={{ color: '#8c8c8c', marginBottom: 16 }}>
+          留空的字段保持原值。当前标签共 {data.length} 个标的，已配置 {data.filter(item => item.isConfigured).length} 个。
+        </div>
+        <Form form={batchForm} layout="vertical">
+          <Form.Item name="include_unconfigured" valuePropName="checked" style={{ marginBottom: 12 }}>
+            <Switch checkedChildren="新增未配置" unCheckedChildren="仅已有配置" />
+          </Form.Item>
+          <div style={{ color: '#8c8c8c', marginTop: -8, marginBottom: 16, fontSize: 12 }}>
+            开启后会把未配置标的写入本地配置表；未显式设置“启用”时，它们默认停用。
+          </div>
+          <Space wrap size={[12, 0]}>
+            <Form.Item name="when_buy" label="何时买"><Input type="number" min={-100} max={100} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="when_sell" label="何时卖"><Input type="number" min={-100} max={100} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="buy_factor" label="买系数"><Input type="number" min={0} max={10} step={0.01} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="sell_factor" label="卖系数"><Input type="number" min={0} max={10} step={0.01} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="buy_amount" label="买入金额"><Input type="number" min={0} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="sell_amount" label="卖出金额"><Input type="number" min={0} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            <Form.Item name="max_position" label="最大仓位%"><Input type="number" min={0} max={100} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
+            {activeType === 3 && <Form.Item name="buy_volume_ratio" label="买入量比下限"><Input type="number" min={0} max={20} step={0.05} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>}
+            <Form.Item name="enabled" label="启用状态">
+              <Select allowClear placeholder="保持原值" style={{ width: 130 }} options={[{ value: true, label: '启用' }, { value: false, label: '停用' }]} />
+            </Form.Item>
+          </Space>
+        </Form>
       </Modal>
 
       <Modal
