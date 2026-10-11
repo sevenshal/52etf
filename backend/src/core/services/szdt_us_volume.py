@@ -1,6 +1,7 @@
 """守猪逮兔美股盘中量比：只在策略定时点调用 Longport 分钟 K 线。"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Tuple
 from zoneinfo import ZoneInfo
