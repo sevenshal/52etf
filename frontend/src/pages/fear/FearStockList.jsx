@@ -644,9 +644,10 @@ const FearStockList = () => {
       width: 80,
       render: (text) => {
         const areaMap = {
-          'a': 'A股',
-          'us': '美股',
-          'coin': '数字货币',
+          'a': '中概',
+          'us': '美概',
+          'coin': '币股',
+          'sk': '韩概',
           'other': '其他'
         };
         return areaMap[text] || text;
@@ -1329,9 +1330,10 @@ const FearStockList = () => {
           >
             <Select
               options={[
-                { value: 'a', label: 'A股' },
-                { value: 'us', label: '美股' },
-                { value: 'coin', label: '数字货币' },
+                { value: 'a', label: '中概' },
+                { value: 'us', label: '美概' },
+                { value: 'coin', label: '币股' },
+                { value: 'sk', label: '韩概' },
                 { value: 'other', label: '其他' },
               ]}
               style={{ width: '100%' }}

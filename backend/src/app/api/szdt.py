@@ -31,7 +31,7 @@ class StockModel(BaseModel):
     buy_volume_ratio: float = Field(0, ge=0, le=20, description="买入量比下限，0表示不限制")
     enabled: bool = True
     lever: int = Field(..., ge=1, le=4)
-    emo_area: str = Field(..., pattern="^(a|us|coin|other)$")
+    emo_area: str = Field(..., pattern="^(a|us|coin|sk|other)$")
 
     @validator('when_buy', 'when_sell', 'max_position', 'type', pre=True)
     def convert_to_int(cls, v):
@@ -82,7 +82,7 @@ class BatchStockCandidate(BaseModel):
     code: str
     name: str
     lever: int = Field(1, ge=1, le=4)
-    emo_area: str = Field("a", pattern="^(a|us|coin|other)$")
+    emo_area: str = Field("a", pattern="^(a|us|coin|sk|other)$")
 
 
 class BatchStockUpdateRequest(BaseModel):
@@ -302,7 +302,7 @@ async def get_stock(
 async def get_stocks_emotions(
     code: str, 
     lever: int = Query(1, ge=1, le=4),
-    emo_area: str = Query('a', pattern="^(a|us|coin|other)$"),
+    emo_area: str = Query('a', pattern="^(a|us|coin|sk|other)$"),
     account_id: str = Depends(get_account_id)
 ):
     """获取账户股票的情绪指标"""
