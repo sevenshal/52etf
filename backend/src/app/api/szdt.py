@@ -20,7 +20,7 @@ class StockModel(BaseModel):
     id: Optional[int] = None
     code: str
     name: str
-    type: int = Field(3, ge=-1, le=8, description="ETF/类型: -1~8, 默认3(A股ETF)")
+    type: int = Field(3, ge=-1, le=10, description="ETF/类型: -1~10, 默认3(A股ETF)")
     when_buy: int = Field(..., ge=-100, le=100)
     when_sell: int = Field(..., ge=-100, le=100)
     max_position: int = Field(..., ge=0, le=100)
@@ -86,7 +86,7 @@ class BatchStockCandidate(BaseModel):
 
 
 class BatchStockUpdateRequest(BaseModel):
-    type: int = Field(..., ge=-1, le=8)
+    type: int = Field(..., ge=-1, le=10)
     stocks: List[BatchStockCandidate] = Field(..., min_length=1, max_length=200)
     include_unconfigured: bool = True
     when_buy: Optional[int] = Field(None, ge=-100, le=100)
@@ -145,7 +145,7 @@ async def get_account_id(x_account_id: Optional[str] = Header(None)) -> str:
 @router.get("/trading-stocks", response_model=List[StockModel])
 async def list_trading_stocks(
     account_id: str = Depends(get_account_id),
-    etf_type: Optional[int] = Query(None, ge=-1, le=8, description="按类型筛选，可不传返回全部"),
+    etf_type: Optional[int] = Query(None, ge=-1, le=10, description="按类型筛选，可不传返回全部"),
     db: Session = Depends(get_db)
 ):
     """获取自动交易的股票列表"""
@@ -161,7 +161,7 @@ async def list_trading_stocks(
 @router.get("/stocks", response_model=List[StockModel])
 async def list_stocks(
     account_id: str = Depends(get_account_id),
-    etf_type: int = Query(3, ge=-1, le=8, description="类型，默认3(A股ETF)"),
+    etf_type: int = Query(3, ge=-1, le=10, description="类型，默认3(A股ETF)"),
     db: Session = Depends(get_db)
 ):
     """获取股票列表"""
@@ -338,7 +338,7 @@ class ETFEmotionResponse(BaseModel):
 
 @router.get("/etf/emotion/{etf_type}", response_model=ETFEmotionResponse)
 async def get_etf_emotion(
-    etf_type: int = Path(..., ge=-1, le=15, description="ETF类型: -1:我的自选, 1:美股杠杆, 2:美股常规, 3:A股ETF, 4:全球ETF, 5:港股杠杆, 6:港股常规, 7:美股个股, 8:港股个股")
+        etf_type: int = Path(..., ge=-1, le=15, description="ETF类型: -1:我的自选, 1:美股杠杆, 2:美股常规, 3:A股ETF, 4:全球ETF, 5:港股杠杆, 6:港股常规, 7:美股个股, 8:港股个股, 9:A股个股, 10:港股通")
 ):
     """获取ETF情绪指标
     

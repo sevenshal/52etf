@@ -18,6 +18,14 @@ class SzdtPydanticConfigTest(TestCase):
         self.assertEqual("sk", stock.emo_area)
         self.assertEqual("sk", candidate.emo_area)
 
+    def test_stock_model_accepts_new_a_share_stock_and_hk_connect_types(self):
+        shared = dict(
+            code="SZ.300750", name="宁德时代", when_buy=-80, when_sell=80, max_position=20,
+            buy_amount=10_000, sell_amount=10_000, buy_factor=1, sell_factor=1, lever=1, emo_area="a",
+        )
+        self.assertEqual(9, StockModel(type=9, **shared).type)
+        self.assertEqual(10, StockModel(type=10, **shared).type)
+
     def test_import_does_not_emit_orm_mode_warning(self):
         module_name = "src.app.api.szdt"
         original_module = sys.modules.pop(module_name, None)

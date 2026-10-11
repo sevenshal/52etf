@@ -72,10 +72,12 @@ const FearStockList = () => {
     { key: '2', label: '美股常规' },
     { key: '7', label: '美股个股' },
     { key: '3', label: 'A股ETF' },
-    { key: '4', label: '全球ETF' },
+    { key: '9', label: 'A股个股' },
     { key: '5', label: '港股杠杆' },
     { key: '6', label: '港股常规' },
+    { key: '10', label: '港股通' },
     { key: '8', label: '港股个股' },
+    { key: '4', label: '全球ETF' },
   ];
 
   const fetchStocks = useCallback(async () => {
