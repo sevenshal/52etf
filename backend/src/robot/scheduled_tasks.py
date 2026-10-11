@@ -754,6 +754,21 @@ def _run_szdt_us_trading() -> str:
     return "守猪逮兔 美股策略执行完成"
 
 
+def _run_szdt_us_volume_baseline() -> str:
+    """盘前补齐美股策略同刻量比的 20 日分钟量基准。"""
+    from ..core.services.szdt_us_volume import warm_us_volume_baselines
+
+    result = warm_us_volume_baselines()
+    errors = result.get("errors") or []
+    message = (
+        f"美股量比基准：待预热 {result.get('targets', 0)} 个，"
+        f"完成 {result.get('warmed', 0)} 个，写入 {result.get('saved', 0)} 条"
+    )
+    if errors:
+        raise RuntimeError(f"{message}；失败 {len(errors)} 个：{errors[:5]}")
+    return message
+
+
 def _run_a_stock_innovation100_rebuild(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -1883,6 +1898,17 @@ class ScheduledTaskManager:
                 sort_order=30,
                 runner=_run_szdt_us_trading,
                 default_cron_rule="30 10 * * mon-fri\n55 15 * * mon-fri",
+                default_timezone="America/New_York",
+            ),
+            "szdt_us_volume_baseline": TaskDefinition(
+                task_key="szdt_us_volume_baseline",
+                name="守猪逮兔 美股盘前量比基准",
+                description="纽约开盘前按需用 Longport 历史分钟线预热 20 个交易日的同刻累计成交量基准；仅处理启用量比买入门槛且基准不足的美股配置。",
+                default_time="09:15",
+                default_enabled=True,
+                sort_order=31,
+                runner=_run_szdt_us_volume_baseline,
+                default_cron_rule="15 9 * * mon-fri",
                 default_timezone="America/New_York",
             ),
             "chan_minute_sync": TaskDefinition(

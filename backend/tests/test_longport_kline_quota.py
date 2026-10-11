@@ -14,6 +14,7 @@ class LongPortKlineQuotaTest(TestCase):
         service.ctx = SimpleNamespace(
             candlesticks=object(),
             history_candlesticks_by_date=object(),
+            history_candlesticks_by_offset=object(),
         )
         return service
 
@@ -50,6 +51,19 @@ class LongPortKlineQuotaTest(TestCase):
 
         self.assertEqual(1, len(calls))
         self.assertEqual(1000, calls[0]["count"])
+
+    def test_offset_history_caps_page_size_and_uses_backward_cursor(self):
+        service = self._service()
+        calls = []
+        with patch("src.core.services.longport._limited_candlestick_request", side_effect=lambda *args, **kwargs: calls.append((args, kwargs)) or []):
+            result = service.get_historical_candlesticks_by_offset(
+                "SPY.US", datetime(2026, 10, 1, 9, 30), count=5000, period="1m", adjust_type="none",
+            )
+        self.assertEqual([], result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("SPY.US", calls[0][0][1])
+        self.assertFalse(calls[0][0][4])
+        self.assertEqual(1000, calls[0][0][5])
 
     def test_us_daily_sync_records_quota_error_not_empty_symbol(self):
         class FakeLongPort:

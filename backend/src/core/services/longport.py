@@ -695,6 +695,55 @@ class LongPortService(QuoteProvider, TradeService):
             logging.error(f"获取{symbol}历史K线数据失败: {err}")
             return []
 
+    def get_historical_candlesticks_by_offset(
+        self,
+        symbol: str,
+        end_time: datetime,
+        count: int = 1000,
+        period: str = "1m",
+        adjust_type: str = "none",
+    ) -> List[Dict]:
+        """按时间游标向前取一页历史 K 线。
+
+        分钟历史 K 线会受单次 1,000 根限制。调用方通过本页最早时间继续翻页，
+        避免 ``history_candlesticks_by_date`` 的按天翻页在同一交易日漏掉分钟线。
+        """
+        if symbol in self.invalid_kline_symbols:
+            return []
+        try:
+            resolved_period, is_daily_like = self._resolve_candlestick_period(period)
+            resp = _limited_candlestick_request(
+                self.ctx.history_candlesticks_by_offset,
+                symbol,
+                resolved_period,
+                self._resolve_adjust_type(adjust_type),
+                False,
+                max(1, min(int(count), 1000)),
+                end_time,
+            )
+            return [{
+                "timestamp": candle.timestamp.date() if is_daily_like else candle.timestamp,
+                "open": float(candle.open),
+                "high": float(candle.high),
+                "low": float(candle.low),
+                "close": float(candle.close),
+                "volume": candle.volume,
+                "turnover": float(candle.turnover),
+            } for candle in (resp or [])]
+        except Exception as e:
+            err = str(e)
+            err_lower = err.lower()
+            if "code=301600" in err or "invalid symbol" in err_lower:
+                self._remember_invalid_kline_symbol(symbol, err)
+                logging.warning(f"跳过无效标的 {symbol}: {err}")
+                return []
+            if _is_history_kline_quota_error(e):
+                raise LongPortKlineQuotaExceeded(
+                    f"LongPort历史K线额度耗尽或超限: {symbol}: {err}"
+                ) from e
+            logging.error(f"按游标获取{symbol}历史K线失败: {err}")
+            return []
+
     @sleep_and_retry
     @limits(calls=30, period=30)
     def submit_order(self, side: OrderSide, symbol: str, order_type: OrderType,
