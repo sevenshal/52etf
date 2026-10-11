@@ -29,6 +29,8 @@ class SZDTConfigBase(BaseModel):
     a_sell_on_ema5_breakdown: bool = False
     a_rotation_enabled: bool = False
     a_rotation_threshold: int = Field(-30, ge=-100, le=100)
+    us_rotation_enabled: bool = False
+    us_rotation_threshold: int = Field(-30, ge=-100, le=100)
 
 class SZDTConfigCreate(SZDTConfigBase):
     pass
@@ -138,6 +140,8 @@ def update_config(
     config.a_sell_on_ema5_breakdown = config_in.a_sell_on_ema5_breakdown
     config.a_rotation_enabled = config_in.a_rotation_enabled
     config.a_rotation_threshold = config_in.a_rotation_threshold
+    config.us_rotation_enabled = config_in.us_rotation_enabled
+    config.us_rotation_threshold = config_in.us_rotation_threshold
     
     try:
         db.flush()

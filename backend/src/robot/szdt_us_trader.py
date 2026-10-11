@@ -2,7 +2,7 @@ import logging
 import threading
 from datetime import datetime, timedelta
 import asyncio
-from math import pow
+from math import ceil, pow
 from typing import Dict
 
 from ..core.database import get_db_ctx, SzdtTradeStock, TradingLog, TradingState, StockCooldown, SZDTTradingConfig, IBKRAccountConfig
@@ -230,7 +230,42 @@ class SZDTUSTrader:
                                 return
                         score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
                         score_factor = 3 ** (score_factor ** stock['buy_factor'])
-                        buy_amount = min(available_cash, stock['buy_amount'] * score_factor)
+                        requested_amount = stock['buy_amount'] * score_factor
+                        if config.get('us_rotation_enabled') and available_cash < requested_amount:
+                            threshold = float(config.get('us_rotation_threshold', -30))
+                            with get_db_ctx() as db:
+                                sources = [{
+                                    'code': row.code, 'name': row.name, 'type': row.type, 'lever': row.lever,
+                                    'emo_area': row.emo_area,
+                                } for row in db.query(SzdtTradeStock).filter(
+                                    SzdtTradeStock.account_id == account_id,
+                                    SzdtTradeStock.type.in_([1, 2, 7]),
+                                    SzdtTradeStock.enabled == True,  # noqa: E712
+                                ).all() if row.code != stock['code']]
+                            candidates = []
+                            for source in sources:
+                                position = ib_service.get_position(source['code'])
+                                source_qty, source_price = int(position.get('qty') or 0), float(position.get('price') or 0)
+                                if source_qty <= 0 or source_price <= 0:
+                                    continue
+                                source_emotion = await self.szdt.get_fresh_emotion_from_list(source['type'], source['code'])
+                                if not source_emotion:
+                                    source_emotion = await self.szdt.get_stock_emotion(source['code'], source['lever'], source['emo_area'])
+                                if source_emotion and source_emotion.get('status') == 1 and float(source_emotion['data']['score']) >= threshold:
+                                    candidates.append((float(source_emotion['data']['score']), source, source_qty, source_price))
+                            submitted = []
+                            for source_score, source, source_qty, source_price in sorted(candidates, reverse=True):
+                                if available_cash >= requested_amount:
+                                    break
+                                sell_qty = min(source_qty, max(1, ceil((requested_amount - available_cash) / source_price)))
+                                await ib_service.place_market_order(source['code'], 'SELL', sell_qty)
+                                available_cash += sell_qty * source_price
+                                submitted.append(f"{source['code']}x{sell_qty}(贪恐={source_score:.0f})")
+                                self._set_decision_cooldown(account_id, cli_id, source['code'], 12, '轮动腾挪卖出')
+                            if submitted:
+                                self._log(account_id, 'INFO', f"{name} 为极端恐慌买入腾挪现金，已提交卖出 {', '.join(submitted)}；等待资金到账后重试买入")
+                                return
+                        buy_amount = min(available_cash, requested_amount)
                         buy_quantity = int(buy_amount / price)
                         if buy_quantity >= 1:
                             try:
@@ -303,7 +338,8 @@ class SZDTUSTrader:
 
     @staticmethod
     def _config_snapshot(config: SZDTTradingConfig) -> Dict:
-        return {"id": config.id, "account_id": config.account_id, "ib_account_id": config.ib_account_id}
+        return {"id": config.id, "account_id": config.account_id, "ib_account_id": config.ib_account_id,
+                "us_rotation_enabled": bool(config.us_rotation_enabled), "us_rotation_threshold": int(config.us_rotation_threshold)}
 
     async def run_scheduled_once(self):
         """由系统定时任务调用；两个美股定时点内逐个检查账户的全部启用标的。"""

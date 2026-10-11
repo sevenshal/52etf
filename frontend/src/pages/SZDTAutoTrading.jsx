@@ -96,6 +96,18 @@ export const SZDTConfigForm = ({ onSuccess }) => {
                 </Text>
             </div>
 
+            <Form.Item label="美股现金不足时轮动" name="us_rotation_enabled" valuePropName="checked"
+                extra="开启后，美股极端恐慌买入但现金不足时，会卖出贪恐更高的其他已持仓标的以腾挪资金。">
+                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+            </Form.Item>
+            <Form.Item noStyle shouldUpdate={(prev, current) => prev.us_rotation_enabled !== current.us_rotation_enabled}>
+                {({ getFieldValue }) => getFieldValue('us_rotation_enabled') && (
+                    <Form.Item label="美股轮动卖出贪恐阈值(>=)" name="us_rotation_threshold" rules={[{ required: true, message: '请输入轮动卖出阈值' }]}>
+                        <InputNumber min={-100} max={100} precision={0} style={{ width: '100%' }} />
+                    </Form.Item>
+                )}
+            </Form.Item>
+
             <Form.Item
                 label="A股贪婪 EMA5 卖出确认"
                 name="a_sell_on_ema5_breakdown"

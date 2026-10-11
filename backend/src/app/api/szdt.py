@@ -469,11 +469,15 @@ async def run_us_backtest(
         "buy_factor": row.buy_factor, "sell_factor": row.sell_factor,
         "buy_volume_ratio": row.buy_volume_ratio, "type": row.type,
     } for row in rows]
+    config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
+    rotation_enabled = bool(config and config.us_rotation_enabled)
+    rotation_threshold = int(config.us_rotation_threshold) if config else -30
     db.close()
     try:
         return await run_szdt_us_backtest(
             stocks, account_id=account_id, initial_capital=payload.initial_capital,
             start_date=payload.start_date, end_date=payload.end_date,
+            rotation_enabled=rotation_enabled, rotation_threshold=rotation_threshold,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

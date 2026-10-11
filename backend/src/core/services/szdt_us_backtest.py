@@ -92,6 +92,7 @@ async def _load_us_daily_frame(
 async def run_szdt_us_backtest(
     stocks: List[Dict[str, Any]], *, account_id: str, initial_capital: float = 1_000_000.0,
     start_date: Optional[date] = None, end_date: Optional[date] = None,
+    rotation_enabled: bool = False, rotation_threshold: int = -30,
 ) -> Dict[str, Any]:
     """日线贪恐及量比在 T 日收盘，用 T 日收盘价成交；同日先卖后买。"""
     stocks = [dict(item, code=str(item["code"]).upper()) for item in stocks if item.get("enabled")]
@@ -133,6 +134,7 @@ async def run_szdt_us_backtest(
     cash = float(initial_capital)
     shares: Dict[str, int] = defaultdict(int)
     trades: List[Dict[str, Any]] = []
+    rotation_sell_count = 0
     curve: List[Dict[str, Any]] = []
     for day in days:
         # 收盘信号先减仓，释放的现金可用于同日买入。
@@ -158,6 +160,22 @@ async def run_szdt_us_backtest(
             if equity <= 0 or shares[code] * price / equity * 100 >= float(stock["max_position"]):
                 continue
             wanted = _scaled_amount(float(stock["buy_amount"]), score, float(stock["when_buy"]), float(stock["buy_factor"]), is_buy=True)
+            if rotation_enabled and cash < wanted:
+                sources = sorted(
+                    ((float(source_score), source_code, source_price) for source_code, source_score in ((item["code"], scores.get((item["code"], day))) for item in stocks)
+                     if source_code != code and source_score is not None and float(source_score) >= rotation_threshold
+                     and shares[source_code] > 0 and (source_price := prices.get((source_code, day)))),
+                    reverse=True,
+                )
+                for source_score, source_code, source_price in sources:
+                    if cash >= wanted:
+                        break
+                    quantity_to_sell = min(shares[source_code], max(1, math.ceil((wanted - cash) / source_price)))
+                    source_gross = quantity_to_sell * source_price
+                    cash += source_gross - _fee(source_gross)
+                    shares[source_code] -= quantity_to_sell
+                    rotation_sell_count += 1
+                    trades.append({"date": day.isoformat(), "code": source_code, "name": next(item["name"] for item in stocks if item["code"] == source_code), "side": "ROTATE_SELL", "quantity": quantity_to_sell, "price": round(source_price, 4), "score": round(source_score, 2), "amount": round(source_gross, 2)})
             quantity = int(min(cash, wanted) / price)
             gross = quantity * price
             while quantity > 0 and gross + _fee(gross) > cash:
@@ -201,12 +219,12 @@ async def run_szdt_us_backtest(
         })
     return {
         "period": {"start_date": curve[0]["date"], "end_date": curve[-1]["date"], "sessions": len(returns)},
-        "rules": {"execution": "same_close; sell_before_buy", "allow_leverage": False, "sell_on_ema5_breakdown": False},
+        "rules": {"execution": "same_close; sell_before_buy", "allow_leverage": False, "sell_on_ema5_breakdown": False, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None},
         "metrics": {
             "initial_capital": round(initial_capital, 2), "final_nav": round(float(nav.iloc[-1]), 2),
             "total_return_pct": round(total_return * 100, 2), "annualized_return_pct": round(annualized * 100, 2),
             "max_drawdown_pct": round(drawdown * 100, 2), "sharpe": round(float(sharpe), 2) if sharpe is not None else None,
-            "trade_count": len(trades), "buy_count": sum(item["side"] == "BUY" for item in trades), "sell_count": sum(item["side"] == "SELL" for item in trades),
+            "trade_count": len(trades), "buy_count": sum(item["side"] == "BUY" for item in trades), "sell_count": sum(item["side"] in {"SELL", "ROTATE_SELL"} for item in trades), "rotation_sell_count": rotation_sell_count,
             "avg_gross_exposure_pct": round(float(gross.mean() * 100), 2), "peak_gross_exposure_pct": round(float(gross.max() * 100), 2),
             "max_leverage_ratio": round(float(gross.max()), 4),
             "capital_efficiency_pct": round(float(annualized / gross.mean() * 100), 2) if gross.mean() > 0 else None,

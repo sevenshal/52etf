@@ -1004,6 +1004,8 @@ class SZDTTradingConfig(Base):
     # 现金不足时，卖出贪恐更高的 A 股 ETF 为极端恐慌买入腾挪资金。
     a_rotation_enabled = Column(Boolean, nullable=False, default=False)
     a_rotation_threshold = Column(Integer, nullable=False, default=-30)
+    us_rotation_enabled = Column(Boolean, nullable=False, default=False)
+    us_rotation_threshold = Column(Integer, nullable=False, default=-30)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -2251,6 +2253,8 @@ def ensure_table_columns():
             "a_sell_on_ema5_breakdown": "ALTER TABLE szdt_trading_configs ADD COLUMN a_sell_on_ema5_breakdown BOOLEAN NOT NULL DEFAULT 0",
             "a_rotation_enabled": "ALTER TABLE szdt_trading_configs ADD COLUMN a_rotation_enabled BOOLEAN NOT NULL DEFAULT 0",
             "a_rotation_threshold": "ALTER TABLE szdt_trading_configs ADD COLUMN a_rotation_threshold INTEGER NOT NULL DEFAULT -30",
+            "us_rotation_enabled": "ALTER TABLE szdt_trading_configs ADD COLUMN us_rotation_enabled BOOLEAN NOT NULL DEFAULT 0",
+            "us_rotation_threshold": "ALTER TABLE szdt_trading_configs ADD COLUMN us_rotation_threshold INTEGER NOT NULL DEFAULT -30",
         },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",
