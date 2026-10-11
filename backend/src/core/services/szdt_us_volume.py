@@ -16,6 +16,7 @@ from .longport import LongPortService
 
 
 NEW_YORK = ZoneInfo("America/New_York")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 VOLUME_BASELINE_LOOKBACK = 20
 # 与美股策略的两个执行点严格一致。历史分钟线在盘前一次性预热，盘中只拉当日一小段。
 VOLUME_BASELINE_MINUTES = ("10:30", "15:55")
@@ -43,8 +44,10 @@ def _code_from_symbol(symbol: str) -> str:
 def _as_new_york(timestamp: Any) -> datetime | None:
     if not isinstance(timestamp, datetime):
         return None
+    # LongPort Python SDK 的分钟线 timestamp 是无时区 datetime，实际按运行环境
+    # 的上海时间输出（例如纽约 15:55 会返回次日 03:55）。不能直接当纽约时间。
     if timestamp.tzinfo is None:
-        return timestamp.replace(tzinfo=NEW_YORK)
+        return timestamp.replace(tzinfo=SHANGHAI).astimezone(NEW_YORK)
     return timestamp.astimezone(NEW_YORK)
 
 

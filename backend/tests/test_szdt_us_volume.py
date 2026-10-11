@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from zoneinfo import ZoneInfo
 
 from src.core.services import szdt_us_volume
-from src.core.services.szdt_us_volume import _historical_cumulative_volumes
+from src.core.services.szdt_us_volume import _as_new_york, _historical_cumulative_volumes
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -23,6 +23,13 @@ def test_historical_baseline_uses_same_time_cumulative_regular_session_volume():
 
     assert result[(date(2026, 9, 30), "10:30")] == 30
     assert result[(date(2026, 9, 30), "15:55")] == 60
+
+
+def test_naive_longport_minute_timestamp_is_converted_from_shanghai_to_new_york():
+    # LongPort 以无时区上海时间返回：2026-10-10 03:55 = 纽约前一日 15:55。
+    converted = _as_new_york(datetime(2026, 10, 10, 3, 55))
+
+    assert converted == datetime(2026, 10, 9, 15, 55, tzinfo=NEW_YORK)
 
 
 def test_us_list_metrics_uses_one_batch_quote_without_minute_kline_requests(monkeypatch):
