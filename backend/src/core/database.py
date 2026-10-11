@@ -1001,6 +1001,9 @@ class SZDTTradingConfig(Base):
     live_sub_account_id = Column(Integer, nullable=True)
     # A 股卖出确认：贪婪达到阈值后，等待价格跌破日线 EMA5 再卖出。
     a_sell_on_ema5_breakdown = Column(Boolean, nullable=False, default=False)
+    # 现金不足时，卖出贪恐更高的 A 股 ETF 为极端恐慌买入腾挪资金。
+    a_rotation_enabled = Column(Boolean, nullable=False, default=False)
+    a_rotation_threshold = Column(Integer, nullable=False, default=-30)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -2246,6 +2249,8 @@ def ensure_table_columns():
             "external_trading_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN external_trading_account_id INTEGER",
             "live_sub_account_id": "ALTER TABLE szdt_trading_configs ADD COLUMN live_sub_account_id INTEGER",
             "a_sell_on_ema5_breakdown": "ALTER TABLE szdt_trading_configs ADD COLUMN a_sell_on_ema5_breakdown BOOLEAN NOT NULL DEFAULT 0",
+            "a_rotation_enabled": "ALTER TABLE szdt_trading_configs ADD COLUMN a_rotation_enabled BOOLEAN NOT NULL DEFAULT 0",
+            "a_rotation_threshold": "ALTER TABLE szdt_trading_configs ADD COLUMN a_rotation_threshold INTEGER NOT NULL DEFAULT -30",
         },
         "snowball_copy_configs": {
             "live_trade_enabled": "ALTER TABLE snowball_copy_configs ADD COLUMN live_trade_enabled BOOLEAN NOT NULL DEFAULT 0",

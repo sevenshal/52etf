@@ -1049,6 +1049,7 @@ const FearStockList = () => {
             ? '使用当前启用的美股杠杆 ETF、常规 ETF 和美股个股全部配置；日线贪恐与量比在当日收盘成交，同日先卖后买，不使用融资杠杆。'
             : <>使用当前启用 A股ETF 的贪恐阈值、金额、系数、最大仓位及量比配置；日线信号在下一交易日开盘成交。
               {backtestResult?.rules?.sell_on_ema5_breakdown ? ' 当前已启用“贪婪且跌破 EMA5 才卖”。' : ' 当前为贪婪达到阈值即卖。'}
+              {backtestResult?.rules?.rotation_enabled ? ` 已启用现金不足轮动（卖出贪恐 >= ${backtestResult.rules.rotation_threshold} 的持仓）。` : ' 当前未启用现金不足轮动。'}
             </>}
         </div>
         {backtestResult && <>
@@ -1063,6 +1064,7 @@ const FearStockList = () => {
               { title: '最大回撤', dataIndex: 'max_drawdown_pct', render: value => `${Number(value).toFixed(2)}%` },
               { title: '夏普', dataIndex: 'sharpe', render: value => value ?? '-' },
               { title: '成交', dataIndex: 'trade_count', render: (_, row) => `${row.trade_count}（买 ${row.buy_count} / 卖 ${row.sell_count}）` },
+              { title: '轮动卖出', dataIndex: 'rotation_sell_count', render: value => value || 0 },
               { title: '平均资金利用率', dataIndex: 'avg_gross_exposure_pct', render: value => `${Number(value).toFixed(2)}%` },
               { title: '最大杠杆率', dataIndex: 'max_leverage_ratio', render: value => value == null ? '-' : `${Number(value).toFixed(2)}×` },
               { title: '资金利用效率', dataIndex: 'capital_efficiency_pct', render: value => value == null ? '-' : `${Number(value).toFixed(2)}%` },

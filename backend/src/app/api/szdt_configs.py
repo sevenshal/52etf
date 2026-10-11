@@ -1,6 +1,6 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from ...core.database import get_db, SZDTTradingConfig
 from ...core.external_trading_database import (
@@ -27,6 +27,8 @@ class SZDTConfigBase(BaseModel):
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
     a_sell_on_ema5_breakdown: bool = False
+    a_rotation_enabled: bool = False
+    a_rotation_threshold: int = Field(-30, ge=-100, le=100)
 
 class SZDTConfigCreate(SZDTConfigBase):
     pass
@@ -134,6 +136,8 @@ def update_config(
     config.external_trading_account_id = config_in.external_trading_account_id
     config.live_sub_account_id = config_in.live_sub_account_id
     config.a_sell_on_ema5_breakdown = config_in.a_sell_on_ema5_breakdown
+    config.a_rotation_enabled = config_in.a_rotation_enabled
+    config.a_rotation_threshold = config_in.a_rotation_threshold
     
     try:
         db.flush()

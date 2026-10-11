@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Card, Form, Select, Button, Switch, Typography, message, Skeleton } from 'antd';
+import { Card, Form, Select, Button, Switch, Typography, message, Skeleton, InputNumber } from 'antd';
 import request from '../utils/request';
 
 const { Title, Text } = Typography;
@@ -103,6 +103,27 @@ export const SZDTConfigForm = ({ onSuccess }) => {
                 extra="开启后，贪恐达到卖出阈值时不会立即卖出，只有实时价格跌破日线 EMA5 才卖出。"
             >
                 <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+            </Form.Item>
+
+            <Form.Item
+                label="A股现金不足时轮动"
+                name="a_rotation_enabled"
+                valuePropName="checked"
+                extra="开启后，极端恐慌买入信号出现但现金不足时，会从贪恐更高的已持仓 ETF 中按贪恐从高到低卖出，腾挪出所需资金；仅影响 A股 ETF 自动交易。"
+            >
+                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+            </Form.Item>
+            <Form.Item noStyle shouldUpdate={(prev, current) => prev.a_rotation_enabled !== current.a_rotation_enabled}>
+                {({ getFieldValue }) => getFieldValue('a_rotation_enabled') && (
+                    <Form.Item
+                        label="轮动卖出贪恐阈值(>=)"
+                        name="a_rotation_threshold"
+                        extra="只会卖出贪恐值达到该阈值的其他持仓，优先卖出贪恐最高者。建议 -30。"
+                        rules={[{ required: true, message: '请输入轮动卖出阈值' }]}
+                    >
+                        <InputNumber min={-100} max={100} precision={0} style={{ width: '100%' }} />
+                    </Form.Item>
+                )}
             </Form.Item>
 
             <Form.Item label="启用A股自动化交易" name="enabled_a" valuePropName="checked">

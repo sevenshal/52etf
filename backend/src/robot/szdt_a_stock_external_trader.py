@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import math
 import threading
 import traceback
 from datetime import datetime, timedelta
@@ -137,7 +138,26 @@ class SZDTAStockExternalTrader:
             "external_trading_account_id": config.external_trading_account_id,
             "live_sub_account_id": config.live_sub_account_id,
             "a_sell_on_ema5_breakdown": bool(config.a_sell_on_ema5_breakdown),
+            "a_rotation_enabled": bool(config.a_rotation_enabled),
+            "a_rotation_threshold": int(config.a_rotation_threshold),
         }
+
+    @staticmethod
+    def _enabled_stocks(account_id: str) -> Dict[str, Dict[str, Any]]:
+        """Return detached A-share ETF settings, including any held rotation sources."""
+        with get_db_ctx() as db:
+            rows = db.query(SzdtTradeStock).filter(
+                SzdtTradeStock.account_id == account_id,
+                SzdtTradeStock.type == 3,
+                SzdtTradeStock.enabled == True,  # noqa: E712
+            ).all()
+            return {
+                _external_symbol(row.code): {
+                    key: getattr(row, key)
+                    for key in ("code", "name", "lever", "emo_area")
+                }
+                for row in rows
+            }
 
     async def _load_external_snapshot(self, config: Dict[str, Any]) -> Dict[str, Any]:
         with get_external_trading_db_ctx() as db:
@@ -175,14 +195,16 @@ class SZDTAStockExternalTrader:
                 "external_account_id": account.id, "sub_account_id": sub.id,
             }
 
-    async def _sync_target(
+    async def _sync_targets(
         self, config: Dict[str, Any], snapshot: Dict[str, Any], symbol: str, target_quantity: int,
-        price: float, reason: str,
+        price: float, reason: str, additional_targets: Optional[Dict[str, int]] = None,
     ) -> str:
         target_quantities = dict(snapshot["targets"])
         for held_symbol, quantity in snapshot["positions"].items():
             target_quantities.setdefault(held_symbol, quantity)
         target_quantities[symbol] = max(0, int(target_quantity))
+        for target_symbol, quantity in (additional_targets or {}).items():
+            target_quantities[normalize_symbol(target_symbol)] = max(0, int(quantity))
         targets = [{
             "symbol": target_symbol,
             "target_quantity": quantity,
@@ -205,6 +227,12 @@ class SZDTAStockExternalTrader:
             trigger_source=f"szdt_a_{reason}",
         )
         return f"目标仓位={target_quantity}；执行器={result.get('status')}"
+
+    async def _sync_target(
+        self, config: Dict[str, Any], snapshot: Dict[str, Any], symbol: str, target_quantity: int,
+        price: float, reason: str,
+    ) -> str:
+        return await self._sync_targets(config, snapshot, symbol, target_quantity, price, reason)
 
     async def run_config_once(
         self,
@@ -266,11 +294,57 @@ class SZDTAStockExternalTrader:
                         return
                 if position_ratio < stock["max_position"]:
                     factor = min(1, max(0, (stock["when_buy"] - score) / (stock["when_buy"] + 100)))
-                    buy_amount = min(snapshot["cash"], stock["buy_amount"] * (3 ** (factor ** stock["buy_factor"])))
+                    requested_buy_amount = stock["buy_amount"] * (3 ** (factor ** stock["buy_factor"]))
+                    available_cash = snapshot["cash"]
+                    rotation_targets: Dict[str, int] = {}
+                    rotation_details = []
+                    if config.get("a_rotation_enabled") and available_cash < requested_buy_amount:
+                        rotation_threshold = float(config.get("a_rotation_threshold", -30))
+                        enabled_stocks = self._enabled_stocks(account_id)
+                        rotation_sources = []
+                        for held_symbol, held_quantity in snapshot["positions"].items():
+                            if held_symbol == symbol or held_quantity < 100:
+                                continue
+                            source_stock = enabled_stocks.get(held_symbol)
+                            source_price = safe_float(prices.get(held_symbol))
+                            if not source_stock or source_price <= 0:
+                                continue
+                            source_emotion = await self._szdt_service.get_fresh_emotion_from_list(3, source_stock["code"])
+                            if not source_emotion:
+                                source_emotion = await self._szdt_service.get_stock_emotion(
+                                    source_stock["code"], source_stock["lever"], source_stock["emo_area"],
+                                )
+                            if not source_emotion or source_emotion.get("status") != 1:
+                                continue
+                            source_score = float(source_emotion["data"]["score"])
+                            if source_score >= rotation_threshold:
+                                rotation_sources.append((source_score, held_symbol, source_price, held_quantity, source_stock))
+                        for source_score, source_symbol, source_price, held_quantity, source_stock in sorted(rotation_sources, reverse=True):
+                            if available_cash >= requested_buy_amount:
+                                break
+                            shortfall = requested_buy_amount - available_cash
+                            sell_quantity = min(held_quantity, max(100, math.ceil(shortfall / source_price / 100) * 100))
+                            rotation_targets[source_symbol] = held_quantity - sell_quantity
+                            available_cash += sell_quantity * source_price
+                            rotation_details.append(f"{source_stock['name']} {sell_quantity}股(贪恐={source_score:.0f})")
+                    buy_amount = min(available_cash, requested_buy_amount)
                     buy_quantity = int(buy_amount / price / 100) * 100
                     if buy_quantity >= 100:
-                        result = await self._sync_target(config, snapshot, symbol, quantity + buy_quantity, price, "buy")
-                        self._log(account_id, "INFO", f"{name} BUY {buy_quantity}，分数={score:.0f}；{result}")
+                        if rotation_targets:
+                            result = await self._sync_targets(
+                                config, snapshot, symbol, quantity + buy_quantity, price, "rotation_buy", rotation_targets,
+                            )
+                            self._log(
+                                account_id, "INFO",
+                                f"{name} ROTATE_BUY {buy_quantity}，分数={score:.0f}；腾挪卖出 {', '.join(rotation_details)}；{result}",
+                            )
+                            for source_symbol in rotation_targets:
+                                source_stock = enabled_stocks.get(source_symbol)
+                                if source_stock:
+                                    self._set_cooldown(account_id, cli_id, source_stock["code"], timedelta(hours=12), "轮动腾挪卖出")
+                        else:
+                            result = await self._sync_target(config, snapshot, symbol, quantity + buy_quantity, price, "buy")
+                            self._log(account_id, "INFO", f"{name} BUY {buy_quantity}，分数={score:.0f}；{result}")
                         self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=12), "当日买入信号已触发")
                     else:
                         self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=1), "资金不足，冷却1h")

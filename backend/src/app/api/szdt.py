@@ -430,11 +430,15 @@ async def run_a_stock_backtest(
     } for row in rows]
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     sell_on_ema5_breakdown = bool(config and config.a_sell_on_ema5_breakdown)
+    rotation_enabled = bool(config and config.a_rotation_enabled)
+    rotation_threshold = int(config.a_rotation_threshold) if config else -30
     db.close()
     try:
         return await run_szdt_a_stock_backtest(
             stocks,
             sell_on_ema5_breakdown=sell_on_ema5_breakdown,
+            rotation_enabled=rotation_enabled,
+            rotation_threshold=rotation_threshold,
             initial_capital=payload.initial_capital,
             start_date=payload.start_date,
             end_date=payload.end_date,
@@ -503,6 +507,8 @@ async def sync_backtest_positions(
         "external_trading_account_id": config.external_trading_account_id,
         "live_sub_account_id": config.live_sub_account_id,
         "a_sell_on_ema5_breakdown": bool(config.a_sell_on_ema5_breakdown),
+        "a_rotation_enabled": bool(config.a_rotation_enabled),
+        "a_rotation_threshold": int(config.a_rotation_threshold),
         "enabled_a": bool(config.enabled_a),
         "ib_account_id": config.ib_account_id,
     }

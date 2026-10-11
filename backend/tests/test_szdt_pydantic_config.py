@@ -4,6 +4,7 @@ import warnings
 from unittest import TestCase
 
 from src.app.api.szdt import BatchStockCandidate, StockModel
+from src.app.api.szdt_configs import SZDTConfigCreate
 
 
 class SzdtPydanticConfigTest(TestCase):
@@ -43,3 +44,11 @@ class SzdtPydanticConfigTest(TestCase):
             sys.modules.pop(module_name, None)
             if original_module is not None:
                 sys.modules[module_name] = original_module
+
+    def test_szdt_rotation_config_defaults_and_accepts_threshold(self):
+        default = SZDTConfigCreate()
+        enabled = SZDTConfigCreate(a_rotation_enabled=True, a_rotation_threshold=-30)
+        self.assertFalse(default.a_rotation_enabled)
+        self.assertEqual(-30, default.a_rotation_threshold)
+        self.assertTrue(enabled.a_rotation_enabled)
+        self.assertEqual(-30, enabled.a_rotation_threshold)
