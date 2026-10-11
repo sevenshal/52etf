@@ -107,6 +107,15 @@ const FearStockList = () => {
         } catch (error) {
           // 实时行情失败不影响贪恐主列表；下次刷新会走后端的短缓存重试。
         }
+      } else if ([1, 2, 7].includes(activeType) && formattedCandidates.length > 0) {
+        try {
+          const volumeResponse = await request.get('/api/quant/us/market-metrics', {
+            params: { codes: formattedCandidates.map(item => item.code).join(',') },
+          });
+          volumeMetrics = volumeResponse.data?.data || {};
+        } catch (error) {
+          // 美股 quote / 本地量比快照不可用时，仍正常展示贪恐列表。
+        }
       }
 
       const configuredStocks = new Map(
@@ -126,12 +135,12 @@ const FearStockList = () => {
           enabled: Boolean(stock?.enabled),
           etf_scale: emoData.scale || -1,
           // 守猪逮兔列表没有成交额，A 股 ETF 统一从实时/日线行情指标读取。
-          turnover: volumeMetrics[toAStockTsCode(emoData.code)]?.turnover ?? null,
+          turnover: (activeType === 3 ? volumeMetrics[toAStockTsCode(emoData.code)] : volumeMetrics[emoData.code])?.turnover ?? null,
           emo_name: emoData.name || '-',
           emo_score: emoData.emotion?.score ?? '-',
           emo_price: emoData.emotion?.price ?? '-',
-          volume: volumeMetrics[toAStockTsCode(emoData.code)]?.volume ?? null,
-          volume_ratio: volumeMetrics[toAStockTsCode(emoData.code)]?.volume_ratio ?? null,
+          volume: (activeType === 3 ? volumeMetrics[toAStockTsCode(emoData.code)] : volumeMetrics[emoData.code])?.volume ?? null,
+          volume_ratio: (activeType === 3 ? volumeMetrics[toAStockTsCode(emoData.code)] : volumeMetrics[emoData.code])?.volume_ratio ?? null,
         };
       }).sort((a, b) => b.etf_scale - a.etf_scale);
 
@@ -394,25 +403,21 @@ const FearStockList = () => {
   const backtestChartOption = {
     tooltip: { trigger: 'axis' },
     legend: { data: ['组合净值', '整体仓位', '回撤'], top: 2 },
-    grid: [
-      { left: 55, right: 48, top: 30, height: '45%' },
-      { left: 55, right: 48, top: '58%', height: '14%' },
-      { left: 55, right: 48, top: '78%', height: '12%' },
-    ],
-    xAxis: [0, 1, 2].map((gridIndex) => ({
-      type: 'category', gridIndex, data: (backtestResult?.curve || []).map(item => item.date),
-      axisLabel: gridIndex === 2 ? { hideOverlap: true } : { show: false },
-    })),
+    grid: { left: 58, right: 58, top: 34, bottom: 58 },
+    xAxis: {
+      type: 'category',
+      data: (backtestResult?.curve || []).map(item => item.date),
+      axisLabel: { hideOverlap: true },
+    },
     yAxis: [
       { type: 'value', name: '净值', scale: true },
-      { type: 'value', name: '仓位%', min: 0, max: 100, gridIndex: 1 },
-      { type: 'value', name: '回撤%', max: 0, gridIndex: 2 },
+      { type: 'value', name: '仓位 / 回撤%', min: -100, max: 100, axisLabel: { formatter: '{value}%' } },
     ],
     dataZoom: [{ type: 'inside' }, { type: 'slider' }],
     series: [
       { type: 'line', name: '组合净值', showSymbol: false, smooth: true, data: (backtestResult?.curve || []).map(item => item.nav), lineStyle: { color: '#1677ff', width: 2 } },
-      { type: 'line', name: '整体仓位', xAxisIndex: 1, yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.gross_exposure), lineStyle: { color: '#52c41a', width: 1.5 } },
-      { type: 'line', name: '回撤', xAxisIndex: 2, yAxisIndex: 2, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.drawdown_pct), lineStyle: { color: '#bfbfbf', width: 1 }, areaStyle: { color: 'rgba(191,191,191,0.35)' } },
+      { type: 'line', name: '整体仓位', yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.gross_exposure), lineStyle: { color: '#52c41a', width: 1.5 } },
+      { type: 'line', name: '回撤', yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.drawdown_pct), lineStyle: { color: '#bfbfbf', width: 1 }, areaStyle: { color: 'rgba(191,191,191,0.35)' } },
     ],
   };
 
@@ -994,7 +999,7 @@ const FearStockList = () => {
             <Form.Item name="buy_amount" label="买入金额"><Input type="number" min={0} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
             <Form.Item name="sell_amount" label="卖出金额"><Input type="number" min={0} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
             <Form.Item name="max_position" label="最大仓位%"><Input type="number" min={0} max={100} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>
-            {activeType === 3 && <Form.Item name="buy_volume_ratio" label="买入量比下限"><Input type="number" min={0} max={20} step={0.05} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>}
+            {[1, 2, 3, 7].includes(activeType) && <Form.Item name="buy_volume_ratio" label="买入量比下限"><Input type="number" min={0} max={20} step={0.05} placeholder="保持原值" style={{ width: 110 }} /></Form.Item>}
             <Form.Item name="enabled" label="启用状态">
               <Select allowClear placeholder="保持原值" style={{ width: 130 }} options={[{ value: true, label: '启用' }, { value: false, label: '停用' }]} />
             </Form.Item>
@@ -1295,10 +1300,10 @@ const FearStockList = () => {
           >
             <Input type="number" />
           </Form.Item>
-          {activeType === 3 && <Form.Item
+          {[1, 2, 3, 7].includes(activeType) && <Form.Item
             name="buy_volume_ratio"
             label="买入量比下限(>=)"
-            tooltip="与市场提示看板同口径的同时段累计量比达到该值后，恐贪买入条件才会触发；填 0 表示不限制。"
+            tooltip="盘中累计成交量 ÷ 前20个交易日同一时点累计成交量均值达到该值后，恐贪买入条件才会触发；填 0 表示不限制。"
             rules={[{ required: true, message: '请输入买入量比下限' }]}
           >
             <Input type="number" min="0" max="20" step="0.05" />

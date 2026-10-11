@@ -34,6 +34,11 @@ def _symbol(code: str) -> str:
     return f"{text.split('.', 1)[1]}.US" if text.startswith("US.") else text
 
 
+def _code_from_symbol(symbol: str) -> str:
+    text = str(symbol or "").upper()
+    return f"US.{text.rsplit('.', 1)[0]}" if text.endswith(".US") else text
+
+
 def _as_new_york(timestamp: Any) -> datetime | None:
     if not isinstance(timestamp, datetime):
         return None
@@ -154,6 +159,65 @@ def warm_us_volume_baselines(*, now: datetime | None = None) -> Dict[str, Any]:
             logging.exception("美股量比基准预热失败: %s", code)
             result["errors"].append({"code": code, "error": str(exc)})
     return result
+
+
+def get_us_stock_list_metrics(
+    account_id: str, codes: Iterable[str], *, now: datetime | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """美股列表指标：批量实时行情 + 本地持久化的策略同刻量比。
+
+    列表刷新不触发逐标的分钟 K 请求，避免与策略共用 Longport 配额时放大调用量。
+    量比仅在当天已有策略执行快照时提供；成交量和成交额则取实时批量 quote。
+    """
+    current = now or datetime.now(NEW_YORK)
+    current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
+    normalized_codes = list(dict.fromkeys(str(item).upper() for item in codes if str(item).strip()))
+    metrics: Dict[str, Dict[str, Any]] = {code: {"volume": None, "turnover": None, "volume_ratio": None} for code in normalized_codes}
+    if not normalized_codes:
+        return metrics
+
+    # quote 是一个批量调用，包含实时累计成交量与成交额。
+    try:
+        service = LongPortService.get_instance(_longport_account_id(account_id))
+        quotes = service.get_quote_batch([_symbol(code) for code in normalized_codes])
+        for quote in quotes:
+            code = _code_from_symbol(quote.get("symbol"))
+            if code in metrics:
+                metrics[code].update({
+                    "volume": quote.get("volume"),
+                    "turnover": quote.get("turnover"),
+                })
+    except Exception:
+        # 列表行情失败不影响贪恐数据或交易配置展示。
+        pass
+
+    # 最近一次策略时点的累计量快照可直接复用；用对应前 20 天相同时点基准还原量比。
+    now_label = current.strftime("%H:%M")
+    with get_db_ctx() as db:
+        snapshots = db.query(SZDTUSIntradayVolumeSnapshot).filter(
+            SZDTUSIntradayVolumeSnapshot.code.in_(normalized_codes),
+            SZDTUSIntradayVolumeSnapshot.trade_date == current.date(),
+            SZDTUSIntradayVolumeSnapshot.minute_label <= now_label,
+        ).order_by(SZDTUSIntradayVolumeSnapshot.minute_label.desc()).all()
+        latest_by_code: Dict[str, SZDTUSIntradayVolumeSnapshot] = {}
+        for snapshot in snapshots:
+            latest_by_code.setdefault(snapshot.code, snapshot)
+        for code, snapshot in latest_by_code.items():
+            rows = db.query(SZDTUSIntradayVolumeSnapshot.cumulative_volume).filter(
+                SZDTUSIntradayVolumeSnapshot.code == code,
+                SZDTUSIntradayVolumeSnapshot.minute_label == snapshot.minute_label,
+                SZDTUSIntradayVolumeSnapshot.trade_date < current.date(),
+            ).order_by(SZDTUSIntradayVolumeSnapshot.trade_date.desc()).limit(VOLUME_BASELINE_LOOKBACK).all()
+            if len(rows) < VOLUME_BASELINE_LOOKBACK:
+                continue
+            baseline = sum(float(row[0]) for row in rows) / len(rows)
+            if baseline > 0:
+                metrics[code]["volume_ratio"] = float(snapshot.cumulative_volume) / baseline
+                metrics[code]["volume_ratio_time"] = snapshot.minute_label
+            # 休市或 quote 不可用时，至少展示最近策略时点的累计量。
+            if metrics[code].get("volume") is None:
+                metrics[code]["volume"] = snapshot.cumulative_volume
+    return metrics
 
 
 def get_us_stock_volume_metrics(

@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 from ...core.database import get_db, IBKRAccountConfig, SZDTTradingConfig, SzdtTradeStock
 from ...core.services.szdt import SZDTService
 from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
+from ...core.services.szdt_us_volume import get_us_stock_list_metrics
 from ...core.services.szdt_a_stock_backtest import run_szdt_a_stock_backtest
 from ...core.services.szdt_us_backtest import US_STOCK_TYPES, run_szdt_us_backtest
 from sqlalchemy.orm import Session
@@ -27,7 +28,7 @@ class StockModel(BaseModel):
     sell_amount: float = Field(..., gt=0, description="卖出金额必须大于0")
     buy_factor: float = Field(..., ge=0, le=10, description="买入系数0~10")
     sell_factor: float = Field(..., ge=0, le=10, description="卖出系数0~10")
-    buy_volume_ratio: float = Field(0, ge=0, le=20, description="A股ETF买入量比下限，0表示不限制")
+    buy_volume_ratio: float = Field(0, ge=0, le=20, description="买入量比下限，0表示不限制")
     enabled: bool = True
     lever: int = Field(..., ge=1, le=4)
     emo_area: str = Field(..., pattern="^(a|us|coin|other)$")
@@ -378,6 +379,15 @@ async def get_etf_emotion(
 async def get_etf_volume_metrics(codes: str = Query(..., description="逗号分隔的 SH.510300 / 510300.SH 代码")):
     """A 股 ETF 实时成交量与提示看板同口径的盘中量比（批量、进程缓存）。"""
     return {"data": get_a_share_etf_volume_metrics(codes.split(","))}
+
+
+@router.get("/us/market-metrics")
+async def get_us_market_metrics(
+    codes: str = Query(..., description="逗号分隔的 US.TQQQ 代码"),
+    account_id: str = Depends(get_account_id),
+):
+    """美股列表的批量实时成交量/成交额及持久化同刻量比。"""
+    return {"data": get_us_stock_list_metrics(account_id, codes.split(","))}
 
 
 class AStockSzdtBacktestRequest(BaseModel):

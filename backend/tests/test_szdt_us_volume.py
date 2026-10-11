@@ -1,6 +1,8 @@
 from datetime import date, datetime
+from contextlib import contextmanager
 from zoneinfo import ZoneInfo
 
+from src.core.services import szdt_us_volume
 from src.core.services.szdt_us_volume import _historical_cumulative_volumes
 
 
@@ -21,3 +23,42 @@ def test_historical_baseline_uses_same_time_cumulative_regular_session_volume():
 
     assert result[(date(2026, 9, 30), "10:30")] == 30
     assert result[(date(2026, 9, 30), "15:55")] == 60
+
+
+def test_us_list_metrics_uses_one_batch_quote_without_minute_kline_requests(monkeypatch):
+    class FakeService:
+        def get_quote_batch(self, symbols):
+            assert symbols == ["TQQQ.US", "SOXL.US"]
+            return [
+                {"symbol": "TQQQ.US", "volume": 1234, "turnover": 5678.0},
+                {"symbol": "SOXL.US", "volume": 4321, "turnover": 8765.0},
+            ]
+
+    class EmptyQuery:
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def all(self):
+            return []
+
+    class FakeDB:
+        def query(self, *_args):
+            return EmptyQuery()
+
+    @contextmanager
+    def fake_db_ctx():
+        yield FakeDB()
+
+    monkeypatch.setattr(szdt_us_volume, "_longport_account_id", lambda _account_id: "test")
+    monkeypatch.setattr(szdt_us_volume.LongPortService, "get_instance", lambda _account_id: FakeService())
+    monkeypatch.setattr(szdt_us_volume, "get_db_ctx", fake_db_ctx)
+
+    result = szdt_us_volume.get_us_stock_list_metrics(
+        "account", ["US.TQQQ", "US.SOXL"], now=datetime(2026, 10, 1, 11, 0, tzinfo=NEW_YORK),
+    )
+
+    assert result["US.TQQQ"] == {"volume": 1234, "turnover": 5678.0, "volume_ratio": None}
+    assert result["US.SOXL"] == {"volume": 4321, "turnover": 8765.0, "volume_ratio": None}
