@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import threading
@@ -735,6 +736,22 @@ def _run_sw_minute_sync(full: bool = False, trading_days: int = 128):
         f"{result.get('days', 0)} 个交易日 · {result.get('requests', 0)} 次请求 · "
         f"写入 {result.get('saved_rows', 0)} 行 · 清理 {result.get('pruned_rows', 0)} 行 · 错误 {len(errors)} 条"
     )
+
+
+def _run_szdt_a_stock_trading() -> str:
+    """守猪逮兔 A 股执行由任务调度器驱动，避免常驻轮询线程。"""
+    from .szdt_a_stock_external_trader import SZDTAStockExternalTrader
+
+    asyncio.run(SZDTAStockExternalTrader().run_scheduled_once())
+    return "守猪逮兔 A股策略执行完成"
+
+
+def _run_szdt_us_trading() -> str:
+    """守猪逮兔美股执行：仅在纽约市场的两个低频时点触发。"""
+    from .szdt_us_trader import SZDTUSTrader
+
+    asyncio.run(SZDTUSTrader().run_scheduled_once())
+    return "守猪逮兔 美股策略执行完成"
 
 
 def _run_a_stock_innovation100_rebuild(
@@ -1846,6 +1863,27 @@ class ScheduledTaskManager:
                         step=0.1,
                     ),
                 ),
+            ),
+            "szdt_a_stock_trading": TaskDefinition(
+                task_key="szdt_a_stock_trading",
+                name="守猪逮兔 A股自动交易",
+                description="上海时区交易日 10:30 后的连续交易时段每分钟执行一次；午休不触发。",
+                default_time="10:30",
+                default_enabled=True,
+                sort_order=29,
+                runner=_run_szdt_a_stock_trading,
+                default_cron_rule="30-59 10 * * mon-fri\n*/1 11 * * mon-fri\n*/1 13-14 * * mon-fri",
+            ),
+            "szdt_us_trading": TaskDefinition(
+                task_key="szdt_us_trading",
+                name="守猪逮兔 美股自动交易",
+                description="纽约时区交易日开盘后 1 小时及收盘前 5 分钟各执行一次；仅在两次触发时读取 Longport 分钟 K 线量比。",
+                default_time="10:30",
+                default_enabled=True,
+                sort_order=30,
+                runner=_run_szdt_us_trading,
+                default_cron_rule="30 10 * * mon-fri\n55 15 * * mon-fri",
+                default_timezone="America/New_York",
             ),
             "chan_minute_sync": TaskDefinition(
                 task_key="chan_minute_sync",

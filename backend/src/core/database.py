@@ -674,6 +674,18 @@ class SzdtTradeStock(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+
+class SZDTUSIntradayVolumeSnapshot(Base):
+    """美股守猪逮兔固定定时点的累计分钟成交量，作为同刻量比的持久化基准。"""
+    __tablename__ = "szdt_us_intraday_volume_snapshots"
+
+    code = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    minute_label = Column(String(5), primary_key=True)
+    cumulative_volume = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class TradingState(Base):
     """交易状态表"""
     __tablename__ = "trading_states"

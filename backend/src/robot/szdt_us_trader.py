@@ -9,6 +9,7 @@ from ..core.database import get_db_ctx, SzdtTradeStock, TradingLog, TradingState
 from ..core.services.szdt import SZDTService
 from ..core.services.market import MarketService
 from ..core.services.ib_service import IBKRService, IBOrderSubmissionPending
+from ..core.services.szdt_us_volume import get_us_stock_volume_metrics
 from ..core.utils import mask_account_id, send_alert_email
 import traceback
 
@@ -132,6 +133,7 @@ class SZDTUSTrader:
                     'sell_amount': s.sell_amount,
                     'buy_factor': s.buy_factor,
                     'sell_factor': s.sell_factor,
+                    'buy_volume_ratio': s.buy_volume_ratio,
                     'lever': s.lever,
                     'emo_area': s.emo_area,
                 }
@@ -139,12 +141,13 @@ class SZDTUSTrader:
             db.commit()
             return selected
 
-    async def run_once(self, config: SZDTTradingConfig, ib_port: int):
-        account_id = config.account_id
+    async def run_once(self, config: SZDTTradingConfig, ib_port: int, volume_metrics: Dict | None = None):
+        account_id = config["account_id"] if isinstance(config, dict) else config.account_id
+        config_id = config["id"] if isinstance(config, dict) else config.id
         cli_id = f'szdt-us-auto-{account_id}'
         # Use a consistent client ID for this account to allow connection reuse. 
         # config.id is unique per config entry. Using base 2000 to avoid conflict with portfolio copy trader (100+) and others.
-        ib_client_id = 2000 + (config.id or 0) 
+        ib_client_id = 2000 + (config_id or 0)
         
         logger.info(f"SZDTUSTrader tick for {mask_account_id(account_id)}")
             
@@ -218,6 +221,13 @@ class SZDTUSTrader:
             if score <= stock['when_buy']:
                 try:
                     if position_ratio < stock['max_position']:
+                        volume_ratio_threshold = float(stock.get('buy_volume_ratio') or 0)
+                        if volume_ratio_threshold > 0:
+                            metric = (volume_metrics or {}).get(stock['code'], {})
+                            volume_ratio = metric.get('volume_ratio')
+                            if volume_ratio is None or float(volume_ratio) < volume_ratio_threshold:
+                                self._log(account_id, 'DEBUG', f"{name} 量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}，跳过")
+                                return
                         score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
                         score_factor = 3 ** (score_factor ** stock['buy_factor'])
                         buy_amount = min(available_cash, stock['buy_amount'] * score_factor)
@@ -291,42 +301,47 @@ class SZDTUSTrader:
                 scenario_key="szdt_us_trading_error",
             )
 
+    @staticmethod
+    def _config_snapshot(config: SZDTTradingConfig) -> Dict:
+        return {"id": config.id, "account_id": config.account_id, "ib_account_id": config.ib_account_id}
+
+    async def run_scheduled_once(self):
+        """由系统定时任务调用；两个美股定时点内逐个检查账户的全部启用标的。"""
+        if not MarketService.is_us_market_open():
+            return
+        with get_db_ctx() as db:
+            configs = [self._config_snapshot(config) for config in db.query(SZDTTradingConfig).filter(
+                SZDTTradingConfig.enabled == True,
+            ).all()]
+            stocks_by_account = {}
+            for config in configs:
+                stocks_by_account[config['account_id']] = db.query(SzdtTradeStock).filter(
+                    SzdtTradeStock.account_id == config['account_id'],
+                    SzdtTradeStock.type.in_([1, 2, 7]),
+                    SzdtTradeStock.enabled == True,
+                ).all()
+        for config in configs:
+            stocks = stocks_by_account.get(config['account_id'], [])
+            if not stocks:
+                continue
+            volume_codes = [stock.code for stock in stocks if float(stock.buy_volume_ratio or 0) > 0]
+            volume_metrics = await asyncio.to_thread(get_us_stock_volume_metrics, config['account_id'], volume_codes)
+            ib_port = 4001
+            if config.get('ib_account_id'):
+                with get_db_ctx() as db:
+                    ib_config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config['ib_account_id']).first()
+                    if ib_config:
+                        ib_port = ib_config.ib_port
+            # 旧循环每分钟只轮到一只；固定为每日两次后必须在一个任务轮次检查完整配置。
+            for _ in range(len(stocks)):
+                await self.run_once(config, ib_port, volume_metrics)
+
     async def worker_loop(self):
         logger.info("SZDT US Trader Worker Loop Started")
         
         while True:
             try:
-                # 1. Check market open
-                if not MarketService.is_us_market_open():
-                    logger.info("US market not open, skipping SZDT US check.")
-                    await asyncio.sleep(60)
-                    continue
-
-                # 2. Get active configurations
-                with get_db_ctx() as db:
-                    configs = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.enabled == True).all()
-                    for config in configs:
-                        db.expunge(config)
-                
-                # 3. Iterate and process
-                for config in configs:
-                    try:
-                        # Find mapped IB port
-                        ib_port = 4001
-                        with get_db_ctx() as db:
-                             if config.ib_account_id:
-                                ib_config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config.ib_account_id).first()
-                                if ib_config:
-                                    ib_port = ib_config.ib_port
-
-                        await self.run_once(config, ib_port)
-                    except Exception as e:
-                        logger.error(f"Failed to run SZDT US trader for account {config.account_id}: {e}")
-                        send_alert_email(
-                            f"自动化交易策略报错: SZDTUSTrader account {config.account_id}",
-                            f"Error: {e}\n\nTraceback:\n{traceback.format_exc()}",
-                            scenario_key="szdt_us_trading_error",
-                        )
+                await self.run_scheduled_once()
                 
                 # 4. Wait for next minute
                 await asyncio.sleep(60)

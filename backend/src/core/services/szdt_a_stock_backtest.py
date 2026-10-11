@@ -100,7 +100,6 @@ async def run_szdt_a_stock_backtest(
         raise ValueError("分析库缺少启用 ETF 的日线数据")
 
     all_days = sorted(frame["trade_date"].unique())
-    next_day = dict(zip(all_days, all_days[1:]))
     first_history = min(history["date"].min() for history in histories.values())
     last_history = max(history["date"].max() for history in histories.values())
     actual_start = max(start_date or first_history, first_history)
@@ -129,7 +128,6 @@ async def run_szdt_a_stock_backtest(
 
     cash = float(initial_capital)
     shares: Dict[str, int] = defaultdict(int)
-    pending: Dict[date, List[tuple]] = defaultdict(list)
     trades: List[Dict[str, Any]] = []
     curve: List[Dict[str, Any]] = []
     financing_cost = 0.0
@@ -140,69 +138,84 @@ async def run_szdt_a_stock_backtest(
             interest = -cash * 0.05 / 252
             cash -= interest
             financing_cost += interest
-        for code, side, score, stock in pending.pop(day, []):
+        # T 日日线贪恐和量比，以 T 日收盘价成交；同日先卖后买，使卖出资金可复用。
+        for stock in stocks:
+            code = stock["code"]
+            score = scores.get((code, day))
             quote = prices.get((code, day))
-            if not quote:
+            if score is None or not quote or shares[code] < LOT_SIZE:
                 continue
-            open_price = quote[0]
-            equity = cash + sum(quantity * prices[(symbol, day)][1] for symbol, quantity in shares.items() if (symbol, day) in prices)
-            if equity <= 0:
+            close_price = quote[1]
+            if score < float(stock["when_sell"]) or (sell_on_ema5_breakdown and not below_ema5.get((code, day), False)):
                 continue
-            if side == "BUY":
-                position_value = shares[code] * open_price
-                if position_value / equity * 100 >= float(stock["max_position"]):
-                    continue
-                factor = min(1.0, max(0.0, (float(stock["when_buy"]) - score) / (float(stock["when_buy"]) + 100)))
-                target_amount = float(stock["buy_amount"]) * (3 ** (factor ** float(stock["buy_factor"])))
-                available = target_amount if allow_leverage else min(cash, target_amount)
-                quantity = int(available / open_price / LOT_SIZE) * LOT_SIZE
-                gross = quantity * open_price
-                fee = _fee(gross)
-                while quantity >= LOT_SIZE and not allow_leverage and gross + fee > cash:
-                    quantity -= LOT_SIZE
-                    gross = quantity * open_price
-                    fee = _fee(gross)
-                if quantity < LOT_SIZE:
-                    continue
-                cash -= gross + fee
-                shares[code] += quantity
-                trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "BUY", "quantity": quantity, "price": round(open_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
-            elif shares[code] >= LOT_SIZE:
-                factor = min(1.0, max(0.0, (score - float(stock["when_sell"])) / (100 - float(stock["when_sell"]))))
-                amount = float(stock["sell_amount"]) * (3 ** (factor ** float(stock["sell_factor"])))
-                quantity = min(shares[code], max(LOT_SIZE, int(amount / open_price / LOT_SIZE) * LOT_SIZE))
-                gross = quantity * open_price
-                cash += gross - _fee(gross)
-                shares[code] -= quantity
-                trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "SELL", "quantity": quantity, "price": round(open_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
+            factor = min(1.0, max(0.0, (score - float(stock["when_sell"])) / (100 - float(stock["when_sell"]))))
+            amount = float(stock["sell_amount"]) * (3 ** (factor ** float(stock["sell_factor"])))
+            quantity = min(shares[code], max(LOT_SIZE, int(amount / close_price / LOT_SIZE) * LOT_SIZE))
+            gross = quantity * close_price
+            cash += gross - _fee(gross)
+            shares[code] -= quantity
+            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "SELL", "quantity": quantity, "price": round(close_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
 
-        tomorrow = next_day.get(day)
-        if tomorrow:
-            for stock in stocks:
-                code = stock["code"]
-                score = scores.get((code, day))
-                if score is None or (code, tomorrow) not in prices:
-                    continue
-                threshold = float(stock.get("buy_volume_ratio") or 0)
-                if score <= float(stock["when_buy"]) and (threshold <= 0 or volume_ratios.get((code, day), 0) >= threshold):
-                    pending[tomorrow].append((code, "BUY", score, stock))
-                elif score >= float(stock["when_sell"]) and (not sell_on_ema5_breakdown or below_ema5.get((code, day), False)):
-                    pending[tomorrow].append((code, "SELL", score, stock))
+        for stock in stocks:
+            code = stock["code"]
+            score = scores.get((code, day))
+            quote = prices.get((code, day))
+            threshold = float(stock.get("buy_volume_ratio") or 0)
+            if score is None or not quote or score > float(stock["when_buy"]) or (threshold > 0 and volume_ratios.get((code, day), 0) < threshold):
+                continue
+            close_price = quote[1]
+            equity = cash + sum(quantity * prices[(symbol, day)][1] for symbol, quantity in shares.items() if (symbol, day) in prices)
+            if equity <= 0 or shares[code] * close_price / equity * 100 >= float(stock["max_position"]):
+                continue
+            factor = min(1.0, max(0.0, (float(stock["when_buy"]) - score) / (float(stock["when_buy"]) + 100)))
+            target_amount = float(stock["buy_amount"]) * (3 ** (factor ** float(stock["buy_factor"])))
+            available = target_amount if allow_leverage else min(cash, target_amount)
+            quantity = int(available / close_price / LOT_SIZE) * LOT_SIZE
+            gross = quantity * close_price
+            fee = _fee(gross)
+            while quantity >= LOT_SIZE and not allow_leverage and gross + fee > cash:
+                quantity -= LOT_SIZE
+                gross = quantity * close_price
+                fee = _fee(gross)
+            if quantity < LOT_SIZE:
+                continue
+            cash -= gross + fee
+            shares[code] += quantity
+            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "BUY", "quantity": quantity, "price": round(close_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
 
         long_value = sum(quantity * prices[(symbol, day)][1] for symbol, quantity in shares.items() if (symbol, day) in prices)
         equity = cash + long_value
         curve.append({"date": day.isoformat(), "nav": round(equity, 2), "gross_exposure": round(long_value / equity * 100, 2) if equity > 0 else 0})
 
     nav = pd.Series([point["nav"] for point in curve])
+    peak_nav = 0.0
+    for point in curve:
+        peak_nav = max(peak_nav, float(point["nav"]))
+        point["drawdown_pct"] = round((float(point["nav"]) / peak_nav - 1) * 100, 2) if peak_nav else 0.0
     returns = nav.pct_change().dropna()
     total_return = nav.iloc[-1] / initial_capital - 1
     annualized = (nav.iloc[-1] / initial_capital) ** (252 / max(len(returns), 1)) - 1
     drawdown = (nav / nav.cummax() - 1).min()
     sharpe = returns.mean() / returns.std() * math.sqrt(252) if len(returns) > 1 and returns.std() > 0 else None
     gross = pd.Series([point["gross_exposure"] for point in curve]) / 100
+    final_day = daily_days[-1]
+    final_nav = float(nav.iloc[-1])
+    latest_positions = []
+    for stock in stocks:
+        code = stock["code"]
+        quantity = shares[code]
+        quote = prices.get((code, final_day))
+        if quantity <= 0 or not quote:
+            continue
+        value = quantity * quote[1]
+        latest_positions.append({
+            "code": code, "name": stock["name"], "quantity": quantity,
+            "price": round(quote[1], 4), "score": scores.get((code, final_day)),
+            "market_value": round(value, 2), "position_pct": round(value / final_nav * 100, 2) if final_nav > 0 else 0,
+        })
     return {
         "period": {"start_date": curve[0]["date"], "end_date": curve[-1]["date"], "sessions": len(returns)},
-        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "allow_leverage": allow_leverage, "execution": "next_open"},
+        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "allow_leverage": allow_leverage, "execution": "same_close; sell_before_buy"},
         "metrics": {
             "initial_capital": round(initial_capital, 2), "final_nav": round(float(nav.iloc[-1]), 2),
             "total_return_pct": round(total_return * 100, 2), "annualized_return_pct": round(annualized * 100, 2),
@@ -214,6 +227,6 @@ async def run_szdt_a_stock_backtest(
             "capital_efficiency_pct": round(float(annualized / gross.mean() * 100), 2) if gross.mean() > 0 else None,
             "financing_cost": round(financing_cost, 2),
         },
-        "curve": curve, "trades": trades,
+        "curve": curve, "trades": trades, "latest_positions": latest_positions,
         "coverage": {"configured_stocks": len(stocks), "history_loaded": len(histories)},
     }

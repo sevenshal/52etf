@@ -2,10 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends, Header, Query, Path
 from pydantic import BaseModel, Field, validator
 from datetime import date
 from typing import List, Dict, Optional
-from ...core.database import get_db, SZDTTradingConfig, SzdtTradeStock
+from ...core.database import get_db, IBKRAccountConfig, SZDTTradingConfig, SzdtTradeStock
 from ...core.services.szdt import SZDTService
 from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
 from ...core.services.szdt_a_stock_backtest import run_szdt_a_stock_backtest
+from ...core.services.szdt_us_backtest import US_STOCK_TYPES, run_szdt_us_backtest
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/quant")
@@ -285,6 +286,18 @@ class AStockSzdtBacktestRequest(BaseModel):
     allow_leverage: bool = False
 
 
+class BacktestPosition(BaseModel):
+    code: str
+    name: str = ""
+    quantity: int = Field(..., ge=0)
+    price: float = Field(..., gt=0)
+
+
+class BacktestPositionSyncRequest(BaseModel):
+    market: str = Field(..., pattern="^(a|us)$")
+    positions: List[BacktestPosition] = Field(..., min_items=1)
+
+
 @router.post("/a-stock-backtest")
 async def run_a_stock_backtest(
     payload: AStockSzdtBacktestRequest,
@@ -320,6 +333,103 @@ async def run_a_stock_backtest(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"守猪逮兔A股回测失败: {exc}") from exc
+
+
+@router.post("/us-backtest")
+async def run_us_backtest(
+    payload: AStockSzdtBacktestRequest,
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db),
+):
+    """回测当前账户启用的美股杠杆 ETF、常规 ETF 和美股个股配置。"""
+    rows = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.account_id == account_id,
+        SzdtTradeStock.type.in_(US_STOCK_TYPES),
+        SzdtTradeStock.enabled == True,  # noqa: E712
+    ).order_by(SzdtTradeStock.id.asc()).all()
+    stocks = [{
+        "code": row.code, "name": row.name, "enabled": bool(row.enabled),
+        "when_buy": row.when_buy, "when_sell": row.when_sell, "max_position": row.max_position,
+        "buy_amount": row.buy_amount, "sell_amount": row.sell_amount,
+        "buy_factor": row.buy_factor, "sell_factor": row.sell_factor,
+        "buy_volume_ratio": row.buy_volume_ratio, "type": row.type,
+    } for row in rows]
+    db.close()
+    try:
+        return await run_szdt_us_backtest(
+            stocks, account_id=account_id, initial_capital=payload.initial_capital,
+            start_date=payload.start_date, end_date=payload.end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"守猪逮兔美股回测失败: {exc}") from exc
+
+
+@router.post("/backtest/sync-positions")
+async def sync_backtest_positions(
+    payload: BacktestPositionSyncRequest,
+    account_id: str = Depends(get_account_id),
+    db: Session = Depends(get_db),
+):
+    """将用户明确勾选的回测持仓提交为实盘目标；前端已二次确认。"""
+    stock_types = [3] if payload.market == "a" else list(US_STOCK_TYPES)
+    codes = [item.code.upper() for item in payload.positions]
+    rows = db.query(SzdtTradeStock).filter(
+        SzdtTradeStock.account_id == account_id,
+        SzdtTradeStock.type.in_(stock_types),
+        SzdtTradeStock.enabled == True,  # noqa: E712
+        SzdtTradeStock.code.in_(codes),
+    ).all()
+    allowed_codes = {row.code.upper() for row in rows}
+    if len(allowed_codes) != len(set(codes)):
+        raise HTTPException(status_code=400, detail="所选标的必须是当前已启用的对应市场配置")
+    config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
+    if not config:
+        raise HTTPException(status_code=400, detail="未找到守猪逮兔策略配置")
+    config_snapshot = {
+        "id": config.id, "account_id": config.account_id,
+        "external_trading_account_id": config.external_trading_account_id,
+        "live_sub_account_id": config.live_sub_account_id,
+        "a_sell_on_ema5_breakdown": bool(config.a_sell_on_ema5_breakdown),
+        "enabled_a": bool(config.enabled_a),
+        "ib_account_id": config.ib_account_id,
+    }
+    ib_config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config.ib_account_id).first() if config.ib_account_id else None
+    config_snapshot["ib_port"] = ib_config.ib_port if ib_config else 4001
+    db.close()
+    if payload.market == "a":
+        if not config_snapshot["enabled_a"]:
+            raise HTTPException(status_code=400, detail="A股守猪逮兔实盘未启用")
+        from ...robot.szdt_a_stock_external_trader import SZDTAStockExternalTrader, _external_symbol
+
+        trader = SZDTAStockExternalTrader()
+        snapshot = await trader._load_external_snapshot(config_snapshot)
+        submitted = []
+        for item in payload.positions:
+            symbol = _external_symbol(item.code)
+            result = await trader._sync_target(config_snapshot, snapshot, symbol, item.quantity, item.price, "backtest_sync")
+            snapshot["targets"][symbol] = item.quantity
+            submitted.append({"code": item.code, "quantity": item.quantity, "result": result})
+        return {"message": f"已提交 {len(submitted)} 个A股目标仓位", "submitted": submitted}
+
+    if not config_snapshot["ib_account_id"]:
+        raise HTTPException(status_code=400, detail="美股守猪逮兔未绑定 IB 账户")
+    from ...robot.szdt_us_trader import SZDTUSTrader
+
+    trader = SZDTUSTrader()
+    ib_service = await trader._ensure_ib_connected(config_snapshot["ib_port"], 2000 + config_snapshot["id"])
+    submitted = []
+    for item in payload.positions:
+        current = ib_service.get_position(item.code)
+        current_quantity = int(current.get("qty") or 0)
+        delta = int(item.quantity) - current_quantity
+        if not delta:
+            continue
+        side = "BUY" if delta > 0 else "SELL"
+        await ib_service.place_market_order(item.code, side, abs(delta))
+        submitted.append({"code": item.code, "target_quantity": item.quantity, "side": side, "quantity": abs(delta)})
+    return {"message": f"已提交 {len(submitted)} 个美股调仓订单", "submitted": submitted}
 
 class ETFEmotionHistoryResponse(BaseModel):
     status: int

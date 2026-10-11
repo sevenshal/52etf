@@ -313,29 +313,34 @@ class SZDTAStockExternalTrader:
     async def worker_loop(self) -> None:
         while True:
             try:
-                if is_external_trading_market_open("A_STOCK"):
-                    with get_db_ctx() as db:
-                        configs = [self._config_snapshot(row) for row in db.query(SZDTTradingConfig).filter(
-                            SZDTTradingConfig.enabled_a == True,  # noqa: E712
-                            SZDTTradingConfig.external_trading_account_id.isnot(None),
-                            SZDTTradingConfig.live_sub_account_id.isnot(None),
-                        ).all()]
-                        configured_accounts = [config["account_id"] for config in configs]
-                        volume_codes = [
-                            row.code for row in db.query(SzdtTradeStock).filter(
-                                SzdtTradeStock.account_id.in_(configured_accounts),
-                                SzdtTradeStock.type == 3,
-                                SzdtTradeStock.enabled == True,  # noqa: E712
-                                SzdtTradeStock.buy_volume_ratio > 0,
-                            ).all()
-                        ] if configured_accounts else []
-                    # 每分钟最多按沪/深两批拉一次实时 ETF 行情；服务内部再缓存 30 秒。
-                    volume_metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, volume_codes)
-                    for config in configs:
-                        await self.run_config_once(config, volume_metrics)
+                await self.run_scheduled_once()
             except Exception:
                 logger.exception("SZDT A股外部交易主循环异常")
             await asyncio.sleep(60)
+
+    async def run_scheduled_once(self) -> None:
+        """供系统定时任务调用的一轮执行；保留旧 worker 的完整选股/量比口径。"""
+        if not is_external_trading_market_open("A_STOCK"):
+            return
+        with get_db_ctx() as db:
+            configs = [self._config_snapshot(row) for row in db.query(SZDTTradingConfig).filter(
+                SZDTTradingConfig.enabled_a == True,  # noqa: E712
+                SZDTTradingConfig.external_trading_account_id.isnot(None),
+                SZDTTradingConfig.live_sub_account_id.isnot(None),
+            ).all()]
+            configured_accounts = [config["account_id"] for config in configs]
+            volume_codes = [
+                row.code for row in db.query(SzdtTradeStock).filter(
+                    SzdtTradeStock.account_id.in_(configured_accounts),
+                    SzdtTradeStock.type == 3,
+                    SzdtTradeStock.enabled == True,  # noqa: E712
+                    SzdtTradeStock.buy_volume_ratio > 0,
+                ).all()
+            ] if configured_accounts else []
+        # 每轮最多按沪/深两批拉一次实时 ETF 行情；服务内部再缓存 30 秒。
+        volume_metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, volume_codes)
+        for config in configs:
+            await self.run_config_once(config, volume_metrics)
 
 
 def start_szdt_a_stock_external_trader() -> None:

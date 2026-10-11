@@ -55,6 +55,9 @@ const FearStockList = () => {
   const [backtestVisible, setBacktestVisible] = useState(false);
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestResult, setBacktestResult] = useState(null);
+  const [backtestMarket, setBacktestMarket] = useState('a');
+  const [selectedBacktestPositions, setSelectedBacktestPositions] = useState([]);
+  const [syncingBacktestPositions, setSyncingBacktestPositions] = useState(false);
   const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, allow_leverage: false });
   const [historyRecord, setHistoryRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
@@ -316,8 +319,11 @@ const FearStockList = () => {
   const runBacktest = async () => {
     setBacktestLoading(true);
     try {
-      const { data: result } = await request.post('/api/quant/a-stock-backtest', backtestParams);
+      const endpoint = backtestMarket === 'us' ? '/api/quant/us-backtest' : '/api/quant/a-stock-backtest';
+      const params = backtestMarket === 'us' ? { ...backtestParams, allow_leverage: false } : backtestParams;
+      const { data: result } = await request.post(endpoint, params);
       setBacktestResult(result);
+      setSelectedBacktestPositions([]);
     } catch (error) {
       message.error(error.response?.data?.detail || '回测失败');
     } finally {
@@ -325,17 +331,43 @@ const FearStockList = () => {
     }
   };
 
+  const syncBacktestPositions = async () => {
+    const positions = (backtestResult?.latest_positions || []).filter(item => selectedBacktestPositions.includes(item.code));
+    if (!positions.length) return;
+    setSyncingBacktestPositions(true);
+    try {
+      const { data } = await request.post('/api/quant/backtest/sync-positions', { market: backtestMarket, positions });
+      message.success(data?.message || '已提交实盘仓位对齐');
+    } catch (error) {
+      message.error(error.response?.data?.detail || '同步实盘仓位失败');
+    } finally {
+      setSyncingBacktestPositions(false);
+    }
+  };
+
   const backtestChartOption = {
     tooltip: { trigger: 'axis' },
-    grid: { left: 55, right: 28, top: 28, bottom: 42 },
-    xAxis: { type: 'category', data: (backtestResult?.curve || []).map(item => item.date), axisLabel: { hideOverlap: true } },
-    yAxis: { type: 'value', name: '净值', scale: true },
+    legend: { data: ['组合净值', '整体仓位', '回撤'], top: 2 },
+    grid: [
+      { left: 55, right: 48, top: 30, height: '45%' },
+      { left: 55, right: 48, top: '58%', height: '14%' },
+      { left: 55, right: 48, top: '78%', height: '12%' },
+    ],
+    xAxis: [0, 1, 2].map((gridIndex) => ({
+      type: 'category', gridIndex, data: (backtestResult?.curve || []).map(item => item.date),
+      axisLabel: gridIndex === 2 ? { hideOverlap: true } : { show: false },
+    })),
+    yAxis: [
+      { type: 'value', name: '净值', scale: true },
+      { type: 'value', name: '仓位%', min: 0, max: 100, gridIndex: 1 },
+      { type: 'value', name: '回撤%', max: 0, gridIndex: 2 },
+    ],
     dataZoom: [{ type: 'inside' }, { type: 'slider' }],
-    series: [{
-      type: 'line', name: '组合净值', showSymbol: false, smooth: true,
-      data: (backtestResult?.curve || []).map(item => item.nav),
-      lineStyle: { color: '#1677ff', width: 2 },
-    }],
+    series: [
+      { type: 'line', name: '组合净值', showSymbol: false, smooth: true, data: (backtestResult?.curve || []).map(item => item.nav), lineStyle: { color: '#1677ff', width: 2 } },
+      { type: 'line', name: '整体仓位', xAxisIndex: 1, yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.gross_exposure), lineStyle: { color: '#52c41a', width: 1.5 } },
+      { type: 'line', name: '回撤', xAxisIndex: 2, yAxisIndex: 2, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.drawdown_pct), lineStyle: { color: '#bfbfbf', width: 1 }, areaStyle: { color: 'rgba(191,191,191,0.35)' } },
+    ],
   };
 
   const historyChartOption = {
@@ -886,7 +918,7 @@ const FearStockList = () => {
       </Modal>
 
       <Modal
-        title="守猪逮兔 A股ETF 回测"
+        title={`守猪逮兔 ${backtestMarket === 'us' ? '美股' : 'A股ETF'} 回测`}
         open={backtestVisible}
         onCancel={() => setBacktestVisible(false)}
         width={920}
@@ -894,6 +926,13 @@ const FearStockList = () => {
         destroyOnClose={false}
       >
         <Space wrap style={{ marginBottom: 16 }}>
+          <span>市场</span>
+          <Select
+            value={backtestMarket}
+            style={{ width: 130 }}
+            options={[{ value: 'a', label: 'A股ETF' }, { value: 'us', label: '美股（全部）' }]}
+            onChange={(market) => { setBacktestMarket(market); setBacktestResult(null); }}
+          />
           <span>初始资金</span>
           <Input
             type="number"
@@ -906,13 +945,18 @@ const FearStockList = () => {
           <Input type="date" value={backtestParams.start_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, start_date: event.target.value || undefined }))} style={{ width: 145 }} />
           <span>结束日期</span>
           <Input type="date" value={backtestParams.end_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, end_date: event.target.value || undefined }))} style={{ width: 145 }} />
-          <span>允许杠杆</span>
-          <Switch checked={backtestParams.allow_leverage} onChange={(allow_leverage) => setBacktestParams(prev => ({ ...prev, allow_leverage }))} />
+          {backtestMarket === 'a' && <>
+            <span>允许杠杆</span>
+            <Switch checked={backtestParams.allow_leverage} onChange={(allow_leverage) => setBacktestParams(prev => ({ ...prev, allow_leverage }))} />
+          </>}
           <Button type="primary" loading={backtestLoading} onClick={runBacktest}>开始回测</Button>
         </Space>
         <div style={{ color: '#8c8c8c', marginBottom: 12 }}>
-          使用当前启用 A股ETF 的贪恐阈值、金额、系数、最大仓位及量比配置；日线信号在下一交易日开盘成交。
-          {backtestResult?.rules?.sell_on_ema5_breakdown ? ' 当前已启用“贪婪且跌破 EMA5 才卖”。' : ' 当前为贪婪达到阈值即卖。'}
+          {backtestMarket === 'us'
+            ? '使用当前启用的美股杠杆 ETF、常规 ETF 和美股个股全部配置；日线贪恐与量比在当日收盘成交，同日先卖后买，不使用融资杠杆。'
+            : <>使用当前启用 A股ETF 的贪恐阈值、金额、系数、最大仓位及量比配置；日线信号在下一交易日开盘成交。
+              {backtestResult?.rules?.sell_on_ema5_breakdown ? ' 当前已启用“贪婪且跌破 EMA5 才卖”。' : ' 当前为贪婪达到阈值即卖。'}
+            </>}
         </div>
         {backtestResult && <>
           <Table
@@ -932,7 +976,30 @@ const FearStockList = () => {
             ]}
             dataSource={[{ key: 'metrics', ...backtestResult.metrics }]}
           />
-          <ReactECharts option={backtestChartOption} style={{ height: 310 }} />
+          <ReactECharts option={backtestChartOption} style={{ height: 430 }} />
+          <Space style={{ margin: '8px 0' }}>
+            <span>最新回测持仓（可选择同步到实盘仓位）</span>
+            <Popconfirm
+              title="确认把所选回测持仓提交为实盘目标仓位吗？会产生真实调仓订单。"
+              onConfirm={syncBacktestPositions}
+              disabled={!selectedBacktestPositions.length}
+            >
+              <Button type="primary" size="small" loading={syncingBacktestPositions} disabled={!selectedBacktestPositions.length}>同步所选到实盘</Button>
+            </Popconfirm>
+          </Space>
+          <Table
+            size="small"
+            rowKey="code"
+            pagination={false}
+            rowSelection={{ selectedRowKeys: selectedBacktestPositions, onChange: setSelectedBacktestPositions }}
+            columns={[
+              { title: '标的', dataIndex: 'name' }, { title: '代码', dataIndex: 'code' },
+              { title: '仓位', dataIndex: 'position_pct', render: value => `${Number(value).toFixed(2)}%` },
+              { title: '股数', dataIndex: 'quantity' }, { title: '价格', dataIndex: 'price' }, { title: '贪恐', dataIndex: 'score' },
+              { title: '市值', dataIndex: 'market_value', render: value => Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) },
+            ]}
+            dataSource={backtestResult.latest_positions || []}
+          />
           <Table
             size="small"
             rowKey={(record, index) => `${record.date}-${record.code}-${index}`}
