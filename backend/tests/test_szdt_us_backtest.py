@@ -32,7 +32,7 @@ def test_us_backtest_uses_same_close_and_production_factor(monkeypatch):
     monkeypatch.setattr(module, "_load_emotion_histories", histories)
     monkeypatch.setattr(module, "_load_us_daily_frame", daily)
 
-    result = __import__("asyncio").run(module.run_szdt_us_backtest([stock], account_id="test", initial_capital=100_000))
+    result = __import__("asyncio").run(module.run_szdt_us_backtest([stock], account_id="test", initial_capital=100_000, slippage_bps=0))
 
     assert [trade["side"] for trade in result["trades"]] == ["BUY", "SELL"]
     assert result["trades"][0]["date"] == "2026-01-02"

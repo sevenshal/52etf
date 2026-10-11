@@ -32,7 +32,7 @@ def test_backtest_waits_for_ema5_breakdown_before_greed_sell(monkeypatch):
     monkeypatch.setattr(module, "_load_daily_frame", lambda _symbols: prices)
 
     result = __import__("asyncio").run(module.run_szdt_a_stock_backtest(
-        [stock], sell_on_ema5_breakdown=True, initial_capital=100_000,
+        [stock], sell_on_ema5_breakdown=True, initial_capital=100_000, slippage_bps=0,
     ))
 
     assert [trade["side"] for trade in result["trades"]] == ["BUY", "SELL"]

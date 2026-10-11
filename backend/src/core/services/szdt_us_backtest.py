@@ -92,7 +92,7 @@ async def _load_us_daily_frame(
 async def run_szdt_us_backtest(
     stocks: List[Dict[str, Any]], *, account_id: str, initial_capital: float = 1_000_000.0,
     start_date: Optional[date] = None, end_date: Optional[date] = None,
-    rotation_enabled: bool = False, rotation_threshold: int = -30,
+    rotation_enabled: bool = False, rotation_threshold: int = -30, slippage_bps: float = 10,
 ) -> Dict[str, Any]:
     """日线贪恐及量比在 T 日收盘，用 T 日收盘价成交；同日先卖后买。"""
     stocks = [dict(item, code=str(item["code"]).upper()) for item in stocks if item.get("enabled")]
@@ -145,7 +145,7 @@ async def run_szdt_us_backtest(
                 continue
             wanted = _scaled_amount(float(stock["sell_amount"]), score, float(stock["when_sell"]), float(stock["sell_factor"]), is_buy=False)
             quantity = min(shares[code], max(1, int(wanted / price)))
-            gross = quantity * price
+            gross = quantity * price * (1 - slippage_bps / 10_000)
             cash += gross - _fee(gross)
             shares[code] -= quantity
             trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "SELL", "quantity": quantity, "price": round(price, 4), "score": round(score, 2), "amount": round(gross, 2)})
@@ -171,16 +171,17 @@ async def run_szdt_us_backtest(
                     if cash >= wanted:
                         break
                     quantity_to_sell = min(shares[source_code], max(1, math.ceil((wanted - cash) / source_price)))
-                    source_gross = quantity_to_sell * source_price
+                    source_gross = quantity_to_sell * source_price * (1 - slippage_bps / 10_000)
                     cash += source_gross - _fee(source_gross)
                     shares[source_code] -= quantity_to_sell
                     rotation_sell_count += 1
                     trades.append({"date": day.isoformat(), "code": source_code, "name": next(item["name"] for item in stocks if item["code"] == source_code), "side": "ROTATE_SELL", "quantity": quantity_to_sell, "price": round(source_price, 4), "score": round(source_score, 2), "amount": round(source_gross, 2)})
-            quantity = int(min(cash, wanted) / price)
-            gross = quantity * price
+            execution_price = price * (1 + slippage_bps / 10_000)
+            quantity = int(min(cash, wanted) / execution_price)
+            gross = quantity * execution_price
             while quantity > 0 and gross + _fee(gross) > cash:
                 quantity -= 1
-                gross = quantity * price
+                gross = quantity * execution_price
             if quantity <= 0:
                 continue
             cash -= gross + _fee(gross)
@@ -219,7 +220,7 @@ async def run_szdt_us_backtest(
         })
     return {
         "period": {"start_date": curve[0]["date"], "end_date": curve[-1]["date"], "sessions": len(returns)},
-        "rules": {"execution": "same_close; sell_before_buy", "allow_leverage": False, "sell_on_ema5_breakdown": False, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None},
+        "rules": {"execution": "same_close; sell_before_buy", "allow_leverage": False, "sell_on_ema5_breakdown": False, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None, "slippage_bps": slippage_bps},
         "metrics": {
             "initial_capital": round(initial_capital, 2), "final_nav": round(float(nav.iloc[-1]), 2),
             "total_return_pct": round(total_return * 100, 2), "annualized_return_pct": round(annualized * 100, 2),

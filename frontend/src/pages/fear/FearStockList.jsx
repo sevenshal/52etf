@@ -59,7 +59,7 @@ const FearStockList = () => {
   const [backtestMarket, setBacktestMarket] = useState('a');
   const [selectedBacktestPositions, setSelectedBacktestPositions] = useState([]);
   const [syncingBacktestPositions, setSyncingBacktestPositions] = useState(false);
-  const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, allow_leverage: false });
+  const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, allow_leverage: false, slippage_bps: 10 });
   const [historyRecord, setHistoryRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
@@ -1038,6 +1038,8 @@ const FearStockList = () => {
           <Input type="date" value={backtestParams.start_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, start_date: event.target.value || undefined }))} style={{ width: 145 }} />
           <span>结束日期</span>
           <Input type="date" value={backtestParams.end_date || ''} onChange={(event) => setBacktestParams(prev => ({ ...prev, end_date: event.target.value || undefined }))} style={{ width: 145 }} />
+          <span>单边滑点(bp)</span>
+          <Input type="number" min="0" max="500" step="1" value={backtestParams.slippage_bps} onChange={(event) => setBacktestParams(prev => ({ ...prev, slippage_bps: Number(event.target.value) || 0 }))} style={{ width: 100 }} />
           {backtestMarket === 'a' && <>
             <span>允许杠杆</span>
             <Switch checked={backtestParams.allow_leverage} onChange={(allow_leverage) => setBacktestParams(prev => ({ ...prev, allow_leverage }))} />

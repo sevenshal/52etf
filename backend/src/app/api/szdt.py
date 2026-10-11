@@ -395,6 +395,7 @@ class AStockSzdtBacktestRequest(BaseModel):
     end_date: Optional[date] = None
     initial_capital: float = Field(1_000_000, gt=0, le=100_000_000)
     allow_leverage: bool = False
+    slippage_bps: float = Field(10, ge=0, le=500, description="单边滑点（基点）")
 
 
 class BacktestPosition(BaseModel):
@@ -443,6 +444,7 @@ async def run_a_stock_backtest(
             start_date=payload.start_date,
             end_date=payload.end_date,
             allow_leverage=payload.allow_leverage,
+            slippage_bps=payload.slippage_bps,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -478,6 +480,7 @@ async def run_us_backtest(
             stocks, account_id=account_id, initial_capital=payload.initial_capital,
             start_date=payload.start_date, end_date=payload.end_date,
             rotation_enabled=rotation_enabled, rotation_threshold=rotation_threshold,
+            slippage_bps=payload.slippage_bps,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

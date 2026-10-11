@@ -87,6 +87,7 @@ async def run_szdt_a_stock_backtest(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     allow_leverage: bool = False,
+    slippage_bps: float = 10,
 ) -> Dict[str, Any]:
     """用当前配置回放：T 日信号，下一可交易日开盘成交。"""
     stocks = [dict(item, code=str(item["code"]).upper()) for item in stocks if item.get("enabled")]
@@ -154,10 +155,11 @@ async def run_szdt_a_stock_backtest(
             factor = min(1.0, max(0.0, (score - float(stock["when_sell"])) / (100 - float(stock["when_sell"]))))
             amount = float(stock["sell_amount"]) * (3 ** (factor ** float(stock["sell_factor"])))
             quantity = min(shares[code], max(LOT_SIZE, int(amount / close_price / LOT_SIZE) * LOT_SIZE))
-            gross = quantity * close_price
+            execution_price = close_price * (1 - slippage_bps / 10_000)
+            gross = quantity * execution_price
             cash += gross - _fee(gross)
             shares[code] -= quantity
-            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "SELL", "quantity": quantity, "price": round(close_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
+            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "SELL", "quantity": quantity, "price": round(execution_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
 
         for stock in stocks:
             code = stock["code"]
@@ -167,6 +169,7 @@ async def run_szdt_a_stock_backtest(
             if score is None or not quote or score > float(stock["when_buy"]) or (threshold > 0 and volume_ratios.get((code, day), 0) < threshold):
                 continue
             close_price = quote[1]
+            execution_price = close_price * (1 + slippage_bps / 10_000)
             equity = cash + sum(quantity * prices[(symbol, day)][1] for symbol, quantity in shares.items() if (symbol, day) in prices)
             if equity <= 0 or shares[code] * close_price / equity * 100 >= float(stock["max_position"]):
                 continue
@@ -195,7 +198,7 @@ async def run_szdt_a_stock_backtest(
                         shares[source_code],
                         max(LOT_SIZE, math.ceil(needed / source_price / LOT_SIZE) * LOT_SIZE),
                     )
-                    source_gross = source_quantity * source_price
+                    source_gross = source_quantity * source_price * (1 - slippage_bps / 10_000)
                     cash += source_gross - _fee(source_gross)
                     shares[source_code] -= source_quantity
                     rotation_trade_count += 1
@@ -207,18 +210,18 @@ async def run_szdt_a_stock_backtest(
                         "amount": round(source_gross, 2),
                     })
             available = target_amount if allow_leverage else min(cash, target_amount)
-            quantity = int(available / close_price / LOT_SIZE) * LOT_SIZE
-            gross = quantity * close_price
+            quantity = int(available / execution_price / LOT_SIZE) * LOT_SIZE
+            gross = quantity * execution_price
             fee = _fee(gross)
             while quantity >= LOT_SIZE and not allow_leverage and gross + fee > cash:
                 quantity -= LOT_SIZE
-                gross = quantity * close_price
+                gross = quantity * execution_price
                 fee = _fee(gross)
             if quantity < LOT_SIZE:
                 continue
             cash -= gross + fee
             shares[code] += quantity
-            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "BUY", "quantity": quantity, "price": round(close_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
+            trades.append({"date": day.isoformat(), "code": code, "name": stock["name"], "side": "BUY", "quantity": quantity, "price": round(execution_price, 4), "score": round(score, 2), "amount": round(gross, 2)})
 
         long_value = sum(quantity * prices[(symbol, day)][1] for symbol, quantity in shares.items() if (symbol, day) in prices)
         equity = cash + long_value
@@ -252,7 +255,7 @@ async def run_szdt_a_stock_backtest(
         })
     return {
         "period": {"start_date": curve[0]["date"], "end_date": curve[-1]["date"], "sessions": len(returns)},
-        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None, "allow_leverage": allow_leverage, "execution": "same_close; sell_before_buy"},
+        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None, "allow_leverage": allow_leverage, "slippage_bps": slippage_bps, "execution": "same_close; sell_before_buy"},
         "metrics": {
             "initial_capital": round(initial_capital, 2), "final_nav": round(float(nav.iloc[-1]), 2),
             "total_return_pct": round(total_return * 100, 2), "annualized_return_pct": round(annualized * 100, 2),
