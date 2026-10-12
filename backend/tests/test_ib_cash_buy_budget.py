@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import AsyncMock, patch
 
+from src.core.database import SzdtTradeStock, get_db_ctx
 from src.core.services import trading_strategy
 from src.core.services.ib_service import IBKRService
 from src.robot import szdt_us_trader
@@ -119,6 +120,49 @@ class SZDTUSTraderCashSizingTest(TestCase):
         orders = self._run_buy_signal(_ib_service(net_liquidation=10000.0, available_funds=10000.0, total_cash=10000.0))
 
         self.assertEqual([("TQQQ.US", "BUY", 109)], orders)  # 5000 * 3 ** (10 / 120)
+
+
+class SZDTUSScheduledSnapshotTest(TestCase):
+    """定时任务退出 DB 会话后不能再读取过期的 SzdtTradeStock ORM 实体。"""
+
+    account_id = "szdt-us-scheduled-snapshot-test"
+
+    def setUp(self):
+        with get_db_ctx() as db:
+            db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == self.account_id).delete()
+            db.add(SzdtTradeStock(
+                account_id=self.account_id,
+                code="US.TQQQ",
+                name="TQQQ",
+                type=1,
+                when_buy=-90,
+                when_sell=80,
+                max_position=100,
+                buy_amount=1000,
+                sell_amount=1000,
+                buy_factor=1,
+                sell_factor=1,
+                buy_volume_ratio=1.2,
+                lever=3,
+                emo_area="us",
+                enabled=True,
+            ))
+
+    def tearDown(self):
+        with get_db_ctx() as db:
+            db.query(SzdtTradeStock).filter(SzdtTradeStock.account_id == self.account_id).delete()
+
+    def test_volume_metric_snapshot_survives_session_close(self):
+        with get_db_ctx() as db:
+            rows = db.query(SzdtTradeStock).filter(
+                SzdtTradeStock.account_id == self.account_id,
+            ).with_entities(
+                SzdtTradeStock.code,
+                SzdtTradeStock.buy_volume_ratio,
+            ).all()
+            snapshots = SZDTUSTrader._volume_metric_stock_snapshots(rows)
+
+        self.assertEqual([{"code": "US.TQQQ", "buy_volume_ratio": 1.2}], snapshots)
 
 
 class TradingStrategyCashSizingTest(TestCase):

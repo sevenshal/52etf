@@ -144,6 +144,8 @@ class SZDTUSTrader:
     async def run_once(self, config: SZDTTradingConfig, ib_port: int, volume_metrics: Dict | None = None):
         account_id = config["account_id"] if isinstance(config, dict) else config.account_id
         config_id = config["id"] if isinstance(config, dict) else config.id
+        us_rotation_enabled = config.get("us_rotation_enabled", False) if isinstance(config, dict) else bool(getattr(config, "us_rotation_enabled", False))
+        us_rotation_threshold = config.get("us_rotation_threshold", -30) if isinstance(config, dict) else getattr(config, "us_rotation_threshold", -30)
         cli_id = f'szdt-us-auto-{account_id}'
         # Use a consistent client ID for this account to allow connection reuse. 
         # config.id is unique per config entry. Using base 2000 to avoid conflict with portfolio copy trader (100+) and others.
@@ -231,8 +233,8 @@ class SZDTUSTrader:
                         score_factor = min(1, max(0, (stock['when_buy'] - score) / (stock['when_buy'] + 100)))
                         score_factor = 3 ** (score_factor ** stock['buy_factor'])
                         requested_amount = stock['buy_amount'] * score_factor
-                        if config.get('us_rotation_enabled') and available_cash < requested_amount:
-                            threshold = float(config.get('us_rotation_threshold', -30))
+                        if us_rotation_enabled and available_cash < requested_amount:
+                            threshold = float(us_rotation_threshold)
                             with get_db_ctx() as db:
                                 sources = [{
                                     'code': row.code, 'name': row.name, 'type': row.type, 'lever': row.lever,
@@ -341,6 +343,14 @@ class SZDTUSTrader:
         return {"id": config.id, "account_id": config.account_id, "ib_account_id": config.ib_account_id,
                 "us_rotation_enabled": bool(config.us_rotation_enabled), "us_rotation_threshold": int(config.us_rotation_threshold)}
 
+    @staticmethod
+    def _volume_metric_stock_snapshots(rows) -> list[Dict]:
+        """从会话内查询结果提取量比所需字段，供会话外的异步任务使用。"""
+        return [
+            {"code": row.code, "buy_volume_ratio": row.buy_volume_ratio}
+            for row in rows
+        ]
+
     async def run_scheduled_once(self):
         """由系统定时任务调用；两个美股定时点内逐个检查账户的全部启用标的。"""
         if not MarketService.is_us_market_open():
@@ -351,16 +361,22 @@ class SZDTUSTrader:
             ).all()]
             stocks_by_account = {}
             for config in configs:
-                stocks_by_account[config['account_id']] = db.query(SzdtTradeStock).filter(
+                stock_rows = db.query(SzdtTradeStock).filter(
                     SzdtTradeStock.account_id == config['account_id'],
                     SzdtTradeStock.type.in_([1, 2, 7]),
                     SzdtTradeStock.enabled == True,
+                ).with_entities(
+                    SzdtTradeStock.code,
+                    SzdtTradeStock.buy_volume_ratio,
                 ).all()
+                # get_db_ctx 退出会 commit，ORM 属性随之过期。定时任务在会话外只需
+                # 量比预热所需字段，因此立刻转换为普通字典，不能把 ORM 实体带出去。
+                stocks_by_account[config['account_id']] = self._volume_metric_stock_snapshots(stock_rows)
         for config in configs:
             stocks = stocks_by_account.get(config['account_id'], [])
             if not stocks:
                 continue
-            volume_codes = [stock.code for stock in stocks if float(stock.buy_volume_ratio or 0) > 0]
+            volume_codes = [stock["code"] for stock in stocks if float(stock["buy_volume_ratio"] or 0) > 0]
             volume_metrics = await asyncio.to_thread(get_us_stock_volume_metrics, config['account_id'], volume_codes)
             ib_port = 4001
             if config.get('ib_account_id'):
