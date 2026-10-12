@@ -228,6 +228,14 @@ def test_soxl_compact_search_expands_sell_valuation_candidates_when_mode_uses_th
     assert _count_search_params(payload) == 2
 
 
+def test_soxl_compact_search_accepts_cnn_or_soxx_fear_source():
+    cnn = SoxlFearSearchParams(fear_source="cnn").to_engine_params()
+    soxx = SoxlFearSearchParams(fear_source="soxx_clone").to_engine_params()
+
+    assert cnn.fear_source_values == ["cnn"]
+    assert soxx.fear_source_values == ["soxx_clone"]
+
+
 def test_backtest_uses_explicit_benchmark_price_curve_when_present():
     frame = _frame([90.0] * 10, [None] * 10)
     frame["benchmark_open"] = [20.0] * 10

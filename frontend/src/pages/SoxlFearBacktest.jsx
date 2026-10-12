@@ -288,6 +288,7 @@ const SoxlFearBacktest = () => {
     const sellPriceAboveAvgCostValues = parseBooleanList(values.sell_price_above_avg_cost_values);
     const executeNextOpenValues = parseBooleanList(values.execute_next_open_values);
     const soxlSellMode = values.soxl_sell_mode || 'valuation_ma5';
+    const soxlFearSource = values.soxl_fear_source || 'cnn';
     const soxlValuationWindow = Number(values.soxl_valuation_window) || 252;
     const soxlValuationSellMinValues = parseOptionalThresholdList(values.soxl_valuation_sell_min_values);
     const soxlValuationBuyMaxValues = parseOptionalThresholdList(values.soxl_valuation_buy_max_values);
@@ -326,6 +327,7 @@ const SoxlFearBacktest = () => {
         max_take_profit_sells_per_cycle_values: soxlMaxSellValues.length ? soxlMaxSellValues : [2],
         min_position_pct_after_take_profit_values: soxlMinPositionValues.length ? soxlMinPositionValues : [0],
         execute_next_open_values: executeNextOpenValues.length ? executeNextOpenValues : [true],
+        fear_source: soxlFearSource,
         sell_mode: soxlSellMode,
         valuation_window: soxlValuationWindow,
         valuation_buy_max_values: soxlValuationBuyMaxValues.length ? soxlValuationBuyMaxValues : [50],
@@ -401,7 +403,7 @@ const SoxlFearBacktest = () => {
       valuation_sell_min_values: parseOptionalThresholdList(values.valuation_sell_min_values),
       valuation_force_sell_greed_values: parseOptionalThresholdList(values.valuation_force_sell_greed_values),
       ...(isSoxlMode ? {
-        // SOXL 专用回测固定为：CNN + SOXL 量能买入，SOXX 估值/MA5/移动止盈卖出。
+        // SOXL 专用回测固定为：所选恐贪来源 + SOXL 量能买入，SOXX 估值/MA5/移动止盈卖出。
         fear_source_values: ['cnn'],
         symbol: 'SOXL.US',
         volume_signal_symbol: 'SOXL.US',
@@ -680,6 +682,7 @@ const SoxlFearBacktest = () => {
         execute_next_open_values: ['true'],
         sell_ma5_confirm: 'all',
         soxl_sell_mode: 'valuation_ma5',
+        soxl_fear_source: 'cnn',
         soxl_valuation_window: 252,
         soxl_valuation_buy_max_values: '50',
         soxl_valuation_sell_min_values: '80',
@@ -1450,6 +1453,7 @@ const SoxlFearBacktest = () => {
             sub3_volume_ratio_threshold_values: '1.3',
             sell_ma5_confirm: 'off',
             soxl_sell_mode: 'valuation_ma5',
+            soxl_fear_source: 'cnn',
             soxl_valuation_window: 252,
             soxl_valuation_buy_max_values: '50',
             soxl_valuation_sell_min_values: '80',
@@ -1742,6 +1746,15 @@ const SoxlFearBacktest = () => {
             </Col>
             {isSoxlMode && (
               <>
+              <Col xs={24} md={8}>
+                <Form.Item name="soxl_fear_source" label="SOXL 恐贪来源">
+                  <Select
+                    options={(fearSourceOptions || DEFAULT_FEAR_SOURCE_OPTIONS).filter(
+                      item => item.value === 'cnn' || item.value === 'soxx_clone',
+                    )}
+                  />
+                </Form.Item>
+              </Col>
               <Col xs={24} md={8}>
                 <Form.Item name="soxl_sell_mode" label="SOXL 卖出模式">
                   <Select options={SOXL_SELL_MODE_OPTIONS} />

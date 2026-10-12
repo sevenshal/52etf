@@ -759,6 +759,8 @@ class SoxlFearSearchParams(BaseModel):
     objective: str = "annualized_return"
     eval_workers: Optional[int] = None
     rebalance_threshold_pct: float = 5.0
+    # SOXL 专用回测只允许这两种美股恐贪来源：CNN 官方历史数据或 SOXX 自算恐贪。
+    fear_source: str = "cnn"
     slippage_pct: float = 0.3
     stamp_duty_pct: float = 0.0
     buy_threshold_values: List[float] = Field(default_factory=lambda: [30.0])
@@ -786,6 +788,12 @@ class SoxlFearSearchParams(BaseModel):
             raise ValueError("SOXL 卖出模式仅支持 trailing、valuation_ma5、valuation_trailing")
         return value
 
+    @validator("fear_source")
+    def validate_fear_source(cls, value):
+        if value not in {"cnn", "soxx_clone"}:
+            raise ValueError("SOXL 恐贪来源仅支持 cnn 或 soxx_clone")
+        return value
+
     @validator("valuation_window")
     def validate_valuation_window(cls, value):
         if value not in VALUATION_POSITION_WINDOWS:
@@ -810,7 +818,7 @@ class SoxlFearSearchParams(BaseModel):
         return SOXLFearSearchParams(
             symbol=SOXL_SYMBOL,
             volume_signal_symbol=SOXL_SYMBOL,
-            fear_source_values=["cnn"],
+            fear_source_values=[self.fear_source],
             initial_capital=self.initial_capital,
             start_date=self.start_date,
             end_date=self.end_date,
@@ -3810,7 +3818,7 @@ def get_soxl_fear_backtest_options(
                 "market": config.get("market") or "us",
             }
             for key, config in FEAR_SOURCE_OPTIONS.items()
-            if key == "cnn"
+            if key in {"cnn", "soxx_clone"}
         ],
         "a_stock_preset_pairs": A_STOCK_PRESET_PAIRS,
         "default_request": {
