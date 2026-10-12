@@ -86,13 +86,15 @@ async def run_szdt_a_stock_backtest(
     initial_capital: float = 1_000_000.0,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    allow_leverage: bool = False,
+    max_leverage_ratio: float = 1.0,
     slippage_bps: float = 10,
 ) -> Dict[str, Any]:
     """用当前配置回放：T 日信号，下一可交易日开盘成交。"""
     stocks = [dict(item, code=str(item["code"]).upper()) for item in stocks if item.get("enabled")]
     if not stocks:
         raise ValueError("没有启用的 A股ETF 配置")
+    max_leverage_ratio = max(1.0, float(max_leverage_ratio))
+    leverage_enabled = max_leverage_ratio > 1.0
     histories = await _load_emotion_histories(stocks)
     stocks = [item for item in stocks if item["code"] in histories]
     if not stocks:
@@ -138,7 +140,7 @@ async def run_szdt_a_stock_backtest(
     daily_days = [item for item in all_days if actual_start <= item <= actual_end]
 
     for day in daily_days:
-        if allow_leverage and cash < 0:
+        if leverage_enabled and cash < 0:
             interest = -cash * 0.05 / 252
             cash -= interest
             financing_cost += interest
@@ -177,7 +179,7 @@ async def run_szdt_a_stock_backtest(
             target_amount = float(stock["buy_amount"]) * (3 ** (factor ** float(stock["buy_factor"])))
             # 现金不足时，只在显式开启轮动后，从贪恐值更高的其他持仓中腾挪。
             # 先卖最贪婪的，且只卖到足以覆盖当前目标买单的整手数。
-            if rotation_enabled and not allow_leverage and cash < target_amount:
+            if rotation_enabled and not leverage_enabled and cash < target_amount:
                 for source in sorted(
                     (
                         (float(source_score), source_code, source_quote[1])
@@ -209,11 +211,19 @@ async def run_szdt_a_stock_backtest(
                         "price": round(source_price, 4), "score": round(source_score, 2),
                         "amount": round(source_gross, 2),
                     })
-            available = target_amount if allow_leverage else min(cash, target_amount)
+            available = target_amount if leverage_enabled else min(cash, target_amount)
             quantity = int(available / execution_price / LOT_SIZE) * LOT_SIZE
             gross = quantity * execution_price
             fee = _fee(gross)
-            while quantity >= LOT_SIZE and not allow_leverage and gross + fee > cash:
+            # 以成交后的收盘市值 / 权益校验，确保即使借入现金也不会超过用户设置的上限。
+            long_value = sum(quantity_ * prices[(symbol, day)][1] for symbol, quantity_ in shares.items() if (symbol, day) in prices)
+            while quantity >= LOT_SIZE:
+                post_long_value = long_value + quantity * close_price
+                post_equity = cash - gross - fee + post_long_value
+                within_cash = leverage_enabled or gross + fee <= cash
+                within_leverage = post_equity > 0 and post_long_value <= max_leverage_ratio * post_equity
+                if within_cash and within_leverage:
+                    break
                 quantity -= LOT_SIZE
                 gross = quantity * execution_price
                 fee = _fee(gross)
@@ -255,14 +265,14 @@ async def run_szdt_a_stock_backtest(
         })
     return {
         "period": {"start_date": curve[0]["date"], "end_date": curve[-1]["date"], "sessions": len(returns)},
-        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None, "allow_leverage": allow_leverage, "slippage_bps": slippage_bps, "execution": "same_close; sell_before_buy"},
+        "rules": {"sell_on_ema5_breakdown": sell_on_ema5_breakdown, "rotation_enabled": rotation_enabled, "rotation_threshold": rotation_threshold if rotation_enabled else None, "max_leverage_ratio": max_leverage_ratio, "allow_leverage": leverage_enabled, "slippage_bps": slippage_bps, "execution": "same_close; sell_before_buy"},
         "metrics": {
             "initial_capital": round(initial_capital, 2), "final_nav": round(float(nav.iloc[-1]), 2),
             "total_return_pct": round(total_return * 100, 2), "annualized_return_pct": round(annualized * 100, 2),
             "max_drawdown_pct": round(drawdown * 100, 2), "sharpe": round(float(sharpe), 2) if sharpe is not None else None,
             "trade_count": len(trades), "buy_count": sum(item["side"] == "BUY" for item in trades), "sell_count": sum(item["side"] in {"SELL", "ROTATE_SELL"} for item in trades), "rotation_sell_count": rotation_trade_count,
             "avg_gross_exposure_pct": round(float(gross.mean() * 100), 2), "peak_gross_exposure_pct": round(float(gross.max() * 100), 2),
-            # 总多头市值 / 当日权益。不开杠杆时最高为 1.00 倍；允许杠杆后可超过 1。
+            # 总多头市值 / 当日权益；最高值由 max_leverage_ratio 控制。
             "max_leverage_ratio": round(float(gross.max()), 4),
             "capital_efficiency_pct": round(float(annualized / gross.mean() * 100), 2) if gross.mean() > 0 else None,
             "financing_cost": round(financing_cost, 2),

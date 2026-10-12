@@ -66,7 +66,7 @@ const FearStockList = () => {
   const [backtestMarket, setBacktestMarket] = useState('a');
   const [selectedBacktestPositions, setSelectedBacktestPositions] = useState([]);
   const [syncingBacktestPositions, setSyncingBacktestPositions] = useState(false);
-  const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, allow_leverage: false, slippage_bps: 10 });
+  const [backtestParams, setBacktestParams] = useState({ initial_capital: 1000000, max_leverage_ratio: 1, slippage_bps: 10 });
   const [historyRecord, setHistoryRecord] = useState(null);
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
@@ -384,7 +384,7 @@ const FearStockList = () => {
     setBacktestLoading(true);
     try {
       const endpoint = backtestMarket === 'us' ? '/api/quant/us-backtest' : '/api/quant/a-stock-backtest';
-      const params = backtestMarket === 'us' ? { ...backtestParams, allow_leverage: false } : backtestParams;
+      const params = backtestMarket === 'us' ? { ...backtestParams, max_leverage_ratio: 1 } : backtestParams;
       const { data: result } = await request.post(endpoint, params);
       setBacktestResult(result);
       setSelectedBacktestPositions([]);
@@ -1052,8 +1052,17 @@ const FearStockList = () => {
           <span>单边滑点(bp)</span>
           <Input type="number" min="0" max="500" step="1" value={backtestParams.slippage_bps} onChange={(event) => setBacktestParams(prev => ({ ...prev, slippage_bps: Number(event.target.value) || 0 }))} style={{ width: 100 }} />
           {backtestMarket === 'a' && <>
-            <span>允许杠杆</span>
-            <Switch checked={backtestParams.allow_leverage} onChange={(allow_leverage) => setBacktestParams(prev => ({ ...prev, allow_leverage }))} />
+            <span>最高杠杆率</span>
+            <Input
+              type="number"
+              min="1"
+              max="5"
+              step="0.1"
+              value={backtestParams.max_leverage_ratio}
+              onChange={(event) => setBacktestParams(prev => ({ ...prev, max_leverage_ratio: Math.max(1, Number(event.target.value) || 1) }))}
+              style={{ width: 90 }}
+            />
+            <span>×（1× 不融资）</span>
           </>}
           <Button type="primary" loading={backtestLoading} onClick={runBacktest}>开始回测</Button>
         </Space>

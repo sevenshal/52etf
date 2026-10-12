@@ -71,3 +71,33 @@ def test_backtest_rotates_greedy_holding_to_fund_extreme_fear_buy(monkeypatch):
     assert result["rules"]["rotation_enabled"] is True
     assert result["metrics"]["rotation_sell_count"] == 1
     assert any(trade["side"] == "ROTATE_SELL" and trade["code"] == "SH.510300" for trade in result["trades"])
+
+
+def test_backtest_caps_borrowed_exposure_at_configured_max_leverage(monkeypatch):
+    stock = {
+        "code": "SH.510300", "name": "沪深300", "enabled": True,
+        "when_buy": -90, "when_sell": 80, "max_position": 100,
+        "buy_amount": 100_000, "sell_amount": 10_000, "buy_factor": 1, "sell_factor": 1,
+        "buy_volume_ratio": 0,
+    }
+    day = date(2026, 1, 2)
+    next_day = date(2026, 1, 5)
+    history = pd.DataFrame([{"date": day, "score": -100}, {"date": next_day, "score": 0}])
+    prices = pd.DataFrame([{
+        "code": "SH.510300", "ts_code": "510300.SH", "trade_date": item_day,
+        "open": 10, "close": 10, "vol": 100, "volume_ratio": 1, "ema5": 10,
+    } for item_day in (day, next_day)])
+
+    async def histories(_stocks):
+        return {"SH.510300": history}
+
+    monkeypatch.setattr(module, "_load_emotion_histories", histories)
+    monkeypatch.setattr(module, "_load_daily_frame", lambda _symbols: prices)
+    result = __import__("asyncio").run(module.run_szdt_a_stock_backtest(
+        [stock], sell_on_ema5_breakdown=False, initial_capital=100_000,
+        max_leverage_ratio=1.5, slippage_bps=0,
+    ))
+
+    assert result["rules"]["max_leverage_ratio"] == 1.5
+    assert result["metrics"]["max_leverage_ratio"] <= 1.5
+    assert result["metrics"]["max_leverage_ratio"] > 1.4

@@ -394,7 +394,9 @@ class AStockSzdtBacktestRequest(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     initial_capital: float = Field(1_000_000, gt=0, le=100_000_000)
-    allow_leverage: bool = False
+    max_leverage_ratio: float = Field(1.0, ge=1.0, le=5.0, description="最高多头杠杆率；1 表示不融资")
+    # 兼容旧版页面/调用。仅在未传 max_leverage_ratio 时，true 对应默认 1.5 倍。
+    allow_leverage: Optional[bool] = None
     slippage_bps: float = Field(10, ge=0, le=500, description="单边滑点（基点）")
 
 
@@ -433,6 +435,9 @@ async def run_a_stock_backtest(
     sell_on_ema5_breakdown = bool(config and config.a_sell_on_ema5_breakdown)
     rotation_enabled = bool(config and config.a_rotation_enabled)
     rotation_threshold = int(config.a_rotation_threshold) if config else -30
+    max_leverage_ratio = payload.max_leverage_ratio
+    if payload.allow_leverage and max_leverage_ratio == 1.0:
+        max_leverage_ratio = 1.5
     db.close()
     try:
         return await run_szdt_a_stock_backtest(
@@ -443,7 +448,7 @@ async def run_a_stock_backtest(
             initial_capital=payload.initial_capital,
             start_date=payload.start_date,
             end_date=payload.end_date,
-            allow_leverage=payload.allow_leverage,
+            max_leverage_ratio=max_leverage_ratio,
             slippage_bps=payload.slippage_bps,
         )
     except ValueError as exc:
