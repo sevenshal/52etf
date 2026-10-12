@@ -49,7 +49,9 @@ class SZDTService:
         # 设置不同API的缓存时间（秒）
         self.cache_ttls = {
             'etf_emotion': 300,  # 5分钟
-            'etf_emotion_history': 3600 * 24,  # 24小时
+            # 历史贪恐会被列表曲线和配置回测共用；缓存过久会令当日回测漏掉
+            # 最新信号，因此限制为一小时。
+            'etf_emotion_history': 3600,  # 1小时
             'stock_emotion': 300  # 5分钟
         }
 
