@@ -51,16 +51,24 @@ def test_gold_five_factor_history_and_backfill(tmp_path):
             ))
         db.commit(); db.close(); Session.remove()
 
+        # 守猪逮兔取数走外部 HTTP，子进程里 stub 掉，验证缺失时主计算不受影响
+        GoldFearGreedCalculator._fetch_szdt_emotion_series = staticmethod(
+            lambda start, end: pd.Series(dtype=float)
+        )
         calc = GoldFearGreedCalculator()
         result = calc.backfill_to_db(start_date=days[0].date(), end_date=days[-1].date(), score_window=60, min_periods=40, history_days=620)
         assert result['saved'] > 300
-        assert result['component_count'] == 5
+        assert result['component_count'] == 6
         db = Session()
         latest = db.execute(__import__('sqlalchemy').text("SELECT components FROM etf_fear_greed_clone_history WHERE symbol='GLD.US' ORDER BY date DESC LIMIT 1")).scalar_one()
         if isinstance(latest, str):
             latest = __import__('json').loads(latest)
-        assert len(latest) == 5
-        assert set(latest) == {'gold_price_momentum', 'gold_options', 'cot_positioning', 'gold_etf_demand', 'real_yield_dollar'}
+        assert len(latest) == 6
+        assert set(latest) == {'gold_price_momentum', 'gold_options', 'cot_positioning', 'gold_etf_demand', 'real_yield_dollar', 'szdt_fear_greed'}
+        # 守猪逮兔缺失时分量字段为空，但总分仍是五因子均值（不阻塞历史）
+        assert latest['szdt_fear_greed']['score'] is None
+        szdt_col = db.execute(__import__('sqlalchemy').text("SELECT szdt_fear_greed_score FROM etf_fear_greed_clone_history WHERE symbol='GLD.US' ORDER BY date DESC LIMIT 1")).scalar_one()
+        assert szdt_col is None
         """
     )
     env = os.environ.copy()
@@ -113,3 +121,50 @@ def test_cot_rows_become_available_three_days_after_report(monkeypatch):
     frame = syncer._fetch_cot(pd.Timestamp("2026-08-01").date(), pd.Timestamp("2026-08-31").date())
     assert frame.iloc[0]["date"].isoformat() == "2026-08-21"
     syncer.close()
+
+
+def test_szdt_emotion_series_linear_mapping(monkeypatch):
+    """守猪逮兔 US.GLD -100..100 线性映射为 0-100。"""
+    import datetime as dt
+
+    import src.core.services.szdt as szdt_module
+    from src.core.services.gold_fear_greed_service import GoldFearGreedCalculator
+
+    class FakeSZDTService:
+        def get_etf_emotion_history_sync(self, code):
+            assert code == "US.GLD"
+            return {
+                "status": 1,
+                "data": [
+                    {"date": "2026-10-08", "score": -100},
+                    {"date": "2026-10-09", "score": 0},
+                    {"date": "2026-10-12", "score": -83},
+                ],
+            }
+
+    monkeypatch.setattr(szdt_module, "SZDTService", FakeSZDTService)
+    series = GoldFearGreedCalculator._fetch_szdt_emotion_series(
+        dt.date(2026, 10, 1), dt.date(2026, 10, 31)
+    )
+
+    assert series.loc[pd.Timestamp("2026-10-08")] == pytest.approx(0.0)
+    assert series.loc[pd.Timestamp("2026-10-09")] == pytest.approx(50.0)
+    assert series.loc[pd.Timestamp("2026-10-12")] == pytest.approx(8.5)
+
+
+def test_szdt_emotion_series_failure_returns_empty(monkeypatch):
+    """守猪逮兔取数失败返回空序列，不抛异常阻塞主计算。"""
+    import datetime as dt
+
+    import src.core.services.szdt as szdt_module
+    from src.core.services.gold_fear_greed_service import GoldFearGreedCalculator
+
+    class FakeSZDTService:
+        def get_etf_emotion_history_sync(self, code):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(szdt_module, "SZDTService", FakeSZDTService)
+    series = GoldFearGreedCalculator._fetch_szdt_emotion_series(
+        dt.date(2026, 10, 1), dt.date(2026, 10, 31)
+    )
+    assert series.empty

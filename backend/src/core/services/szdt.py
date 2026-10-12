@@ -211,13 +211,18 @@ class SZDTService:
         cache_key = f"etf_emotion_history:{code}"
         return await self._make_request("GET", path, cache_key)
 
-    def get_etf_emotion_history_sync(self, code: str) -> Optional[Dict]:
-        """同步获取ETF历史贪恐指数，供同步计算链路（如自算恐贪回跑）使用。
-
-        不走 diskcache：回跑按日运行，需要当天最新数据；一次调用即返回全量历史，
-        每个标的每天也只调一次，频率天然很低。
-        """
-        path = f"/invest/stock_emotion/history?code={code}"
+    def _get_sync(
+        self,
+        path: str,
+        cache_key: Optional[str] = None,
+        cache_ttl: Optional[int] = None,
+    ) -> Optional[Dict]:
+        """同步 GET 请求（供同步计算链路使用），可选走 diskcache。"""
+        if cache_key:
+            cached_data = self.cache.get(cache_key)
+            if cached_data is not None:
+                self.logger.debug(f"从缓存获取数据: {cache_key}")
+                return cached_data
         timestamp = datetime.utcnow().isoformat() + "Z"
         headers = {
             "Accept": "application/json",
@@ -232,7 +237,7 @@ class SZDTService:
                 response = client.get(url, headers=headers)
             response.raise_for_status()
             try:
-                return response.json()
+                resp = response.json()
             except ValueError as exc:
                 self._log_request_failure("GET", path, exc, status_code=response.status_code)
                 return None
@@ -248,6 +253,26 @@ class SZDTService:
         except Exception as exc:
             self._log_request_failure("GET", path, exc)
             return None
+        if cache_key:
+            ttl = cache_ttl if cache_ttl is not None else self.cache_ttls.get(cache_key.split(':')[0], 300)
+            self.cache.set(cache_key, resp, expire=ttl)
+            self.logger.debug(f"缓存数据: {cache_key}, TTL: {ttl}秒")
+        return resp
+
+    def get_etf_emotion_sync(self, etf_type: int = 1) -> Optional[Dict]:
+        """同步获取ETF实时情绪列表，与异步版 get_etf_emotion 共用 diskcache。"""
+        path = f"/invest/stock_emotion?etf_type={etf_type}"
+        cache_key = f"etf_emotion:{etf_type}"
+        return self._get_sync(path, cache_key=cache_key)
+
+    def get_etf_emotion_history_sync(self, code: str) -> Optional[Dict]:
+        """同步获取ETF历史贪恐指数，供同步计算链路（如自算恐贪回跑）使用。
+
+        不走 diskcache：回跑按日运行，需要当天最新数据；一次调用即返回全量历史，
+        每个标的每天也只调一次，频率天然很低。
+        """
+        path = f"/invest/stock_emotion/history?code={code}"
+        return self._get_sync(path)
 
     @staticmethod
     def _normalize_code(code: str) -> str:

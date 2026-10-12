@@ -40,6 +40,7 @@ from ..database import (
 )
 from ..models.etf import ETFHolding
 from ..utils import normalize_us_equity_symbol, send_configured_email
+from ...robot.cnn_fear_index import CNN_BASE_URL, CNN_HEADERS
 from ...robot.etf.ishares import ISharesETFFetcher
 from ...robot.etf.qqq import QQQDataFetcher
 from ...robot.etf.spdr import SPDRDataFetcher
@@ -51,6 +52,11 @@ DEFAULT_ETF_FEAR_GREED_SYMBOLS = ["SOXX.US", "SPY.US", "QQQ.US", "DIA.US"]
 # 标的自身 put/call 受做市/对冲行为主导，暴跌时方向常与全市场相反；
 # 指数口径又被 SPX 机构套保盘主导，情绪信号最纯的是股票口径。
 CBOE_EQUITY_PUT_CALL_RATIO = "EQUITY PUT/CALL RATIO"
+# 守猪逮兔实时情绪列表的 etf_type 查找顺序：美股常规(2) / 美股杠杆(1) / 全球ETF(4)。
+# SPY/QQQ/DIA/SOXX 都在美股常规列表里，保留其余两个兜底防止列表调整。
+SZDT_REALTIME_ETF_TYPES = (2, 1, 4)
+# CNN/守猪逮兔实时分量在同一计算器实例内的缓存时长（秒）
+REALTIME_EXTERNAL_COMPONENT_CACHE_SECONDS = 300
 
 
 def _a_stock_proxy_etf_map() -> Dict[str, str]:
@@ -642,6 +648,9 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         self.quote_service = QuoteService(LongPortService.get_instance())
         self.price_cache: Dict[Tuple[str, date, date], pd.DataFrame] = {}
         self._szdt_history_cache: Dict[str, pd.Series] = {}
+        # 实时分量取数的短缓存：避免同一实例在一次实时计算/密集请求中重复打外部接口
+        self._cnn_realtime_cache: Optional[Tuple[float, float]] = None
+        self._szdt_realtime_cache: Dict[int, Tuple[float, Dict[str, float]]] = {}
 
     def _build_holdings_fetchers(self) -> Dict[str, Any]:
         fetchers: Dict[str, Any] = {}
@@ -1020,10 +1029,11 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 + "."
             ),
             (
-                "Put/call, junk-bond-demand, CNN and SZDT components are daily "
-                "data: Cboe publishes the equity put/call ratio after the close, "
-                "so all of them are carried forward from the latest SQLite "
-                "backfill row in realtime mode."
+                "Put/call and junk-bond-demand are daily data carried forward "
+                "from the latest SQLite backfill row (Cboe publishes the equity "
+                "put/call ratio after the close); CNN and SZDT components use "
+                "their realtime snapshots when reachable, and fall back to the "
+                "latest stored daily values otherwise."
             ),
             (
                 "Current-row holdings use the latest DB holdings snapshot on or before "
@@ -2108,10 +2118,11 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         raw["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
 
         latest_daily = self._latest_stored_component_raw(etf_symbol)
-        # put/call 用 Cboe 股票口径、日频收盘后发布；CNN 与守猪逮兔贪恐同为日频，
+        # put/call（Cboe 股票口径）与信用利差（FRED）是日频、收盘后才发布，
         # 实时行没有当日值，由 calculate_realtime 的 stale 逻辑沿用最近入库日值。
         raw["put_call_options"] = np.nan
         raw["junk_bond_demand"] = np.nan
+        # CNN 与守猪逮兔都有实时接口：优先用实时快照，取不到再沿用最近入库日值。
         raw["cnn_fear_greed"] = np.nan
         raw["szdt_fear_greed"] = np.nan
         raw_freshness = {
@@ -2129,6 +2140,14 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "market_volatility": "LongPort realtime quote",
             "safe_haven_demand": "LongPort realtime quote",
         }
+        realtime_cnn = self._fetch_realtime_cnn_fear_greed()
+        if realtime_cnn is not None:
+            raw.loc[current_timestamp, "cnn_fear_greed"] = realtime_cnn
+            raw_freshness["cnn_fear_greed"] = "CNN realtime fear & greed snapshot"
+        realtime_szdt = self._fetch_realtime_szdt_fear_greed(etf_symbol)
+        if realtime_szdt is not None:
+            raw.loc[current_timestamp, "szdt_fear_greed"] = realtime_szdt
+            raw_freshness["szdt_fear_greed"] = "SZDT realtime emotion"
         if latest_daily:
             raw.loc[current_timestamp, "junk_bond_demand"] = latest_daily.get("junk_bond_demand")
             raw_freshness["junk_bond_demand"] = "latest stored FRED credit-spread component"
@@ -2314,6 +2333,82 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             (series.index >= pd.Timestamp(start_date))
             & (series.index <= pd.Timestamp(end_date))
         ]
+
+    def _fetch_realtime_cnn_fear_greed(self) -> Optional[float]:
+        """CNN 官方恐贪实时快照（graphdata 接口返回的当前值），0-100 直接用。"""
+        now = time.monotonic()
+        if (
+            self._cnn_realtime_cache
+            and now - self._cnn_realtime_cache[0] < REALTIME_EXTERNAL_COMPONENT_CACHE_SECONDS
+        ):
+            return self._cnn_realtime_cache[1]
+        try:
+            response = self.session.get(
+                f"{CNN_BASE_URL}/{datetime.now(ZoneInfo('UTC')).date().isoformat()}",
+                headers=CNN_HEADERS,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            score = float(response.json()["fear_and_greed"]["score"])
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to fetch CNN realtime fear & greed snapshot: %s", exc
+            )
+            return None
+        if not np.isfinite(score):
+            return None
+        score = min(max(score, 0.0), 100.0)
+        self._cnn_realtime_cache = (now, score)
+        return score
+
+    def _fetch_realtime_szdt_emotion_map(self, etf_type: int) -> Dict[str, float]:
+        """守猪逮兔某类列表的实时情绪：code -> 映射到 0-100 的贪恐分。"""
+        now = time.monotonic()
+        cached = self._szdt_realtime_cache.get(etf_type)
+        if cached and now - cached[0] < REALTIME_EXTERNAL_COMPONENT_CACHE_SECONDS:
+            return cached[1]
+        from .szdt import SZDTService
+
+        response = SZDTService().get_etf_emotion_sync(etf_type)
+        data = (response or {}).get("data") or []
+        scores: Dict[str, float] = {}
+        for item in data:
+            code = item.get("code")
+            emotion = item.get("emotion") or {}
+            try:
+                raw_score = float(emotion.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if not code or not np.isfinite(raw_score):
+                continue
+            scores[code] = min(max((raw_score + 100.0) / 2.0, 0.0), 100.0)
+        if not scores:
+            raise FearGreedCloneError(
+                f"SZDT returned no realtime emotion rows for etf_type={etf_type}"
+            )
+        self._szdt_realtime_cache[etf_type] = (now, scores)
+        return scores
+
+    def _fetch_realtime_szdt_fear_greed(self, etf_symbol: str) -> Optional[float]:
+        """守猪逮兔标的实时贪恐（-100..100 映射为 0-100），取不到时返回 None。"""
+        ticker = self._nasdaq_symbol(etf_symbol)
+        szdt_code = f"US.{ticker}"
+        for etf_type in SZDT_REALTIME_ETF_TYPES:
+            try:
+                scores = self._fetch_realtime_szdt_emotion_map(etf_type)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Failed to fetch SZDT realtime emotion list (etf_type=%s): %s",
+                    etf_type,
+                    exc,
+                )
+                continue
+            if szdt_code in scores:
+                return scores[szdt_code]
+        logging.getLogger(__name__).warning(
+            "SZDT realtime emotion lists do not cover %s", szdt_code
+        )
+        return None
 
     def _safe_direct_component_series(
         self,

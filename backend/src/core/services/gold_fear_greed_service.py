@@ -1,3 +1,4 @@
+import logging
 import math
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Optional
@@ -16,6 +17,14 @@ GOLD_COMPONENTS = {
     "gold_etf_demand": ("黄金ETF持仓需求", "实物黄金ETF持仓吨数/份额四个披露期变化"),
     "real_yield_dollar": ("实际利率与美元", "10年实际利率与广义美元20日变化（反向）"),
 }
+
+# 直接分量：外部已是 0-100 分数，不做滚动 z-score 归一化；
+# 缺失时自动从等权平均中剔除，不阻塞历史。
+GOLD_DIRECT_COMPONENTS = {
+    "szdt_fear_greed": ("守猪逮兔贪恐", "守猪逮兔 US.GLD 情绪分（-100..100 线性映射为 0-100）"),
+}
+
+GOLD_ALL_COMPONENTS = {**GOLD_COMPONENTS, **GOLD_DIRECT_COMPONENTS}
 
 
 class GoldFearGreedCalculator:
@@ -60,6 +69,9 @@ class GoldFearGreedCalculator:
             demand.reindex(demand.index.union(index)).sort_index().ffill().reindex(index)
         )
         raw["real_yield_dollar"] = -inputs["real_yield_10y"].diff(20) - 10.0 * inputs["broad_dollar_index"].pct_change(20, fill_method=None)
+        # 守猪逮兔 GLD 贪恐：直接分量，不参与 z-score 归一化
+        szdt = self._fetch_szdt_emotion_series(start_date, end_date)
+        raw["szdt_fear_greed"] = szdt.reindex(index).ffill(limit=3)
         raw = raw.replace([np.inf, -np.inf], np.nan)
 
         scored = pd.DataFrame(index=index)
@@ -72,19 +84,37 @@ class GoldFearGreedCalculator:
                 [50.0 * (1.0 + math.erf(value / math.sqrt(2.0))) if pd.notna(value) else np.nan for value in z],
                 index=index,
             ).clip(0, 100)
-        scored["score"] = scored[list(GOLD_COMPONENTS)].mean(axis=1, skipna=False)
+        scored["szdt_fear_greed"] = raw["szdt_fear_greed"].clip(0, 100)
+        # 五个 z-score 分量必须齐全；守猪逮兔有数据时按 1/6 等权，缺失时自动剔除
+        z_score_mean = scored[list(GOLD_COMPONENTS)].mean(axis=1, skipna=False)
+        scored["score"] = (
+            pd.concat([z_score_mean, scored["szdt_fear_greed"]], axis=1)
+            .mean(axis=1)
+            .where(z_score_mean.notna())
+        )
         valid = scored.dropna(subset=["score"])
         if output_start_date:
             valid = valid[valid.index.date >= output_start_date]
         records = []
         for timestamp, score_row in valid.iterrows():
             components = {}
-            for key, (name, label) in GOLD_COMPONENTS.items():
+            for key, (name, label) in GOLD_ALL_COMPONENTS.items():
+                component_score = score_row[key]
+                raw_value = raw.loc[timestamp, key]
+                if pd.isna(component_score):
+                    components[key] = {
+                        "name": name,
+                        "score": None,
+                        "rating": None,
+                        "raw_value": None,
+                        "raw_label": label,
+                    }
+                    continue
                 components[key] = {
                     "name": name,
-                    "score": round(float(score_row[key]), 2),
-                    "rating": self.rating(float(score_row[key])),
-                    "raw_value": round(float(raw.loc[timestamp, key]), 8),
+                    "score": round(float(component_score), 2),
+                    "rating": self.rating(float(component_score)),
+                    "raw_value": round(float(raw_value), 8),
                     "raw_label": label,
                 }
             price = prices.loc[timestamp]
@@ -93,11 +123,11 @@ class GoldFearGreedCalculator:
                 "date": timestamp.date().isoformat(),
                 "score": round(float(score_row["score"]), 2),
                 "rating": self.rating(float(score_row["score"])),
-                "method": "gold five-factor equal-weight rolling z-score CDF",
+                "method": "gold 5 z-score factors + SZDT direct component equal-weight",
                 "components": components,
                 "etf_price": {key: self._finite(price.get(key)) for key in ("open", "high", "low", "close", "volume", "turnover")},
             })
-        return {"symbol": "GLD.US", "component_count": 5, "records": records}
+        return {"symbol": "GLD.US", "component_count": len(GOLD_ALL_COMPONENTS), "records": records}
 
     def backfill_to_db(
         self,
@@ -119,6 +149,7 @@ class GoldFearGreedCalculator:
                 day = date.fromisoformat(item["date"])
                 components = item["components"]
                 price = item["etf_price"]
+                szdt_component = components.get("szdt_fear_greed") or {}
                 db.merge(ETFFearGreedCloneHistory(
                     symbol="GLD.US", date=day, score=item["score"], rating=item["rating"],
                     method=item["method"], history_days=history_days, score_window=score_window,
@@ -136,9 +167,12 @@ class GoldFearGreedCalculator:
                     stock_price_breadth_raw=components["gold_etf_demand"]["raw_value"],
                     safe_haven_demand_score=components["real_yield_dollar"]["score"],
                     safe_haven_demand_raw=components["real_yield_dollar"]["raw_value"],
+                    szdt_fear_greed_score=szdt_component.get("score"),
+                    szdt_fear_greed_raw=szdt_component.get("raw_value"),
                     components=components,
                     warnings=[
-                        "GLD专用五因子等权模型，不使用股票ETF七因子。",
+                        "GLD专用模型：5 个 z-score 分量 + 守猪逮兔 GLD 贪恐直接分量等权，不使用股票ETF七因子。",
+                        "守猪逮兔 GLD 贪恐（-100..100 映射为 0-100）为直接分量，缺失时自动从等权平均中剔除。",
                         "COT按周五公布日生效；黄金ETF持仓按来源发布日期向后填充。",
                     ], updated_at=datetime.now(),
                 ))
@@ -150,7 +184,7 @@ class GoldFearGreedCalculator:
         finally:
             db.close()
             Session.remove()
-        return {"symbol": "GLD.US", "saved": saved, "start_date": start_value.isoformat(), "end_date": end_value.isoformat(), "component_count": 5}
+        return {"symbol": "GLD.US", "saved": saved, "start_date": start_value.isoformat(), "end_date": end_value.isoformat(), "component_count": len(GOLD_ALL_COMPONENTS)}
 
     @staticmethod
     def rating(score: float) -> str:
@@ -202,3 +236,38 @@ class GoldFearGreedCalculator:
             db.close(); Session.remove()
         if not data: return pd.DataFrame(columns=columns, index=pd.DatetimeIndex([], name="date"))
         return pd.DataFrame(data).set_index("date")
+
+    @staticmethod
+    def _fetch_szdt_emotion_series(start_date: date, end_date: date) -> pd.Series:
+        """守猪逮兔 US.GLD 贪恐历史（-100..100 线性映射为 0-100）。
+
+        取数失败或没有数据时返回空序列：该直接分量缺失不阻塞主计算。
+        """
+        logger = logging.getLogger(__name__)
+        try:
+            from .szdt import SZDTService
+
+            response = SZDTService().get_etf_emotion_history_sync("US.GLD")
+            data = (response or {}).get("data") or []
+            values: Dict[pd.Timestamp, float] = {}
+            for item in data:
+                try:
+                    day = pd.Timestamp(item.get("date"))
+                    raw_score = float(item.get("score"))
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(raw_score):
+                    continue
+                values[day] = min(max((raw_score + 100.0) / 2.0, 0.0), 100.0)
+            if not values:
+                logger.warning("SZDT returned no GLD emotion history")
+                return pd.Series(dtype=float)
+            series = pd.Series(values).sort_index()
+            series = series[~series.index.duplicated(keep="last")]
+            return series.loc[
+                (series.index >= pd.Timestamp(start_date))
+                & (series.index <= pd.Timestamp(end_date))
+            ]
+        except Exception as exc:
+            logger.warning("Failed to fetch SZDT GLD emotion history: %s", exc)
+            return pd.Series(dtype=float)

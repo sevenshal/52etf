@@ -129,3 +129,89 @@ def test_component_payload_marks_missing_direct_component():
     assert payload["szdt_fear_greed"]["score"] is None
     assert payload["szdt_fear_greed"]["raw_value"] is None
     assert payload["szdt_fear_greed"]["rating"] is None
+
+
+def _realtime_calculator():
+    calc = _calculator()
+    calc.timeout = 30.0
+    calc._cnn_realtime_cache = None
+    calc._szdt_realtime_cache = {}
+    return calc
+
+
+def test_realtime_cnn_snapshot_parsing_and_cache():
+    calc = _realtime_calculator()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"fear_and_greed": {"score": 42.5}}
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            return FakeResponse()
+
+    calc.session = FakeSession()
+    assert calc._fetch_realtime_cnn_fear_greed() == pytest.approx(42.5)
+    # 缓存期内不再发请求
+    assert calc._fetch_realtime_cnn_fear_greed() == pytest.approx(42.5)
+    assert calc.session.calls == 1
+
+
+def test_realtime_cnn_fetch_failure_returns_none():
+    calc = _realtime_calculator()
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            raise RuntimeError("network down")
+
+    calc.session = FakeSession()
+    assert calc._fetch_realtime_cnn_fear_greed() is None
+
+
+def test_realtime_szdt_score_mapping_and_type_fallback(monkeypatch):
+    import src.core.services.szdt as szdt_module
+
+    calls = []
+
+    class FakeSZDTService:
+        def get_etf_emotion_sync(self, etf_type):
+            calls.append(etf_type)
+            if etf_type == 2:
+                return {"status": 1, "data": [{"code": "US.DIA", "emotion": {"score": 20}}]}
+            if etf_type == 1:
+                return {
+                    "status": 1,
+                    "data": [
+                        {"code": "US.SOXL", "emotion": {"score": -100}},
+                        {"code": "US.SPY", "emotion": {"score": 39}},
+                    ],
+                }
+            return {"status": 1, "data": []}
+
+    monkeypatch.setattr(szdt_module, "SZDTService", FakeSZDTService)
+    calc = _realtime_calculator()
+
+    # SPY 不在美股常规(2)，回退到美股杠杆(1)：-100..100 映射 (39+100)/2=69.5
+    assert calc._fetch_realtime_szdt_fear_greed("SPY.US") == pytest.approx(69.5)
+    # 列表结果有实例缓存，后续查找命中缓存不再重复请求
+    assert calc._fetch_realtime_szdt_fear_greed("DIA.US") == pytest.approx(60.0)
+    assert calls == [2, 1]
+
+
+def test_realtime_szdt_not_covered_returns_none(monkeypatch):
+    import src.core.services.szdt as szdt_module
+
+    class FakeSZDTService:
+        def get_etf_emotion_sync(self, etf_type):
+            return {"status": 1, "data": [{"code": "US.TQQQ", "emotion": {"score": 10}}]}
+
+    monkeypatch.setattr(szdt_module, "SZDTService", FakeSZDTService)
+    calc = _realtime_calculator()
+    assert calc._fetch_realtime_szdt_fear_greed("SPY.US") is None

@@ -21,12 +21,14 @@ class ETFRealtimeLightModeTest(TestCase):
         calc = ETFFearGreedCloneCalculator.__new__(ETFFearGreedCloneCalculator)
         return calc
 
-    def _build(self, fetch_holdings_quotes):
+    def _build(self, fetch_holdings_quotes, realtime_cnn=None, realtime_szdt=None):
         calc = self._calculator()
         frame = _price_frame()
         with patch.object(calc, "_fetch_recent_price_history", return_value=frame), \
              patch.object(calc, "_append_realtime_quote", side_effect=lambda f, d, q: f), \
-             patch.object(calc, "_latest_stored_component_raw", return_value={}):
+             patch.object(calc, "_latest_stored_component_raw", return_value={}), \
+             patch.object(calc, "_fetch_realtime_cnn_fear_greed", return_value=realtime_cnn), \
+             patch.object(calc, "_fetch_realtime_szdt_fear_greed", return_value=realtime_szdt):
             return calc._build_realtime_raw_row(
                 etf_symbol="SPY.US",
                 holdings=[],
@@ -45,7 +47,7 @@ class ETFRealtimeLightModeTest(TestCase):
         # put/call 与信用利差是日频分量，实时行留空、由调用方沿用最近日线值
         self.assertTrue(np.isnan(raw_values["put_call_options"]))
         self.assertTrue(np.isnan(raw_values["junk_bond_demand"]))
-        # CNN/守猪逮兔同为日频直接分量，实时行留空沿用最近日线值
+        # CNN/守猪逮兔实时接口不可达时留空，由调用方沿用最近日线值
         self.assertTrue(np.isnan(raw_values["cnn_fear_greed"]))
         self.assertTrue(np.isnan(raw_values["szdt_fear_greed"]))
         # 纯价格分量（动量/波动/避险）有实时值
@@ -56,6 +58,20 @@ class ETFRealtimeLightModeTest(TestCase):
             "latest stored constituent strength component",
             raw_freshness["stock_price_strength"],
         )
+
+    def test_realtime_cnn_and_szdt_snapshots_fill_current_row(self):
+        raw_values, price_payload, raw_freshness = self._build(
+            fetch_holdings_quotes=False,
+            realtime_cnn=42.5,
+            realtime_szdt=69.5,
+        )
+        self.assertEqual(42.5, raw_values["cnn_fear_greed"])
+        self.assertEqual(69.5, raw_values["szdt_fear_greed"])
+        self.assertEqual(
+            "CNN realtime fear & greed snapshot",
+            raw_freshness["cnn_fear_greed"],
+        )
+        self.assertEqual("SZDT realtime emotion", raw_freshness["szdt_fear_greed"])
 
     def test_full_mode_without_holding_history_raises(self):
         with self.assertRaises(Exception):
