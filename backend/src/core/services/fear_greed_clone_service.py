@@ -30,6 +30,9 @@ class ComponentSpec:
     raw_label: str
     source: str
     proxy_note: str
+    # True 表示该分量外部已经是 0-100 分数（如 CNN 官方恐贪、守猪逮兔贪恐），
+    # 打分环节直接截取到 0-100，不再做滚动 z-score/CDF 归一化。
+    direct_score: bool = False
 
 
 COMPONENTS: Dict[str, ComponentSpec] = {

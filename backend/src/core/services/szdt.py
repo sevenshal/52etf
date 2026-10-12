@@ -211,6 +211,44 @@ class SZDTService:
         cache_key = f"etf_emotion_history:{code}"
         return await self._make_request("GET", path, cache_key)
 
+    def get_etf_emotion_history_sync(self, code: str) -> Optional[Dict]:
+        """同步获取ETF历史贪恐指数，供同步计算链路（如自算恐贪回跑）使用。
+
+        不走 diskcache：回跑按日运行，需要当天最新数据；一次调用即返回全量历史，
+        每个标的每天也只调一次，频率天然很低。
+        """
+        path = f"/invest/stock_emotion/history?code={code}"
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": self.user_agent,
+            "X-Auth": self.auth_code,
+            "X-Timestamp": timestamp,
+            "X-Signature": self._generate_signature("GET", path, "", timestamp),
+        }
+        url = f"{self.base_url}{path}"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(url, headers=headers)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError as exc:
+                self._log_request_failure("GET", path, exc, status_code=response.status_code)
+                return None
+        except httpx.TimeoutException as exc:
+            self._log_request_failure("GET", path, exc, timeout_seconds=self.timeout_seconds)
+            return None
+        except httpx.HTTPStatusError as exc:
+            self._log_request_failure("GET", path, exc)
+            return None
+        except httpx.TransportError as exc:
+            self._log_request_failure("GET", path, exc)
+            return None
+        except Exception as exc:
+            self._log_request_failure("GET", path, exc)
+            return None
+
     @staticmethod
     def _normalize_code(code: str) -> str:
         if not code:

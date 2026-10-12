@@ -1,7 +1,7 @@
 """自算 ETF 贪恐 put/call 分量取值口径测试。
 
-put/call 分量必须用 Cboe 全市场总 put/call 比（与 CNN 同源）；只有当 Cboe
-取不到或覆盖过薄时，才回退到标的自身的 Barchart put/call 历史。
+put/call 分量必须用 Cboe 股票口径（全市场个股+ETF 期权，与 CNN 同源）；只有当
+Cboe 取不到或覆盖过薄时，才回退到标的自身的 Barchart put/call 历史。
 """
 
 import datetime as dt
@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from src.core.services.etf_fear_greed_clone_service import (
-    CBOE_TOTAL_PUT_CALL_RATIO,
+    CBOE_EQUITY_PUT_CALL_RATIO,
     ETFFearGreedCloneCalculator,
 )
 
@@ -36,7 +36,7 @@ START = dt.date(2024, 1, 1)
 END = dt.date(2024, 12, 31)
 
 
-def test_prefers_cboe_total_ratio(monkeypatch):
+def test_prefers_cboe_equity_ratio(monkeypatch):
     calc = _calculator()
     calls = {}
 
@@ -52,7 +52,7 @@ def test_prefers_cboe_total_ratio(monkeypatch):
 
     series = calc._fetch_market_put_call_ratio("SPY.US", START, END)
 
-    assert calls["ratio_name"] == CBOE_TOTAL_PUT_CALL_RATIO
+    assert calls["ratio_name"] == CBOE_EQUITY_PUT_CALL_RATIO
     assert len(series) > 200
 
 
@@ -98,7 +98,7 @@ def test_cboe_failure_falls_back_to_symbol_ratio(monkeypatch):
 
 
 def test_component_raw_is_negative_five_day_average_of_cboe_ratio(monkeypatch):
-    """接线验证：put/call 分量原始值 = 新口径（Cboe 全市场）的 -5 日均值。"""
+    """接线验证：put/call 分量原始值 = 新口径（Cboe 股票）的 -5 日均值。"""
     from types import SimpleNamespace
 
     calc = _calculator()
@@ -132,7 +132,18 @@ def test_component_raw_is_negative_five_day_average_of_cboe_ratio(monkeypatch):
     monkeypatch.setattr(
         calc, "_weighted_advancing_volume_ratio", lambda *a, **k: pd.Series(0.5, index=index)
     )
+    # 直接分量打桩，避免访问 DB / 网络
+    monkeypatch.setattr(
+        calc, "_fetch_cnn_fear_greed_series", lambda s, e: pd.Series(dtype=float)
+    )
+    monkeypatch.setattr(
+        calc,
+        "_fetch_szdt_fear_greed_series",
+        lambda symbol, s, e: pd.Series(dtype=float),
+    )
 
     raw = calc._build_raw_signals("SPY.US", {}, index[0].date(), index[-1].date())
 
     assert raw["put_call_options"].iloc[-1] == pytest.approx(-ratios.tail(5).mean())
+    assert raw["cnn_fear_greed"].isna().all()
+    assert raw["szdt_fear_greed"].isna().all()

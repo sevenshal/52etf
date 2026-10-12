@@ -31,6 +31,7 @@ from .a_stock_fear_greed_clone_service import A_STOCK_FEAR_GREED_TARGET_BY_SYMBO
 from ..analytics_database import AnalyticsSession
 from ..database import ETFHolding as DBETFHolding
 from ..database import (
+    CNNFearGreedIndex,
     ETFFearGreedCloneHistory,
     ETFFearGreedCloneHolding,
     ETFFearGreedSignalNotification,
@@ -46,9 +47,10 @@ from ...robot.etf.spdr import SPDRDataFetcher
 
 NASDAQ_OPTION_CHAIN_URL = "https://api.nasdaq.com/api/quote/{symbol}/option-chain"
 DEFAULT_ETF_FEAR_GREED_SYMBOLS = ["SOXX.US", "SPY.US", "QQQ.US", "DIA.US"]
-# put/call 分量用 Cboe 全市场口径（与 CNN 同源），不用标的自身期权：
-# 标的自身 put/call 受做市/对冲行为主导，暴跌时方向常与全市场相反。
-CBOE_TOTAL_PUT_CALL_RATIO = "TOTAL PUT/CALL RATIO"
+# put/call 分量用 Cboe 股票口径（全市场个股+ETF 期权，与 CNN 同源），不用标的自身期权：
+# 标的自身 put/call 受做市/对冲行为主导，暴跌时方向常与全市场相反；
+# 指数口径又被 SPX 机构套保盘主导，情绪信号最纯的是股票口径。
+CBOE_EQUITY_PUT_CALL_RATIO = "EQUITY PUT/CALL RATIO"
 
 
 def _a_stock_proxy_etf_map() -> Dict[str, str]:
@@ -543,14 +545,15 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
     "put_call_options": ComponentSpec(
         key="put_call_options",
         name="Market Put/Call Options",
-        raw_label="-5-day average Cboe total put/call ratio",
+        raw_label="-5-day average Cboe equity put/call ratio",
         source="Cboe daily options market statistics",
         proxy_note=(
-            "Same source and definition as CNN's put/call component: Cboe's "
-            "market-wide total put/call ratio, 5-day average. The symbol-specific "
-            "Barchart history in etf_put_call_ratios is kept only as an outage "
-            "fallback, because a single ETF's own option flow is dominated by "
-            "dealer hedging and can move opposite to market-wide sentiment."
+            "Cboe's market-wide equity put/call ratio (all single-stock and ETF "
+            "options), 5-day average — the same family of series CNN uses. The "
+            "symbol-specific Barchart history in etf_put_call_ratios is kept only "
+            "as an outage fallback, because a single ETF's own option flow is "
+            "dominated by dealer hedging and can move opposite to market-wide "
+            "sentiment."
         ),
     ),
     "market_volatility": ComponentSpec(
@@ -577,7 +580,39 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
         source="FRED BAMLH0A0HYM2 and BAMLC0A0CM",
         proxy_note="Credit-risk appetite is kept as a broad market component.",
     ),
+    "cnn_fear_greed": ComponentSpec(
+        key="cnn_fear_greed",
+        name="CNN Fear & Greed",
+        raw_label="CNN official Fear & Greed index value",
+        source="CNN Fear & Greed Index (cnn_fear_greed_index table)",
+        proxy_note=(
+            "CNN's official market-wide Fear & Greed index, used directly as a "
+            "0-100 component without re-normalization."
+        ),
+        direct_score=True,
+    ),
+    "szdt_fear_greed": ComponentSpec(
+        key="szdt_fear_greed",
+        name="SZDT Emotion (守猪逮兔贪恐)",
+        raw_label="(守猪逮兔 emotion score + 100) / 2",
+        source="szdt.tech /invest/stock_emotion/history",
+        proxy_note=(
+            "守猪逮兔's per-ETF emotion score is published on a -100..100 scale; "
+            "it is linearly mapped to 0-100 and used directly without "
+            "re-normalization."
+        ),
+        direct_score=True,
+    ),
 }
+
+# 需要滚动 z-score/CDF 归一化的分量（历史有效性的必要条件）
+Z_SCORED_ETF_COMPONENT_KEYS: List[str] = [
+    key for key, spec in ETF_COMPONENTS.items() if not spec.direct_score
+]
+# 外部已是 0-100 分数、直接参与等权平均的分量（缺失时自动剔除，不阻塞历史）
+DIRECT_ETF_COMPONENT_KEYS: List[str] = [
+    key for key, spec in ETF_COMPONENTS.items() if spec.direct_score
+]
 
 
 class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
@@ -606,6 +641,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         self.holdings_fetchers = self._build_holdings_fetchers()
         self.quote_service = QuoteService(LongPortService.get_instance())
         self.price_cache: Dict[Tuple[str, date, date], pd.DataFrame] = {}
+        self._szdt_history_cache: Dict[str, pd.Series] = {}
 
     def _build_holdings_fetchers(self) -> Dict[str, Any]:
         fetchers: Dict[str, Any] = {}
@@ -656,7 +692,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             columns={f"{key}_score": key for key in ETF_COMPONENTS}
         )
         score_df["fear_greed_clone"] = component_scores.mean(axis=1)
-        valid = score_df.dropna(subset=score_columns + ["fear_greed_clone"])
+        # 历史有效性只要求 z-score 分量齐全；CNN/守猪逮兔等直接分量覆盖较新的
+        # 区间，缺失时自动从等权平均中剔除，不因此截断历史。
+        required_columns = [f"{key}_score" for key in Z_SCORED_ETF_COMPONENT_KEYS]
+        valid = score_df.dropna(subset=required_columns + ["fear_greed_clone"])
         if valid.empty:
             raise FearGreedCloneError("not enough data to calculate the ETF clone index")
 
@@ -669,9 +708,16 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "Scores use rolling z-score/CDF and equal-weighted components.",
             "Holdings-based components read the latest etf_holdings snapshot on or before each trading day; missing prior snapshots will raise an error.",
             (
-                "The option component uses Cboe's market-wide total put/call ratio "
-                "(same source as CNN); the symbol-specific Barchart put/call "
-                "history in etf_put_call_ratios is only an outage fallback."
+                "The option component uses Cboe's market-wide equity put/call ratio "
+                "(all single-stock and ETF options, same source family as CNN); "
+                "the symbol-specific Barchart put/call history in "
+                "etf_put_call_ratios is only an outage fallback."
+            ),
+            (
+                "CNN's official Fear & Greed index and 守猪逮兔's emotion score "
+                "(rescaled to 0-100) enter as direct equal-weighted components; "
+                "on days without data they are dropped from the average instead "
+                "of blocking history."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
@@ -750,7 +796,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             columns={f"{key}_score": key for key in ETF_COMPONENTS}
         )
         score_df["fear_greed_clone"] = component_scores.mean(axis=1)
-        valid = score_df.dropna(subset=score_columns + ["fear_greed_clone"])
+        # 历史有效性只要求 z-score 分量齐全；CNN/守猪逮兔等直接分量覆盖较新的
+        # 区间，缺失时自动从等权平均中剔除，不因此截断历史。
+        required_columns = [f"{key}_score" for key in Z_SCORED_ETF_COMPONENT_KEYS]
+        valid = score_df.dropna(subset=required_columns + ["fear_greed_clone"])
 
         warnings = self._warnings(etf_symbol, use_historical_holdings)
         records: List[Dict[str, Any]] = []
@@ -916,8 +965,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
 
         latest_daily = raw_history.iloc[-1]
         stale_components = {
-            "put_call_options": "latest stored Cboe total put/call component",
+            "put_call_options": "latest stored Cboe equity put/call component",
             "junk_bond_demand": "latest stored FRED credit-spread component",
+            "cnn_fear_greed": "latest stored CNN Fear & Greed component",
+            "szdt_fear_greed": "latest stored SZDT emotion component",
         }
         if not fetch_holdings_quotes:
             stale_components["stock_price_strength"] = "latest stored constituent strength component"
@@ -969,9 +1020,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 + "."
             ),
             (
-                "Put/call and junk-bond-demand are daily data: Cboe publishes the "
-                "total put/call ratio after the close, so both are carried forward "
-                "from the latest SQLite backfill row in realtime mode."
+                "Put/call, junk-bond-demand, CNN and SZDT components are daily "
+                "data: Cboe publishes the equity put/call ratio after the close, "
+                "so all of them are carried forward from the latest SQLite "
+                "backfill row in realtime mode."
             ),
             (
                 "Current-row holdings use the latest DB holdings snapshot on or before "
@@ -1111,6 +1163,10 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                         safe_haven_demand_raw=components["safe_haven_demand"]["raw_value"],
                         junk_bond_demand_score=components["junk_bond_demand"]["score"],
                         junk_bond_demand_raw=components["junk_bond_demand"]["raw_value"],
+                        cnn_fear_greed_score=components["cnn_fear_greed"]["score"],
+                        cnn_fear_greed_raw=components["cnn_fear_greed"]["raw_value"],
+                        szdt_fear_greed_score=components["szdt_fear_greed"]["score"],
+                        szdt_fear_greed_raw=components["szdt_fear_greed"]["raw_value"],
                         components=components,
                         warnings=record["warnings"],
                         updated_at=datetime.now(),
@@ -1415,6 +1471,15 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         put_call = self._fetch_market_put_call_ratio(
             etf_symbol, start_date, end_date
         ).reindex(index).ffill(limit=3)
+        # 直接分量：外部已是分数，缺失时记 NaN，聚合阶段自动剔除
+        cnn_fear_greed = self._safe_direct_component_series(
+            "CNN fear_greed",
+            lambda: self._fetch_cnn_fear_greed_series(start_date, end_date),
+        ).reindex(index).ffill(limit=3)
+        szdt_fear_greed = self._safe_direct_component_series(
+            "SZDT emotion",
+            lambda: self._fetch_szdt_fear_greed_series(etf_symbol, start_date, end_date),
+        ).reindex(index).ffill(limit=3)
 
         unique_holdings = self._unique_holdings(holdings_by_date)
         holding_frames: Dict[str, pd.DataFrame] = {}
@@ -1447,6 +1512,8 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
         df["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
         df["junk_bond_demand"] = -(fred["BAMLH0A0HYM2"] - fred["BAMLC0A0CM"])
+        df["cnn_fear_greed"] = cnn_fear_greed
+        df["szdt_fear_greed"] = szdt_fear_greed
         for column in ("open", "high", "low", "close", "volume", "turnover"):
             df[f"etf_{column}"] = etf_prices[column]
 
@@ -1740,8 +1807,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         min_periods: int,
     ) -> pd.DataFrame:
         result = raw.copy()
-        for key in ETF_COMPONENTS:
+        for key, spec in ETF_COMPONENTS.items():
             series = raw[key]
+            if spec.direct_score:
+                # 外部已是 0-100 分数（CNN 官方恐贪、守猪逮兔贪恐），直接截取
+                result[f"{key}_score"] = series.clip(0.0, 100.0)
+                continue
             mean = series.rolling(score_window, min_periods=min_periods).mean()
             std = series.rolling(score_window, min_periods=min_periods).std(ddof=0)
             z_score = (series - mean) / std.replace(0, np.nan)
@@ -1942,6 +2013,8 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                     "market_volatility": row.market_volatility_raw,
                     "safe_haven_demand": row.safe_haven_demand_raw,
                     "junk_bond_demand": row.junk_bond_demand_raw,
+                    "cnn_fear_greed": row.cnn_fear_greed_raw,
+                    "szdt_fear_greed": row.szdt_fear_greed_raw,
                 }
                 for row in rows
             ]
@@ -2035,10 +2108,12 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         raw["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
 
         latest_daily = self._latest_stored_component_raw(etf_symbol)
-        # put/call 用 Cboe 全市场口径、日频收盘后发布，实时行没有当日值，
-        # 由 calculate_realtime 的 stale 逻辑沿用最近入库日值。
+        # put/call 用 Cboe 股票口径、日频收盘后发布；CNN 与守猪逮兔贪恐同为日频，
+        # 实时行没有当日值，由 calculate_realtime 的 stale 逻辑沿用最近入库日值。
         raw["put_call_options"] = np.nan
         raw["junk_bond_demand"] = np.nan
+        raw["cnn_fear_greed"] = np.nan
+        raw["szdt_fear_greed"] = np.nan
         raw_freshness = {
             "market_momentum": "LongPort realtime quote",
             "stock_price_strength": (
@@ -2130,7 +2205,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         start_date: date,
         end_date: date,
     ) -> pd.Series:
-        """put/call 分量取 Cboe 全市场总 put/call 比（与 CNN 同源）。
+        """put/call 分量取 Cboe 股票口径（全市场个股+ETF 期权，与 CNN 同源）。
 
         标的自身期权 put/call（etf_put_call_ratios 里的 Barchart 数据）受做市与
         对冲行为主导，暴跌时常与全市场情绪反向，只在 Cboe 取不到/覆盖过薄时兜底。
@@ -2140,13 +2215,13 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             cboe_ratio = self._fetch_cboe_ratio(
                 start_date,
                 end_date,
-                ratio_name=CBOE_TOTAL_PUT_CALL_RATIO,
+                ratio_name=CBOE_EQUITY_PUT_CALL_RATIO,
             )
             expected_days = len(pd.bdate_range(start_date, end_date))
             if len(cboe_ratio) >= max(60, int(expected_days * 0.6)):
                 return cboe_ratio
             logger.warning(
-                "Cboe total put/call coverage too thin for %s (%s of %s business days), "
+                "Cboe equity put/call coverage too thin for %s (%s of %s business days), "
                 "falling back to symbol put/call",
                 etf_symbol,
                 len(cboe_ratio),
@@ -2154,12 +2229,108 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             )
         except Exception as exc:
             logger.warning(
-                "Failed to fetch Cboe total put/call for %s, falling back to symbol "
+                "Failed to fetch Cboe equity put/call for %s, falling back to symbol "
                 "put/call: %s",
                 etf_symbol,
                 exc,
             )
         return self._fetch_db_put_call_ratio(etf_symbol, start_date, end_date)
+
+    def _fetch_cnn_fear_greed_series(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        """CNN 官方恐贪指数（0-100），作为直接分量，不再做归一化。"""
+        db = Session()
+        try:
+            rows = (
+                db.query(CNNFearGreedIndex.date, CNNFearGreedIndex.index_value)
+                .filter(
+                    CNNFearGreedIndex.date >= start_date,
+                    CNNFearGreedIndex.date <= end_date,
+                    CNNFearGreedIndex.index_value.isnot(None),
+                )
+                .order_by(CNNFearGreedIndex.date.asc())
+                .all()
+            )
+        finally:
+            Session.remove()
+
+        values: List[Dict[str, Any]] = []
+        for row_date, index_value in rows:
+            value = float(index_value)
+            if not np.isfinite(value):
+                continue
+            values.append({"date": pd.Timestamp(row_date), "score": value})
+        if not values:
+            raise FearGreedCloneError("DB returned no CNN fear & greed data")
+        frame = (
+            pd.DataFrame(values)
+            .drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+            .sort_index()
+        )
+        return frame["score"].clip(0.0, 100.0)
+
+    def _fetch_szdt_fear_greed_series(
+        self,
+        etf_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        """守猪逮兔标的贪恐（-100..100 线性映射为 0-100），作为直接分量。"""
+        from .szdt import SZDTService
+
+        ticker = self._nasdaq_symbol(etf_symbol)
+        szdt_code = f"US.{ticker}"
+        if szdt_code not in self._szdt_history_cache:
+            response = SZDTService().get_etf_emotion_history_sync(szdt_code)
+            data = (response or {}).get("data") or []
+            values: List[Dict[str, Any]] = []
+            for item in data:
+                try:
+                    day = pd.Timestamp(item.get("date"))
+                    raw_score = float(item.get("score"))
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(raw_score):
+                    continue
+                values.append({"date": day, "score": (raw_score + 100.0) / 2.0})
+            if not values:
+                raise FearGreedCloneError(
+                    f"SZDT returned no emotion history for {szdt_code}"
+                )
+            frame = (
+                pd.DataFrame(values)
+                .drop_duplicates(subset=["date"], keep="last")
+                .set_index("date")
+                .sort_index()
+            )
+            self._szdt_history_cache[szdt_code] = frame["score"].clip(0.0, 100.0)
+
+        series = self._szdt_history_cache[szdt_code]
+        return series.loc[
+            (series.index >= pd.Timestamp(start_date))
+            & (series.index <= pd.Timestamp(end_date))
+        ]
+
+    def _safe_direct_component_series(
+        self,
+        label: str,
+        fetcher,
+    ) -> pd.Series:
+        """直接分量取数失败时降级为全空序列（聚合阶段自动剔除该分量）。"""
+        logger = logging.getLogger(__name__)
+        try:
+            series = fetcher()
+        except Exception as exc:
+            logger.warning("direct component %s unavailable: %s", label, exc)
+            return pd.Series(dtype=float)
+        if series is None or series.empty:
+            logger.warning("direct component %s returned no data", label)
+            return pd.Series(dtype=float)
+        return series
 
     def _fetch_db_put_call_ratio(
         self,
@@ -2355,13 +2526,14 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         for key, spec in ETF_COMPONENTS.items():
-            component_score = float(scores.loc[latest_date, f"{key}_score"])
-            raw_value = float(raw.loc[latest_date, key])
+            component_score = scores.loc[latest_date, f"{key}_score"]
+            raw_value = raw.loc[latest_date, key]
+            score_value = None if pd.isna(component_score) else round(float(component_score), 2)
             payload[key] = {
                 "name": spec.name,
-                "score": round(component_score, 2),
-                "rating": self.rating(component_score),
-                "raw_value": round(raw_value, 6),
+                "score": score_value,
+                "rating": self.rating(float(component_score)) if score_value is not None else None,
+                "raw_value": None if pd.isna(raw_value) else round(float(raw_value), 6),
                 "raw_label": spec.raw_label,
                 "source": spec.source,
                 "proxy_note": spec.proxy_note,
@@ -2377,9 +2549,16 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "on or before each trading day; missing prior snapshots will raise an error."
             ),
             (
-                "The option component uses Cboe's market-wide total put/call ratio "
-                "(same source as CNN); the symbol-specific Barchart put/call "
-                "history in etf_put_call_ratios is only an outage fallback."
+                "The option component uses Cboe's market-wide equity put/call ratio "
+                "(all single-stock and ETF options, same source family as CNN); "
+                "the symbol-specific Barchart put/call history in "
+                "etf_put_call_ratios is only an outage fallback."
+            ),
+            (
+                "CNN's official Fear & Greed index and 守猪逮兔's emotion score "
+                "(rescaled to 0-100) enter as direct equal-weighted components; "
+                "on days without data they are dropped from the average instead "
+                "of blocking history."
             ),
             (
                 "FRED ICE BofA credit-spread series currently provides only the "
@@ -2454,6 +2633,8 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "market_volatility": row.market_volatility_score,
                 "safe_haven_demand": row.safe_haven_demand_score,
                 "junk_bond_demand": row.junk_bond_demand_score,
+                "cnn_fear_greed": row.cnn_fear_greed_score,
+                "szdt_fear_greed": row.szdt_fear_greed_score,
             }
         return payload
 

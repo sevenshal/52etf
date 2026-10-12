@@ -393,6 +393,11 @@ class ETFFearGreedCloneHistory(Base):
     safe_haven_demand_raw = Column(Float)
     junk_bond_demand_score = Column(Float)
     junk_bond_demand_raw = Column(Float)
+    # 直接分量：外部已是 0-100 分数（CNN 官方恐贪、守猪逮兔贪恐映射值），不归一化
+    cnn_fear_greed_score = Column(Float)
+    cnn_fear_greed_raw = Column(Float)
+    szdt_fear_greed_score = Column(Float)
+    szdt_fear_greed_raw = Column(Float)
 
     components = Column(JSON)
     warnings = Column(JSON)
@@ -2242,6 +2247,13 @@ def ensure_table_columns():
     if skip_init_writes("主库补列 ensure_table_columns"):
         return
     table_columns = {
+        "etf_fear_greed_clone_history": {
+            # 自算恐贪新增两个直接分量：CNN 官方恐贪 + 守猪逮兔贪恐
+            "cnn_fear_greed_score": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN cnn_fear_greed_score FLOAT",
+            "cnn_fear_greed_raw": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN cnn_fear_greed_raw FLOAT",
+            "szdt_fear_greed_score": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN szdt_fear_greed_score FLOAT",
+            "szdt_fear_greed_raw": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN szdt_fear_greed_raw FLOAT",
+        },
         "szdt_trade_stocks": {
             # 存量已配置标的保持原有自动交易行为。
             "enabled": "ALTER TABLE szdt_trade_stocks ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1",
