@@ -20,6 +20,13 @@ const formatVolume = (value) => {
   return numeric.toFixed(0);
 };
 
+// 回测同时展示正向的仓位和负向的回撤。按实际极值留出 10%（至少 5 个百分点）
+// 的空间，再向上取整到十，避免小回撤被固定的 -100% 纵轴压扁。
+const backtestPercentAxisLimit = (value) => {
+  const magnitude = Math.max(0, Number(value) || 0);
+  return Math.ceil((magnitude + Math.max(5, magnitude * 0.1)) / 10) * 10;
+};
+
 const ScaleRangeFilter = ({ selectedKeys, setSelectedKeys, confirm, clearFilters }) => {
   const [min = '', max = ''] = String(selectedKeys[0] || '').split('|');
   const update = (nextMin, nextMax) => setSelectedKeys((nextMin !== '' || nextMax !== '') ? [`${nextMin}|${nextMax}`] : []);
@@ -402,24 +409,28 @@ const FearStockList = () => {
     }
   };
 
+  const backtestCurve = backtestResult?.curve || [];
+  const backtestExposureMax = backtestPercentAxisLimit(Math.max(0, ...backtestCurve.map(item => Number(item.gross_exposure) || 0)));
+  const backtestDrawdownMin = -backtestPercentAxisLimit(Math.max(0, ...backtestCurve.map(item => -(Number(item.drawdown_pct) || 0))));
+
   const backtestChartOption = {
     tooltip: { trigger: 'axis' },
     legend: { data: ['组合净值', '整体仓位', '回撤'], top: 2 },
     grid: { left: 58, right: 58, top: 34, bottom: 58 },
     xAxis: {
       type: 'category',
-      data: (backtestResult?.curve || []).map(item => item.date),
+      data: backtestCurve.map(item => item.date),
       axisLabel: { hideOverlap: true },
     },
     yAxis: [
       { type: 'value', name: '净值', scale: true },
-      { type: 'value', name: '仓位 / 回撤%', min: -100, max: 100, axisLabel: { formatter: '{value}%' } },
+      { type: 'value', name: '仓位 / 回撤%', min: backtestDrawdownMin, max: backtestExposureMax, axisLabel: { formatter: '{value}%' } },
     ],
     dataZoom: [{ type: 'inside' }, { type: 'slider' }],
     series: [
-      { type: 'line', name: '组合净值', showSymbol: false, smooth: true, data: (backtestResult?.curve || []).map(item => item.nav), lineStyle: { color: '#1677ff', width: 2 } },
-      { type: 'line', name: '整体仓位', yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.gross_exposure), lineStyle: { color: '#52c41a', width: 1.5 } },
-      { type: 'line', name: '回撤', yAxisIndex: 1, showSymbol: false, data: (backtestResult?.curve || []).map(item => item.drawdown_pct), lineStyle: { color: '#bfbfbf', width: 1 }, areaStyle: { color: 'rgba(191,191,191,0.35)' } },
+      { type: 'line', name: '组合净值', showSymbol: false, smooth: true, data: backtestCurve.map(item => item.nav), lineStyle: { color: '#1677ff', width: 2 } },
+      { type: 'line', name: '整体仓位', yAxisIndex: 1, showSymbol: false, data: backtestCurve.map(item => item.gross_exposure), lineStyle: { color: '#52c41a', width: 1.5 } },
+      { type: 'line', name: '回撤', yAxisIndex: 1, showSymbol: false, data: backtestCurve.map(item => item.drawdown_pct), lineStyle: { color: '#bfbfbf', width: 1 }, areaStyle: { color: 'rgba(191,191,191,0.35)' } },
     ],
   };
 
