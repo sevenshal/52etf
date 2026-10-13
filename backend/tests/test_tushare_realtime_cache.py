@@ -12,12 +12,15 @@ def _service_with_pro(pro):
     service.logger = logging.getLogger("test-tushare-realtime-cache")
     service.pro = pro
     service._realtime_cache_lock = threading.RLock()
-    service._realtime_fetch_lock = threading.Lock()
+    service._rt_k_fetch_lock = threading.Lock()
+    service._rt_etf_k_fetch_lock = threading.Lock()
     service._rt_k_market_cache = (0.0, None)
     service._rt_k_symbol_cache = {}
     service._rt_etf_symbol_cache = {}
     service._rt_k_backoff_until = 0.0
+    service._rt_etf_k_backoff_until = 0.0
     service._rt_k_rate_limiter = MagicMock()
+    service._rt_etf_k_rate_limiter = MagicMock()
     return service
 
 
@@ -88,4 +91,19 @@ def test_repeated_etf_query_uses_shared_symbol_cache():
     second = service.get_a_stock_realtime_etf_rt_k_frame(["510300.SH"])
 
     assert not first.empty and not second.empty
+    pro.rt_etf_k.assert_called_once()
+
+
+def test_rt_k_backoff_does_not_block_etf_realtime_channel():
+    pro = MagicMock()
+    pro.rt_k.side_effect = Exception("抱歉，您访问接口(rt_k)频率超限(50次/分钟)")
+    pro.rt_etf_k.return_value = _frame("510300.SH")
+    service = _service_with_pro(pro)
+
+    assert service.get_a_stock_realtime_market_frame().empty
+    etf = service.get_a_stock_realtime_etf_rt_k_frame(["510300.SH"])
+
+    assert service._rt_k_backoff_until > 0
+    assert service._rt_etf_k_backoff_until == 0
+    assert list(etf["ts_code"]) == ["510300.SH"]
     pro.rt_etf_k.assert_called_once()

@@ -87,9 +87,13 @@ TUSHARE_MAJOR_NEWS_MAX_REQUESTS_PER_HOUR = max(
 )
 TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE = max(
     0,
-    # 当前 token 的 rt_k 服务端额度是 50 次/分钟，且生产 token 与外部程序共用。
-    # 本进程默认最多使用 20 个名额；统一缓存后正常负载远低于此值。
-    int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "20")),
+    # Tushare token 的实时行情额度与外部程序共用。本进程为个股/全市场 rt_k
+    # 留出 15 次，ETF 有独立的 5 次预算，避免任一通道挤占另一通道。
+    int(os.getenv("TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE", "15")),
+)
+TUSHARE_RT_ETF_K_MAX_REQUESTS_PER_MINUTE = max(
+    0,
+    int(os.getenv("TUSHARE_RT_ETF_K_MAX_REQUESTS_PER_MINUTE", "5")),
 )
 TUSHARE_RT_K_CACHE_TTL_SECONDS = max(
     1.0,
@@ -213,6 +217,10 @@ class TushareService(QuoteProvider):
         TUSHARE_RT_K_MAX_REQUESTS_PER_MINUTE,
         60.0,
     )
+    _rt_etf_k_rate_limiter = _SlidingWindowRateLimiter(
+        TUSHARE_RT_ETF_K_MAX_REQUESTS_PER_MINUTE,
+        60.0,
+    )
     _ths_member_rate_limiter = _SlidingWindowRateLimiter(
         TUSHARE_THS_MEMBER_MAX_REQUESTS_PER_MINUTE,
         60.0,
@@ -246,11 +254,13 @@ class TushareService(QuoteProvider):
         # rt_k/rt_etf_k 是全站共享的实时行情源。缓存必须放在 service 层，
         # 才能被扫描、看板、WebSocket、估值和执行器共同命中。
         self._realtime_cache_lock = threading.RLock()
-        self._realtime_fetch_lock = threading.Lock()
+        self._rt_k_fetch_lock = threading.Lock()
+        self._rt_etf_k_fetch_lock = threading.Lock()
         self._rt_k_market_cache = (0.0, None)
         self._rt_k_symbol_cache: Dict[str, tuple[float, Dict]] = {}
         self._rt_etf_symbol_cache: Dict[str, tuple[float, Optional[Dict]]] = {}
         self._rt_k_backoff_until = 0.0
+        self._rt_etf_k_backoff_until = 0.0
 
     @classmethod
     def get_instance(cls, token: Optional[str] = None):
@@ -1040,21 +1050,25 @@ class TushareService(QuoteProvider):
         message = str(exc).lower()
         return "频率超限" in message or ("rate" in message and "limit" in message)
 
-    def _mark_realtime_rate_limited(self, exc: Exception) -> None:
+    def _mark_realtime_rate_limited(self, exc: Exception, *, etf: bool = False) -> None:
         with self._realtime_cache_lock:
-            self._rt_k_backoff_until = max(
-                self._rt_k_backoff_until,
+            attribute = "_rt_etf_k_backoff_until" if etf else "_rt_k_backoff_until"
+            setattr(self, attribute, max(
+                getattr(self, attribute),
                 time.monotonic() + TUSHARE_RT_K_BACKOFF_SECONDS,
-            )
+            ))
         self.logger.warning(
-            "Tushare realtime quota exhausted; backing off for %.0fs: %s",
+            "Tushare %s quota exhausted; backing off for %.0fs: %s",
+            "rt_etf_k" if etf else "rt_k",
             TUSHARE_RT_K_BACKOFF_SECONDS,
             exc,
         )
 
-    def _realtime_backoff_active(self) -> bool:
+    def _realtime_backoff_active(self, *, etf: bool = False) -> bool:
         with self._realtime_cache_lock:
-            return time.monotonic() < self._rt_k_backoff_until
+            return time.monotonic() < (
+                self._rt_etf_k_backoff_until if etf else self._rt_k_backoff_until
+            )
 
     def _cached_market_frame(self) -> Optional[pd.DataFrame]:
         with self._realtime_cache_lock:
@@ -1129,7 +1143,7 @@ class TushareService(QuoteProvider):
         cached, missing = self._cached_realtime_symbols(normalized)
         if not missing:
             return cached.sort_values("ts_code") if not cached.empty else cached
-        with self._realtime_fetch_lock:
+        with self._rt_k_fetch_lock:
             cached, missing = self._cached_realtime_symbols(normalized)
             if not missing or self._realtime_backoff_active():
                 return cached.sort_values("ts_code") if not cached.empty else cached
@@ -1161,7 +1175,7 @@ class TushareService(QuoteProvider):
             cached = self._cached_market_frame()
             if cached is not None:
                 return cached
-        with self._realtime_fetch_lock:
+        with self._rt_k_fetch_lock:
             if not force:
                 cached = self._cached_market_frame()
                 if cached is not None:
@@ -1215,29 +1229,29 @@ class TushareService(QuoteProvider):
             "ts_code,close,pre_close,open,high,low,vol,amount,num,trade_time,"
             "ask_price1,ask_volume1,bid_price1,bid_volume1"
         )
-        with self._realtime_fetch_lock:
+        with self._rt_etf_k_fetch_lock:
             cached, missing = self._cached_realtime_symbols(normalized, etf=True)
-            if not missing or self._realtime_backoff_active():
+            if not missing or self._realtime_backoff_active(etf=True):
                 return cached.sort_values("ts_code") if not cached.empty else cached
             sh_codes = [code for code in missing if code.endswith(".SH")]
             sz_codes = [code for code in missing if code.endswith(".SZ")]
             frames = []
             try:
                 if sh_codes:
-                    self._rt_k_rate_limiter.wait()
+                    self._rt_etf_k_rate_limiter.wait()
                     frame = self.pro.rt_etf_k(
                         ts_code=",".join(sh_codes), topic="HQ_FND_TICK", fields=fields,
                     )
                     if isinstance(frame, pd.DataFrame) and not frame.empty:
                         frames.append(frame)
                 if sz_codes:
-                    self._rt_k_rate_limiter.wait()
+                    self._rt_etf_k_rate_limiter.wait()
                     frame = self.pro.rt_etf_k(ts_code=",".join(sz_codes), fields=fields)
                     if isinstance(frame, pd.DataFrame) and not frame.empty:
                         frames.append(frame)
             except Exception as exc:
                 if self._is_realtime_rate_limit_error(exc):
-                    self._mark_realtime_rate_limited(exc)
+                    self._mark_realtime_rate_limited(exc, etf=True)
                 else:
                     self.logger.warning("Tushare rt_etf_k failed for %s: %s", missing, exc)
                 return cached.sort_values("ts_code") if not cached.empty else cached
