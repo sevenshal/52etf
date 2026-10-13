@@ -500,14 +500,37 @@ async def run_us_backtest(
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     rotation_enabled = bool(config and config.us_rotation_enabled)
     rotation_threshold = int(config.us_rotation_threshold) if config else -30
+    ib_config = db.query(IBKRAccountConfig).filter(
+        IBKRAccountConfig.id == config.ib_account_id,
+    ).first() if config and config.ib_account_id else None
+    live_config = {
+        "id": config.id if config else None,
+        "ib_port": ib_config.ib_port if ib_config else None,
+    }
     db.close()
     try:
-        return await run_szdt_us_backtest(
+        result = await run_szdt_us_backtest(
             stocks, account_id=account_id, initial_capital=payload.initial_capital,
             start_date=payload.start_date, end_date=payload.end_date,
             rotation_enabled=rotation_enabled, rotation_threshold=rotation_threshold,
             slippage_bps=payload.slippage_bps,
         )
+        # 美股没有本地持仓账本，使用独立 IB client ID 只读查询，避免占用自动交易连接。
+        if live_config["id"] and live_config["ib_port"]:
+            try:
+                from ...robot.szdt_us_trader import SZDTUSTrader
+
+                ib_service = await SZDTUSTrader()._ensure_ib_connected(
+                    live_config["ib_port"], 3_000 + live_config["id"],
+                )
+                for position in result.get("latest_positions", []):
+                    live_quantity = int(ib_service.get_position(position["code"]).get("qty") or 0)
+                    position["live_quantity"] = live_quantity
+                    position["live_quantity_diff"] = int(position["quantity"]) - live_quantity
+            except Exception:  # noqa: BLE001
+                # IB 临时不可用时仍返回回测结果，由前端显示“-”。
+                pass
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
