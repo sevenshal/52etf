@@ -1112,7 +1112,17 @@ const FearStockList = () => {
             columns={[
               { title: '标的', dataIndex: 'name' }, { title: '代码', dataIndex: 'code' },
               { title: '仓位', dataIndex: 'position_pct', render: value => `${Number(value).toFixed(2)}%` },
-              { title: '股数', dataIndex: 'quantity' }, { title: '价格', dataIndex: 'price' }, { title: '贪恐', dataIndex: 'score' },
+              { title: '回测股数', dataIndex: 'quantity' },
+              { title: '实盘股数', dataIndex: 'live_quantity', render: value => value == null ? '-' : Number(value).toLocaleString('zh-CN') },
+              {
+                title: '差额（回测-实盘）', dataIndex: 'live_quantity_diff',
+                render: value => value == null ? '-' : (
+                  <span style={{ color: Number(value) > 0 ? '#cf1322' : Number(value) < 0 ? '#389e0d' : undefined }}>
+                    {Number(value) > 0 ? '+' : ''}{Number(value).toLocaleString('zh-CN')}
+                  </span>
+                ),
+              },
+              { title: '价格', dataIndex: 'price' }, { title: '贪恐', dataIndex: 'score' },
               { title: '市值', dataIndex: 'market_value', render: value => Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) },
             ]}
             dataSource={backtestResult.latest_positions || []}

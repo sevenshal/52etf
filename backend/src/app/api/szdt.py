@@ -435,12 +435,18 @@ async def run_a_stock_backtest(
     sell_on_ema5_breakdown = bool(config and config.a_sell_on_ema5_breakdown)
     rotation_enabled = bool(config and config.a_rotation_enabled)
     rotation_threshold = int(config.a_rotation_threshold) if config else -30
+    live_config = {
+        "id": config.id if config else None,
+        "account_id": account_id,
+        "external_trading_account_id": config.external_trading_account_id if config else None,
+        "live_sub_account_id": config.live_sub_account_id if config else None,
+    }
     max_leverage_ratio = payload.max_leverage_ratio
     if payload.allow_leverage and max_leverage_ratio == 1.0:
         max_leverage_ratio = 1.5
     db.close()
     try:
-        return await run_szdt_a_stock_backtest(
+        result = await run_szdt_a_stock_backtest(
             stocks,
             sell_on_ema5_breakdown=sell_on_ema5_breakdown,
             rotation_enabled=rotation_enabled,
@@ -451,6 +457,21 @@ async def run_a_stock_backtest(
             max_leverage_ratio=max_leverage_ratio,
             slippage_bps=payload.slippage_bps,
         )
+        # 回测末日仓位与当前实盘实际持仓并列展示；读取失败不影响回测本身。
+        if live_config["id"] and live_config["external_trading_account_id"] and live_config["live_sub_account_id"]:
+            try:
+                from ...robot.szdt_a_stock_external_trader import SZDTAStockExternalTrader, _external_symbol
+
+                snapshot = await SZDTAStockExternalTrader()._load_external_snapshot(live_config)
+                live_positions = snapshot["positions"]
+                for position in result.get("latest_positions", []):
+                    live_quantity = int(live_positions.get(_external_symbol(position["code"]), 0) or 0)
+                    position["live_quantity"] = live_quantity
+                    position["live_quantity_diff"] = int(position["quantity"]) - live_quantity
+            except Exception:  # noqa: BLE001
+                # 账户未绑定、账本暂不可读等不应让只读回测失败。
+                pass
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -534,12 +555,17 @@ async def sync_backtest_positions(
 
         trader = SZDTAStockExternalTrader()
         snapshot = await trader._load_external_snapshot(config_snapshot)
-        submitted = []
-        for item in payload.positions:
-            symbol = _external_symbol(item.code)
-            result = await trader._sync_target(config_snapshot, snapshot, symbol, item.quantity, item.price, "backtest_sync")
-            snapshot["targets"][symbol] = item.quantity
-            submitted.append({"code": item.code, "quantity": item.quantity, "result": result})
+        # _sync_target_batch 会先保留已有目标和持仓，只覆盖用户明确勾选的目标；
+        # 因此从回测同步一个子集不会把未勾选的实盘仓位变成 0。
+        target_updates = {_external_symbol(item.code): item.quantity for item in payload.positions}
+        prices = {_external_symbol(item.code): item.price for item in payload.positions}
+        result = await trader._sync_target_batch(
+            config_snapshot, snapshot, target_updates, prices, "backtest_sync",
+        )
+        submitted = [
+            {"code": item.code, "quantity": item.quantity, "result": result}
+            for item in payload.positions
+        ]
         return {"message": f"已提交 {len(submitted)} 个A股目标仓位", "submitted": submitted}
 
     if not config_snapshot["ib_account_id"]:
