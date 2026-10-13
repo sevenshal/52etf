@@ -323,7 +323,7 @@ class SZDTAStockExternalTrader:
                 volume_ratio = safe_float(metrics.get(symbol, {}).get("volume_ratio"))
                 if volume_ratio_threshold > 0 and (volume_ratio <= 0 or volume_ratio < volume_ratio_threshold):
                     self._log(account_id, "DEBUG", f"{name} 量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}，跳过")
-                    cooldowns.append((stock["code"], timedelta(minutes=5), "量比未达买入阈值"))
+                    # 量比是盘中实时条件，不命中时不应进入冷却；下一次 cron 需要重新评估。
                     continue
                 if position_ratio >= stock["max_position"]:
                     cooldowns.append((stock["code"], timedelta(hours=1), "仓位已达上限，冷却1h"))

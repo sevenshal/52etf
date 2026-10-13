@@ -7,7 +7,7 @@
 
 这里锁定两件事：
 1. 回执超时按「已提交」记录，不再冒泡成整轮失败（不发告警邮件）；
-2. 无论下单结果如何，冷却都必须写入，下一轮不能再重复下单。
+2. 已提交（包括回执超时）的订单必须冷却，未提交的订单可在下一轮重试。
 """
 
 import asyncio
@@ -123,7 +123,7 @@ def _insert_stock(account_id):
 
 
 class SZDTOrderAckPendingTest(TestCase):
-    def _run_once(self, service, *, score, use_real_stock_selection=False, account_id=ACCOUNT_ID):
+    def _run_once(self, service, *, score, volume_metrics=None, stock=None, use_real_stock_selection=False, account_id=ACCOUNT_ID):
         """跑一轮 run_once，返回（写入的 DB 行, 告警邮件列表）。"""
         trader = SZDTUSTrader()
         emotion = {"status": 1, "data": {"score": score, "price": PRICE}}
@@ -143,12 +143,14 @@ class SZDTOrderAckPendingTest(TestCase):
             patches.append(patch.object(szdt_us_trader, "get_db_ctx", _recording_db_ctx(added)))
         else:
             patches.append(patch.object(szdt_us_trader, "get_db_ctx", _fake_db_ctx(added)))
-            patches.append(patch.object(SZDTUSTrader, "_get_next_stock", return_value=dict(STOCK_ROW)))
+            patches.append(patch.object(SZDTUSTrader, "_get_next_stock", return_value=dict(stock or STOCK_ROW)))
 
         for item in patches:
             item.start()
         try:
-            asyncio.run(trader.run_once(SimpleNamespace(id=1, account_id=account_id), 4001))
+            asyncio.run(trader.run_once(
+                SimpleNamespace(id=1, account_id=account_id), 4001, volume_metrics=volume_metrics,
+            ))
         finally:
             for item in reversed(patches):
                 item.stop()
@@ -170,7 +172,7 @@ class SZDTOrderAckPendingUnitTest(SZDTOrderAckPendingTest):
 
         self.assertEqual([("US.NAIL", "BUY", 29)], placed)
         self.assertEqual([], alerts, "回执超时不应作为整轮失败发告警邮件")
-        self.assertIn("决策后冷却12h", [row.reason for row in _cooldowns(added)],
+        self.assertIn("订单已提交后冷却12h", [row.reason for row in _cooldowns(added)],
                       "回执超时也必须写入冷却，否则下一轮会重复下单")
         warnings = _warnings(added)
         self.assertEqual(1, len(warnings))
@@ -192,11 +194,11 @@ class SZDTOrderAckPendingUnitTest(SZDTOrderAckPendingTest):
 
         self.assertEqual("SELL", placed[0][1])
         self.assertEqual([], alerts)
-        self.assertIn("决策后冷却1h", [row.reason for row in _cooldowns(added)])
+        self.assertIn("订单已提交后冷却12h", [row.reason for row in _cooldowns(added)])
         self.assertIn("SELL", _warnings(added)[0].message)
 
-    def test_other_errors_still_alert_and_still_cool_down(self):
-        """真实异常（如合约无法识别）仍要告警，但冷却同样不能漏写。"""
+    def test_order_rejection_alerts_without_cooldown_for_retry(self):
+        """订单没有提交到 IB 时，下轮应允许重试。"""
         service = _service()
 
         async def fake_place(symbol, action, quantity):
@@ -207,7 +209,18 @@ class SZDTOrderAckPendingUnitTest(SZDTOrderAckPendingTest):
         added, alerts = self._run_once(service, score=-90)
 
         self.assertEqual(1, len(alerts))
-        self.assertIn("决策后冷却12h", [row.reason for row in _cooldowns(added)])
+        self.assertEqual([], _cooldowns(added))
+
+    def test_volume_ratio_miss_does_not_cool_down(self):
+        """量比是实时条件，不命中时下一个 cron 必须重新检查。"""
+        service = _service()
+        stock = {**STOCK_ROW, "buy_volume_ratio": 1.4}
+        added, alerts = self._run_once(
+            service, score=-90, stock=stock, volume_metrics={"US.NAIL": {"volume_ratio": 1.03}},
+        )
+
+        self.assertEqual([], alerts)
+        self.assertEqual([], _cooldowns(added))
 
 
 class SZDTOrderAckPendingDuplicateGuardTest(SZDTOrderAckPendingTest):
