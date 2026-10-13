@@ -123,7 +123,7 @@ def _insert_stock(account_id):
 
 
 class SZDTOrderAckPendingTest(TestCase):
-    def _run_once(self, service, *, score, volume_metrics=None, stock=None, use_real_stock_selection=False, account_id=ACCOUNT_ID):
+    def _run_once(self, service, *, score, volume_metrics=None, stock=None, evaluated_codes=None, use_real_stock_selection=False, account_id=ACCOUNT_ID):
         """跑一轮 run_once，返回（写入的 DB 行, 告警邮件列表）。"""
         trader = SZDTUSTrader()
         emotion = {"status": 1, "data": {"score": score, "price": PRICE}}
@@ -149,7 +149,8 @@ class SZDTOrderAckPendingTest(TestCase):
             item.start()
         try:
             asyncio.run(trader.run_once(
-                SimpleNamespace(id=1, account_id=account_id), 4001, volume_metrics=volume_metrics,
+                SimpleNamespace(id=1, account_id=account_id), 4001,
+                volume_metrics=volume_metrics, evaluated_codes=evaluated_codes,
             ))
         finally:
             for item in reversed(patches):
@@ -215,12 +216,15 @@ class SZDTOrderAckPendingUnitTest(SZDTOrderAckPendingTest):
         """量比是实时条件，不命中时下一个 cron 必须重新检查。"""
         service = _service()
         stock = {**STOCK_ROW, "buy_volume_ratio": 1.4}
+        evaluated_codes = set()
         added, alerts = self._run_once(
-            service, score=-90, stock=stock, volume_metrics={"US.NAIL": {"volume_ratio": 1.03}},
+            service, score=-90, stock=stock, evaluated_codes=evaluated_codes,
+            volume_metrics={"US.NAIL": {"volume_ratio": 1.03}},
         )
 
         self.assertEqual([], alerts)
         self.assertEqual([], _cooldowns(added))
+        self.assertEqual({"US.NAIL"}, evaluated_codes, "同一轮后续扫描不能重复检查量比未达标标的")
 
 
 class SZDTOrderAckPendingDuplicateGuardTest(SZDTOrderAckPendingTest):

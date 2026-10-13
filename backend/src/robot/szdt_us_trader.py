@@ -76,8 +76,8 @@ class SZDTUSTrader:
         order = getattr(getattr(pending, "trade", None), "order", None)
         return getattr(order, "orderId", None)
 
-    def _get_next_stock(self, account_id: str, cli_id: str) -> Dict:
-        """按状态索引 + 冷却筛选，每次只取一只。"""
+    def _get_next_stock(self, account_id: str, cli_id: str, evaluated_codes: set[str] | None = None) -> Dict:
+        """按状态索引、冷却和本轮已评估集合筛选，每次只取一只。"""
         with get_db_ctx() as db:
             state = db.query(TradingState).filter_by(account_id=account_id, cli_id=cli_id).first()
             if not state:
@@ -114,6 +114,8 @@ class SZDTUSTrader:
                 s = stocks[state.current_index]
                 state.current_index += 1
                 loop_count += 1
+                if evaluated_codes and s.code in evaluated_codes:
+                    continue
                 
                 cooldown = db.query(StockCooldown).filter_by(
                     account_id=account_id,
@@ -141,7 +143,13 @@ class SZDTUSTrader:
             db.commit()
             return selected
 
-    async def run_once(self, config: SZDTTradingConfig, ib_port: int, volume_metrics: Dict | None = None):
+    async def run_once(
+        self,
+        config: SZDTTradingConfig,
+        ib_port: int,
+        volume_metrics: Dict | None = None,
+        evaluated_codes: set[str] | None = None,
+    ):
         account_id = config["account_id"] if isinstance(config, dict) else config.account_id
         config_id = config["id"] if isinstance(config, dict) else config.id
         us_rotation_enabled = config.get("us_rotation_enabled", False) if isinstance(config, dict) else bool(getattr(config, "us_rotation_enabled", False))
@@ -167,10 +175,13 @@ class SZDTUSTrader:
             
             logger.info(f"Account {mask_account_id(account_id)} net_liq={net_liq:.2f} cash={available_cash:.2f}")
             
-            stock = self._get_next_stock(account_id, cli_id)
+            stock = self._get_next_stock(account_id, cli_id, evaluated_codes)
             if not stock:
                 logger.debug(f"Account {mask_account_id(account_id)}: No candidate stock")
                 return
+            # 量比不达标等情形不会冷却，但同一轮全标的扫描中也不能重复检查该标的。
+            if evaluated_codes is not None:
+                evaluated_codes.add(stock['code'])
                 
             name = f"{stock['name']}({stock['code']})"
             # 获取情绪
@@ -377,9 +388,10 @@ class SZDTUSTrader:
                     ib_config = db.query(IBKRAccountConfig).filter(IBKRAccountConfig.id == config['ib_account_id']).first()
                     if ib_config:
                         ib_port = ib_config.ib_port
-            # 旧循环每分钟只轮到一只；固定为每日两次后必须在一个任务轮次检查完整配置。
+            # 同一轮每只标的最多评估一次。量比不足不冷却时，不能让唯一可选标的被重复选中。
+            evaluated_codes: set[str] = set()
             for _ in range(len(stocks)):
-                await self.run_once(config, ib_port, volume_metrics)
+                await self.run_once(config, ib_port, volume_metrics, evaluated_codes)
 
     async def worker_loop(self):
         logger.info("SZDT US Trader Worker Loop Started")
