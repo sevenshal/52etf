@@ -286,6 +286,81 @@ def get_a_share_etf_volume_metrics(codes: Iterable[Any]) -> Dict[str, Dict[str, 
     return {symbol: result.get(symbol, _cache["metrics"].get(symbol, {})) for symbol in symbols}
 
 
+def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
+    """返回 ETF 当日累计成交量与盘前持久化的同刻 20 日基准曲线。"""
+    symbol = normalize_etf_symbol(code)
+    if not symbol.endswith((".SH", ".SZ")):
+        raise ValueError("仅支持 A 股场内 ETF")
+    today = datetime.now().date()
+    connection = connect_analytics_db()
+    try:
+        rows = connection.execute(
+            """
+            SELECT trade_time, vol FROM a_stock_minute_bar
+            WHERE ts_code = ? AND CAST(trade_time AS DATE) = ?
+            ORDER BY trade_time
+            """,
+            [symbol, today],
+        ).fetchall()
+        baseline_date_row = connection.execute(
+            """
+            SELECT MAX(baseline_date) FROM a_stock_etf_intraday_volume_baseline
+            WHERE ts_code = ? AND lookback_days = ? AND baseline_date <= ?
+            """,
+            [symbol, MINUTE_HISTORY_DAYS, today],
+        ).fetchone()
+        baseline_date = baseline_date_row[0] if baseline_date_row else None
+        baseline_rows = connection.execute(
+            """
+            SELECT minute_label, avg_cum_volume
+            FROM a_stock_etf_intraday_volume_baseline
+            WHERE ts_code = ? AND lookback_days = ? AND baseline_date = ?
+            ORDER BY minute_label
+            """,
+            [symbol, MINUTE_HISTORY_DAYS, baseline_date],
+        ).fetchall() if baseline_date else []
+    finally:
+        connection.close()
+
+    # 盘中分钟线尚未写入分析库时，按需读取 ETF 专用分钟接口；单标的点击才请求一次。
+    if not rows:
+        try:
+            frame = TushareService.get_instance().get_a_share_etf_historical_minute_frame(
+                symbol, datetime.combine(today, dtime(9, 30)), datetime.now(),
+            )
+            rows = list(frame[["trade_time", "vol"]].itertuples(index=False, name=None)) if not frame.empty else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取 ETF 当日分钟成交量失败 %s: %s", symbol, exc)
+
+    current: Dict[str, float] = {}
+    cumulative = 0.0
+    for timestamp, volume in rows:
+        stamp = pd.to_datetime(timestamp, errors="coerce")
+        if pd.isna(stamp) or stamp.date() != today:
+            continue
+        label = stamp.strftime("%H:%M")
+        if not ("09:30" <= label <= "11:30" or "13:00" <= label <= "15:00"):
+            continue
+        amount = _finite_number(volume)
+        if amount is None:
+            continue
+        cumulative += amount
+        current[label] = cumulative
+    baseline = {str(label): float(value) for label, value in baseline_rows if value is not None and float(value) >= 0}
+    labels = sorted(set(current) | set(baseline))
+    return {
+        "code": symbol,
+        "trade_date": today.isoformat(),
+        "baseline_date": baseline_date.isoformat() if hasattr(baseline_date, "isoformat") else str(baseline_date or ""),
+        "baseline_days": MINUTE_HISTORY_DAYS,
+        "points": [{
+            "time": label,
+            "current_cumulative": current.get(label),
+            "baseline_cumulative": baseline.get(label),
+        } for label in labels],
+    }
+
+
 def get_a_share_etf_ema5(symbol: Any, current_price: Any) -> float | None:
     """以日线收盘价和当前价格计算 ETF EMA5，供贪婪卖出确认复用。"""
     code = normalize_etf_symbol(symbol)

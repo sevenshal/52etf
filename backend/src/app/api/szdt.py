@@ -4,8 +4,8 @@ from datetime import date
 from typing import List, Dict, Optional
 from ...core.database import get_db, IBKRAccountConfig, SZDTTradingConfig, SzdtTradeStock
 from ...core.services.szdt import SZDTService
-from ...core.services.szdt_etf_volume import get_a_share_etf_volume_metrics
-from ...core.services.szdt_us_volume import get_us_stock_list_metrics
+from ...core.services.szdt_etf_volume import get_a_share_etf_intraday_volume_compare, get_a_share_etf_volume_metrics
+from ...core.services.szdt_us_volume import get_us_stock_intraday_volume_compare, get_us_stock_list_metrics
 from ...core.services.szdt_a_stock_backtest import run_szdt_a_stock_backtest
 from ...core.services.szdt_us_backtest import US_STOCK_TYPES, run_szdt_us_backtest
 from sqlalchemy.orm import Session
@@ -381,6 +381,15 @@ async def get_etf_volume_metrics(codes: str = Query(..., description="逗号分�
     return {"data": get_a_share_etf_volume_metrics(codes.split(","))}
 
 
+@router.get("/etf/volume-compare/{code}")
+async def get_etf_volume_compare(code: str):
+    """A 股 ETF 当日累计成交量与同刻 20 日基准曲线。"""
+    try:
+        return {"data": get_a_share_etf_intraday_volume_compare(code)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/us/market-metrics")
 async def get_us_market_metrics(
     codes: str = Query(..., description="逗号分隔的 US.TQQQ 代码"),
@@ -388,6 +397,15 @@ async def get_us_market_metrics(
 ):
     """美股列表的批量实时成交量/成交额及持久化同刻量比。"""
     return {"data": get_us_stock_list_metrics(account_id, codes.split(","))}
+
+
+@router.get("/us/volume-compare/{code}")
+async def get_us_volume_compare(code: str, account_id: str = Depends(get_account_id)):
+    """美股当日累计成交量与同刻 20 日基准曲线。"""
+    try:
+        return {"data": get_us_stock_intraday_volume_compare(account_id, code)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class AStockSzdtBacktestRequest(BaseModel):

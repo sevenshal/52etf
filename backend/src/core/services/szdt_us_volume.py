@@ -314,3 +314,63 @@ def get_us_stock_volume_metrics(
             # 一只标的失败不阻断其它配置；调用方将该标的视为量比不可用而跳过买入。
             metrics[code] = {"volume_ratio": None}
     return metrics
+
+
+def get_us_stock_intraday_volume_compare(
+    account_id: str, code: str, *, now: datetime | None = None,
+) -> Dict[str, Any]:
+    """返回美股当日累计分钟量与持久化的过去 20 日同分钟基准曲线。"""
+    current = now or datetime.now(NEW_YORK)
+    current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
+    normalized_code = str(code or "").upper()
+    if not normalized_code.startswith("US."):
+        raise ValueError("仅支持美股标的")
+    elapsed = max(1, (current.hour * 60 + current.minute) - SESSION_OPEN_MINUTE)
+    service = LongPortService.get_instance(_longport_account_id(account_id))
+    candles = service.get_candlesticks(_symbol(normalized_code), elapsed + 5, period="1m", adjust_type="none") or []
+    volumes: Dict[str, float] = {}
+    for candle in candles:
+        timestamp = _as_new_york(candle.get("timestamp"))
+        if timestamp is None or timestamp.date() != current.date() or timestamp > current:
+            continue
+        label = timestamp.strftime("%H:%M")
+        if label in VOLUME_BASELINE_MINUTE_SET:
+            volumes[label] = float(candle.get("volume") or 0)
+    cumulative = 0.0
+    current_curve: Dict[str, float] = {}
+    for label in VOLUME_BASELINE_MINUTES:
+        cumulative += volumes.get(label, 0.0)
+        if label in volumes:
+            current_curve[label] = cumulative
+
+    with get_db_ctx() as db:
+        rows = db.query(
+            SZDTUSIntradayVolumeSnapshot.trade_date,
+            SZDTUSIntradayVolumeSnapshot.minute_label,
+            SZDTUSIntradayVolumeSnapshot.cumulative_volume,
+        ).filter(
+            SZDTUSIntradayVolumeSnapshot.code == normalized_code,
+            SZDTUSIntradayVolumeSnapshot.trade_date < current.date(),
+        ).order_by(SZDTUSIntradayVolumeSnapshot.trade_date.desc()).all()
+        # 脱离 session 前转为纯值，避免 ORM 过期访问。
+        history_rows = [(trade_date, str(label), float(volume)) for trade_date, label, volume in rows]
+    by_label: Dict[str, list[tuple[object, float]]] = {}
+    for trade_date, label, volume in history_rows:
+        if label in VOLUME_BASELINE_MINUTE_SET:
+            by_label.setdefault(label, []).append((trade_date, volume))
+    baseline = {
+        label: sum(volume for _, volume in values[:VOLUME_BASELINE_LOOKBACK]) / VOLUME_BASELINE_LOOKBACK
+        for label, values in by_label.items()
+        if len(values) >= VOLUME_BASELINE_LOOKBACK
+    }
+    labels = [label for label in VOLUME_BASELINE_MINUTES if label in current_curve or label in baseline]
+    return {
+        "code": normalized_code,
+        "trade_date": current.date().isoformat(),
+        "baseline_days": VOLUME_BASELINE_LOOKBACK,
+        "points": [{
+            "time": label,
+            "current_cumulative": current_curve.get(label),
+            "baseline_cumulative": baseline.get(label),
+        } for label in labels],
+    }

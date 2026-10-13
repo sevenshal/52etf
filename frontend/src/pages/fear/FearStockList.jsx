@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined, ExperimentOutlined, SettingOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
@@ -71,6 +71,9 @@ const FearStockList = () => {
   const [historyData, setHistoryData] = useState([]);
   const [historyVolumeByDate, setHistoryVolumeByDate] = useState({});
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [volumeCompareRecord, setVolumeCompareRecord] = useState(null);
+  const [volumeCompareData, setVolumeCompareData] = useState(null);
+  const [volumeCompareLoading, setVolumeCompareLoading] = useState(false);
   const [batchModalVisible, setBatchModalVisible] = useState(false);
   const [batchUpdating, setBatchUpdating] = useState(false);
 
@@ -138,6 +141,7 @@ const FearStockList = () => {
           // 后续保存统一使用守猪逮兔当前返回的代码格式。
           code: emoData.code,
           name: emoData.name,
+          type: Number(activeType),
           // 守猪逮兔也有自己的 id；编辑/删除必须使用本地配置表的主键。
           id: stock?.id,
           isConfigured: Boolean(stock),
@@ -380,6 +384,29 @@ const FearStockList = () => {
     }
   };
 
+  const handleShowVolumeCompare = async (record) => {
+    const isAStockEtf = Number(record.type) === 3;
+    const isUsStock = [1, 2, 7].includes(Number(record.type));
+    if (!isAStockEtf && !isUsStock) {
+      message.info('当前仅支持 A 股 ETF 和美股标的的盘中量比曲线');
+      return;
+    }
+    setVolumeCompareRecord(record);
+    setVolumeCompareData(null);
+    setVolumeCompareLoading(true);
+    try {
+      const endpoint = isAStockEtf
+        ? `/api/quant/etf/volume-compare/${record.code}`
+        : `/api/quant/us/volume-compare/${record.code}`;
+      const response = await request.get(endpoint);
+      setVolumeCompareData(response.data?.data || null);
+    } catch (error) {
+      message.error(error.response?.data?.detail || error.message || '加载累计成交量对比失败');
+    } finally {
+      setVolumeCompareLoading(false);
+    }
+  };
+
   const runBacktest = async () => {
     setBacktestLoading(true);
     try {
@@ -489,6 +516,45 @@ const FearStockList = () => {
     ],
   };
 
+  const volumeCompareChartOption = useMemo(() => {
+    const points = volumeCompareData?.points || [];
+    return {
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        valueFormatter: (value) => formatVolume(value),
+      },
+      legend: { top: 4, data: ['当日累计成交量', '20日同刻均量'] },
+      grid: { left: 64, right: 28, top: 42, bottom: 52 },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: points.map(point => point.time),
+        axisLabel: { hideOverlap: true },
+      },
+      yAxis: {
+        type: 'value',
+        name: '成交量',
+        scale: true,
+        axisLabel: { formatter: value => formatVolume(value) },
+        splitLine: { lineStyle: { color: '#eef1f6' } },
+      },
+      dataZoom: [{ type: 'inside' }, { type: 'slider' }],
+      series: [
+        {
+          name: '当日累计成交量', type: 'line', showSymbol: false,
+          data: points.map(point => point.current_cumulative),
+          lineStyle: { color: '#1677ff', width: 2 },
+        },
+        {
+          name: '20日同刻均量', type: 'line', showSymbol: false,
+          data: points.map(point => point.baseline_cumulative),
+          lineStyle: { color: '#8c8c8c', width: 1.5, type: 'dashed' },
+        },
+      ],
+    };
+  }, [volumeCompareData]);
+
   // 预览按钮点击
   const handlePreview = (type) => {
     const values = form.getFieldsValue();
@@ -573,7 +639,11 @@ const FearStockList = () => {
       width: 95,
       align: 'right',
       sorter: (a, b) => (a.volume_ratio || -1) - (b.volume_ratio || -1),
-      render: (value) => (Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '-'),
+      render: (value, record) => (Number.isFinite(Number(value)) ? (
+        <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => handleShowVolumeCompare(record)}>
+          {Number(value).toFixed(2)}
+        </Button>
+      ) : '-'),
     },
     {
       title: '何时买',
@@ -1416,6 +1486,23 @@ const FearStockList = () => {
               style={{ height: 430 }}
             />
           </> : <Empty description="该标的暂无可用的贪恐与价格历史数据" style={{ padding: '150px 0' }} />}
+      </Modal>
+
+      <Modal
+        title={volumeCompareRecord ? `${volumeCompareRecord.emo_name || volumeCompareRecord.name}（${volumeCompareRecord.code}）累计成交量对比` : '累计成交量对比'}
+        open={Boolean(volumeCompareRecord)}
+        onCancel={() => setVolumeCompareRecord(null)}
+        footer={null}
+        width={880}
+        destroyOnClose
+      >
+        {volumeCompareLoading ? <div style={{ height: 420, display: 'grid', placeItems: 'center' }}><Spin /></div>
+          : volumeCompareData?.points?.length ? <>
+            <div style={{ color: '#8c8c8c', marginBottom: 8 }}>
+              {volumeCompareData.trade_date} 当日累计成交量 vs 过去 {volumeCompareData.baseline_days} 个交易日同分钟累计均量
+            </div>
+            <ReactECharts option={volumeCompareChartOption} notMerge lazyUpdate={false} style={{ height: 390 }} />
+          </> : <Empty description="暂无可用的盘中分钟成交量或量比基准" style={{ padding: '130px 0' }} />}
       </Modal>
 
       <FactorPreviewModal
