@@ -329,6 +329,7 @@ def get_us_stock_intraday_volume_compare(
     service = LongPortService.get_instance(_longport_account_id(account_id))
     candles = service.get_candlesticks(_symbol(normalized_code), elapsed + 5, period="1m", adjust_type="none") or []
     volumes: Dict[str, float] = {}
+    prices: Dict[str, float] = {}
     for candle in candles:
         timestamp = _as_new_york(candle.get("timestamp"))
         if timestamp is None or timestamp.date() != current.date() or timestamp > current:
@@ -336,6 +337,13 @@ def get_us_stock_intraday_volume_compare(
         label = timestamp.strftime("%H:%M")
         if label in VOLUME_BASELINE_MINUTE_SET:
             volumes[label] = float(candle.get("volume") or 0)
+            price = candle.get("close")
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0:
+                prices[label] = price
     cumulative = 0.0
     current_curve: Dict[str, float] = {}
     for label in VOLUME_BASELINE_MINUTES:
@@ -372,5 +380,6 @@ def get_us_stock_intraday_volume_compare(
             "time": label,
             "current_cumulative": current_curve.get(label),
             "baseline_cumulative": baseline.get(label),
+            "price": prices.get(label),
         } for label in labels],
     }

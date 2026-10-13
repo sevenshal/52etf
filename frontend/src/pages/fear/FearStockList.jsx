@@ -524,7 +524,7 @@ const FearStockList = () => {
         trigger: 'axis',
         valueFormatter: (value) => formatVolume(value),
       },
-      legend: { top: 4, data: ['当日累计成交量', '20日同刻均量'] },
+      legend: { top: 4, data: ['当日累计成交量', '20日同刻均量', '分钟价格'] },
       grid: { left: 64, right: 28, top: 42, bottom: 52 },
       xAxis: {
         type: 'category',
@@ -532,13 +532,17 @@ const FearStockList = () => {
         data: points.map(point => point.time),
         axisLabel: { hideOverlap: true },
       },
-      yAxis: {
-        type: 'value',
-        name: '成交量',
-        scale: true,
-        axisLabel: { formatter: value => formatVolume(value) },
-        splitLine: { lineStyle: { color: '#eef1f6' } },
-      },
+      yAxis: [
+        {
+          type: 'value', name: '成交量', scale: true,
+          axisLabel: { formatter: value => formatVolume(value) },
+          splitLine: { lineStyle: { color: '#eef1f6' } },
+        },
+        {
+          type: 'value', name: '价格', scale: true,
+          splitLine: { show: false },
+        },
+      ],
       dataZoom: [{ type: 'inside' }, { type: 'slider' }],
       series: [
         {
@@ -550,6 +554,11 @@ const FearStockList = () => {
           name: '20日同刻均量', type: 'line', showSymbol: false,
           data: points.map(point => point.baseline_cumulative),
           lineStyle: { color: '#8c8c8c', width: 1.5, type: 'dashed' },
+        },
+        {
+          name: '分钟价格', type: 'line', yAxisIndex: 1, showSymbol: false,
+          data: points.map(point => point.price),
+          lineStyle: { color: '#fa8c16', width: 1.5 },
         },
       ],
     };

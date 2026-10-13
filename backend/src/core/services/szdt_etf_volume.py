@@ -296,7 +296,7 @@ def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
     try:
         rows = connection.execute(
             """
-            SELECT trade_time, vol FROM a_stock_minute_bar
+            SELECT trade_time, vol, close FROM a_stock_minute_bar
             WHERE ts_code = ? AND CAST(trade_time AS DATE) = ?
             ORDER BY trade_time
             """,
@@ -328,13 +328,14 @@ def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
             frame = TushareService.get_instance().get_a_share_etf_historical_minute_frame(
                 symbol, datetime.combine(today, dtime(9, 30)), datetime.now(),
             )
-            rows = list(frame[["trade_time", "vol"]].itertuples(index=False, name=None)) if not frame.empty else []
+            rows = list(frame[["trade_time", "vol", "close"]].itertuples(index=False, name=None)) if not frame.empty else []
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取 ETF 当日分钟成交量失败 %s: %s", symbol, exc)
 
     current: Dict[str, float] = {}
+    prices: Dict[str, float] = {}
     cumulative = 0.0
-    for timestamp, volume in rows:
+    for timestamp, volume, close in rows:
         stamp = pd.to_datetime(timestamp, errors="coerce")
         if pd.isna(stamp) or stamp.date() != today:
             continue
@@ -346,6 +347,9 @@ def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
             continue
         cumulative += amount
         current[label] = cumulative
+        price = _finite_number(close)
+        if price is not None and price > 0:
+            prices[label] = price
     baseline = {str(label): float(value) for label, value in baseline_rows if value is not None and float(value) >= 0}
     labels = sorted(set(current) | set(baseline))
     return {
@@ -357,6 +361,7 @@ def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
             "time": label,
             "current_cumulative": current.get(label),
             "baseline_cumulative": baseline.get(label),
+            "price": prices.get(label),
         } for label in labels],
     }
 
