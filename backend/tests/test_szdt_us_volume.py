@@ -23,6 +23,12 @@ def test_historical_baseline_uses_same_time_cumulative_regular_session_volume():
 
     assert result[(date(2026, 9, 30), "10:30")] == 30
     assert result[(date(2026, 9, 30), "15:55")] == 60
+    # 基准覆盖每个交易分钟：新 cron 落在 10:31 时无需等待另攒 20 天数据。
+    assert result[(date(2026, 9, 30), "09:30")] == 10
+    assert result[(date(2026, 9, 30), "09:31")] == 10
+    assert result[(date(2026, 9, 30), "10:31")] == 30
+    assert result[(date(2026, 9, 30), "15:59")] == 60
+    assert (date(2026, 9, 30), "16:00") not in result
 
 
 def test_naive_longport_minute_timestamp_is_converted_from_shanghai_to_new_york():

@@ -18,8 +18,22 @@ from .longport import LongPortService
 NEW_YORK = ZoneInfo("America/New_York")
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VOLUME_BASELINE_LOOKBACK = 20
-# 与美股策略的两个执行点严格一致。历史分钟线在盘前一次性预热，盘中只拉当日一小段。
-VOLUME_BASELINE_MINUTES = ("10:30", "15:55")
+SESSION_OPEN_MINUTE = 9 * 60 + 30
+SESSION_CLOSE_MINUTE = 16 * 60
+
+
+def _session_minute_labels() -> Tuple[str, ...]:
+    """美股正常交易时段的每一个分钟标签（09:30 至 15:59）。"""
+    return tuple(
+        f"{minute // 60:02d}:{minute % 60:02d}"
+        for minute in range(SESSION_OPEN_MINUTE, SESSION_CLOSE_MINUTE)
+    )
+
+
+# 基准必须覆盖完整交易时段，而非取决于策略当前配置的 cron。这样随时调整触发时刻时，
+# 新时点也可以直接使用过去 20 个交易日的同刻累计成交量。
+VOLUME_BASELINE_MINUTES = _session_minute_labels()
+VOLUME_BASELINE_MINUTE_SET = frozenset(VOLUME_BASELINE_MINUTES)
 
 
 def _longport_account_id(account_id: str) -> str:
@@ -54,25 +68,34 @@ def _as_new_york(timestamp: Any) -> datetime | None:
 def _historical_cumulative_volumes(
     candles: Iterable[Dict[str, Any]], *, before_date,
 ) -> Dict[Tuple[object, str], float]:
-    """按交易日和同一时点累计分钟量，排除盘前/盘后和当天。"""
-    result: Dict[Tuple[object, str], float] = {}
+    """按交易日生成每个交易分钟的累计成交量，排除盘前/盘后和当天。"""
+    minute_volumes: Dict[object, Dict[str, float]] = {}
+    seen: set[Tuple[object, str]] = set()
     for candle in candles:
         timestamp = _as_new_york(candle.get("timestamp"))
         if timestamp is None or timestamp.date() >= before_date:
             continue
         label = timestamp.strftime("%H:%M")
-        if not ("09:30" <= label <= "16:00"):
+        if label not in VOLUME_BASELINE_MINUTE_SET:
             continue
-        volume = float(candle.get("volume") or 0)
-        for checkpoint in VOLUME_BASELINE_MINUTES:
-            if label <= checkpoint:
-                key = (timestamp.date(), checkpoint)
-                result[key] = result.get(key, 0.0) + volume
+        key = (timestamp.date(), label)
+        # 分页边界偶有重叠；同一分钟只能计一次，避免基准被重复累计。
+        if key in seen:
+            continue
+        seen.add(key)
+        minute_volumes.setdefault(timestamp.date(), {})[label] = float(candle.get("volume") or 0)
+
+    result: Dict[Tuple[object, str], float] = {}
+    for trade_date, volumes in minute_volumes.items():
+        cumulative_volume = 0.0
+        for label in VOLUME_BASELINE_MINUTES:
+            cumulative_volume += volumes.get(label, 0.0)
+            result[(trade_date, label)] = cumulative_volume
     return result
 
 
-def _missing_baseline_codes() -> List[Tuple[str, str]]:
-    """返回每个需要预热的代码及可使用的 Longport 账户；同代码只预热一次。"""
+def _volume_baseline_codes() -> List[Tuple[str, str, bool]]:
+    """返回需维护基准的代码、账户及是否已具备完整 20 日基准。"""
     with get_db_ctx() as db:
         rows = db.query(SzdtTradeStock.account_id, SzdtTradeStock.code).filter(
             SzdtTradeStock.enabled.is_(True),
@@ -84,44 +107,47 @@ def _missing_baseline_codes() -> List[Tuple[str, str]]:
             normalized = str(code or "").upper()
             if normalized and normalized not in selected:
                 selected[normalized] = str(account_id or "")
-        result = []
+        result: List[Tuple[str, str, bool]] = []
         for code, account_id in selected.items():
             rows = db.query(
                 SZDTUSIntradayVolumeSnapshot.trade_date,
                 SZDTUSIntradayVolumeSnapshot.minute_label,
             ).filter(
                 SZDTUSIntradayVolumeSnapshot.code == code,
-                SZDTUSIntradayVolumeSnapshot.minute_label.in_(VOLUME_BASELINE_MINUTES),
             ).all()
             labels_by_date: Dict[object, set[str]] = {}
             for trade_date, minute_label in rows:
-                labels_by_date.setdefault(trade_date, set()).add(str(minute_label))
+                label = str(minute_label)
+                if label in VOLUME_BASELINE_MINUTE_SET:
+                    labels_by_date.setdefault(trade_date, set()).add(label)
             complete = sum(
-                labels >= set(VOLUME_BASELINE_MINUTES)
+                labels >= VOLUME_BASELINE_MINUTE_SET
                 for labels in labels_by_date.values()
             )
-            if complete < VOLUME_BASELINE_LOOKBACK:
-                result.append((account_id, code))
+            # 即使已有 20 日，也须每天更新最近一个交易日，保证滚动窗口不会过期。
+            result.append((account_id, code, complete >= VOLUME_BASELINE_LOOKBACK))
     return result
 
 
 def warm_us_volume_baselines(*, now: datetime | None = None) -> Dict[str, Any]:
-    """盘前预热美股同刻量比基准。
+    """盘前预热美股每分钟量比基准。
 
     Longport 分钟历史线最多每次 1,000 根，向前分页至收集到 20 个完整交易日；
-    每标的大约 8 次请求。只为缺少基准、并实际开启量比过滤的配置请求历史数据。
+    首次预热每标的大约 8 次请求，后续每日只取最新一页以滚动更新。
+    只处理实际开启量比过滤的美股配置。
     """
     current = now or datetime.now(NEW_YORK)
     current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
-    targets = _missing_baseline_codes()
+    targets = _volume_baseline_codes()
     result: Dict[str, Any] = {"targets": len(targets), "warmed": 0, "saved": 0, "errors": []}
-    for account_id, code in targets:
+    for account_id, code, is_warm in targets:
         try:
             service = LongPortService.get_instance(_longport_account_id(account_id))
             cursor = datetime.combine(current.date(), time(9, 30), tzinfo=NEW_YORK)
             candles: List[Dict[str, Any]] = []
+            # 已预热的标的每天只需最新一页（约 2.5 个交易日）；首次则向前补满 20 日。
             # 20 * 390 / 1000 向上取整后留一页处理节假日和半日市。
-            for _ in range(10):
+            for _ in range(1 if is_warm else 10):
                 page = service.get_historical_candlesticks_by_offset(
                     _symbol(code), cursor, count=1000, period="1m", adjust_type="none",
                 )
@@ -135,21 +161,28 @@ def warm_us_volume_baselines(*, now: datetime | None = None) -> Dict[str, Any]:
                 cursor = earliest - timedelta(minutes=1)
                 cumulative = _historical_cumulative_volumes(candles, before_date=current.date())
                 dates = {trade_date for trade_date, _ in cumulative}
-                if len(dates) >= VOLUME_BASELINE_LOOKBACK:
+                if not is_warm and len(dates) >= VOLUME_BASELINE_LOOKBACK:
                     break
             cumulative = _historical_cumulative_volumes(candles, before_date=current.date())
-            dates = sorted({trade_date for trade_date, _ in cumulative}, reverse=True)[:VOLUME_BASELINE_LOOKBACK]
-            if len(dates) < VOLUME_BASELINE_LOOKBACK:
+            dates = sorted({trade_date for trade_date, _ in cumulative}, reverse=True)
+            if not is_warm:
+                dates = dates[:VOLUME_BASELINE_LOOKBACK]
+            if not is_warm and len(dates) < VOLUME_BASELINE_LOOKBACK:
                 raise RuntimeError(f"历史分钟线不足20个交易日，仅获取到{len(dates)}天")
             with get_db_ctx() as db:
+                existing = {
+                    (snapshot.trade_date, snapshot.minute_label): snapshot
+                    for snapshot in db.query(SZDTUSIntradayVolumeSnapshot).filter(
+                        SZDTUSIntradayVolumeSnapshot.code == code,
+                        SZDTUSIntradayVolumeSnapshot.trade_date.in_(dates),
+                    ).all()
+                }
                 for trade_date in dates:
                     for minute_label in VOLUME_BASELINE_MINUTES:
                         volume = cumulative.get((trade_date, minute_label))
                         if volume is None:
                             continue
-                        snapshot = db.query(SZDTUSIntradayVolumeSnapshot).filter_by(
-                            code=code, trade_date=trade_date, minute_label=minute_label,
-                        ).first()
+                        snapshot = existing.get((trade_date, minute_label))
                         if snapshot:
                             snapshot.cumulative_volume = volume
                         else:
@@ -227,13 +260,13 @@ def get_us_stock_list_metrics(
 def get_us_stock_volume_metrics(
     account_id: str, codes: Iterable[str], *, now: datetime | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """A 股同口径：当前累计分钟量 ÷ 前20交易日同一时点累计量均值。
+    """当前累计分钟量 ÷ 前 20 个交易日同一分钟累计量均值。
 
-    每个策略定时点都把当天累计量写进主库；后续无需向 Longport 回补历史分钟线，
-    且服务重启不会丢失基准。新接入标的在积累满 20 个交易日之前不会通过量比门槛。
+    历史每分钟基准由盘前任务持久化，策略只写当天实际触发分钟；服务重启不会丢失
+    基准，且调整 cron 后可直接复用任意分钟的历史数据。
     """
     current = now or datetime.now(NEW_YORK)
-    current = current.astimezone(NEW_YORK)
+    current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
     minute_label = current.strftime("%H:%M")
     trade_date = current.date()
     service = LongPortService.get_instance(_longport_account_id(account_id))
@@ -241,12 +274,17 @@ def get_us_stock_volume_metrics(
     for code in dict.fromkeys(str(item).upper() for item in codes if str(item).strip()):
         symbol = _symbol(code)
         try:
-            # 每次只取截至当前时点的一段分钟线；策略每天仅两次调用。
-            elapsed = max(1, (current.hour * 60 + current.minute) - (9 * 60 + 30))
+            # 每次只取截至当前时点的一段分钟线；无需为量比再逐分钟调用行情接口。
+            elapsed = max(1, (current.hour * 60 + current.minute) - SESSION_OPEN_MINUTE)
             minutes = service.get_candlesticks(symbol, elapsed + 5, period="1m", adjust_type="none") or []
             cumulative_volume = sum(
                 float(item.get("volume") or 0) for item in minutes
-                if getattr(item.get("timestamp"), "date", lambda: None)() == trade_date
+                if (
+                    (timestamp := _as_new_york(item.get("timestamp"))) is not None
+                    and timestamp.date() == trade_date
+                    and timestamp.strftime("%H:%M") in VOLUME_BASELINE_MINUTE_SET
+                    and timestamp <= current
+                )
             )
             with get_db_ctx() as db:
                 snapshot = db.query(SZDTUSIntradayVolumeSnapshot).filter_by(

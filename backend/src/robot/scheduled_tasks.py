@@ -747,7 +747,7 @@ def _run_szdt_a_stock_trading() -> str:
 
 
 def _run_szdt_us_trading() -> str:
-    """守猪逮兔美股执行：仅在纽约市场的两个低频时点触发。"""
+    """守猪逮兔美股执行：由配置的纽约市场 cron 驱动。"""
     from .szdt_us_trader import SZDTUSTrader
 
     asyncio.run(SZDTUSTrader().run_scheduled_once())
@@ -755,7 +755,7 @@ def _run_szdt_us_trading() -> str:
 
 
 def _run_szdt_us_volume_baseline() -> str:
-    """盘前补齐美股策略同刻量比的 20 日分钟量基准。"""
+    """盘前补齐美股策略每分钟量比的 20 日分钟量基准。"""
     from ..core.services.szdt_us_volume import warm_us_volume_baselines
 
     result = warm_us_volume_baselines()
@@ -1892,7 +1892,7 @@ class ScheduledTaskManager:
             "szdt_us_trading": TaskDefinition(
                 task_key="szdt_us_trading",
                 name="守猪逮兔 美股自动交易",
-                description="纽约时区交易日开盘后 1 小时及收盘前 5 分钟各执行一次；仅在两次触发时读取 Longport 分钟 K 线量比。",
+                description="按纽约时区 cron 自动执行；每次触发读取 Longport 分钟 K 线，并使用持久化的过去 20 日同分钟量比基准。",
                 default_time="10:30",
                 default_enabled=True,
                 sort_order=30,
@@ -1903,7 +1903,7 @@ class ScheduledTaskManager:
             "szdt_us_volume_baseline": TaskDefinition(
                 task_key="szdt_us_volume_baseline",
                 name="守猪逮兔 美股盘前量比基准",
-                description="纽约开盘前按需用 Longport 历史分钟线预热 20 个交易日的同刻累计成交量基准；仅处理启用量比买入门槛且基准不足的美股配置。",
+                description="纽约开盘前用 Longport 历史分钟线预热并滚动更新过去 20 个交易日每个交易分钟的累计成交量基准；仅处理启用量比买入门槛的美股配置。",
                 default_time="09:15",
                 default_enabled=True,
                 sort_order=31,
