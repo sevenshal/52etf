@@ -280,38 +280,43 @@ class SZDTService:
             return code
         return code.replace('SH.', 'SH').replace('SZ.', 'SZ').replace('US.', 'US').replace('HK.', 'HK')
 
+    async def get_fresh_etf_emotions_from_list(self, etf_type: int) -> Dict[str, Dict]:
+        """批量获取指定 ETF 分类的最新贪恐数据。
+
+        返回值以去掉市场分隔点的代码为 key（如 ``SH512480``），与
+        :meth:`get_fresh_emotion_from_list` 的查找口径一致。单标的调用和批量策略
+        都复用同一次 ``stock_emotion?etf_type=...`` 请求及其短缓存。
+        """
+        try:
+            response = await self.get_etf_emotion(etf_type)
+            if not response or response.get('status') != 1:
+                return {}
+            result: Dict[str, Dict] = {}
+            now = datetime.now()
+            for item in response.get('data', []) or []:
+                code = self._normalize_code(item.get('code'))
+                emotion = item.get('emotion') or {}
+                if not code or 'score' not in emotion or 'price' not in emotion:
+                    continue
+                updated_at_str = emotion.get('updated_at')
+                if updated_at_str:
+                    updated_at = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
+                    if (now - updated_at) > timedelta(minutes=15):
+                        continue
+                result[code] = {
+                    'status': 1,
+                    'data': {
+                        'score': int(emotion['score']),
+                        'price': float(emotion['price']) if isinstance(emotion['price'], str) else emotion['price'],
+                        'updated_at': updated_at_str,
+                    },
+                }
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logging.debug("get_fresh_etf_emotions_from_list failed: %s", exc)
+            return {}
+
     async def get_fresh_emotion_from_list(self, etf_type: int, code: str):
         """从批量ETF情绪中得到某一标的的情绪与价格，并检查是否新鲜。"""
-        try:
-            res = await self.get_etf_emotion(etf_type)
-            if not res or res.get('status') != 1:
-                return None
-            target = None
-            norm_code = self._normalize_code(code)
-            for item in res.get('data', []) or []:
-                item_code = self._normalize_code(item.get('code'))
-                if item_code == norm_code:
-                    target = item
-                    break
-            if not target:
-                return None
-            emo = target.get('emotion') or {}
-            if 'score' not in emo or 'price' not in emo:
-                return None
-            updated_at_str = emo.get('updated_at')
-            if updated_at_str:
-                updated_at = datetime.strptime(updated_at_str, '%Y-%m-%d %H:%M:%S')
-                if (datetime.now() - updated_at) > timedelta(minutes=15):
-                    logging.debug(f"get_etf_emotion list fetch not fresh: {updated_at}")
-                    return None
-            return {
-                'status': 1,
-                'data': {
-                    'score': int(emo['score']),
-                    'price': float(emo['price']) if isinstance(emo['price'], str) else emo['price'],
-                    'updated_at': updated_at_str
-                }
-            }
-        except Exception as e:
-            logging.debug(f"get_etf_emotion list fetch failed: {e}")
-            return None
+        emotions = await self.get_fresh_etf_emotions_from_list(etf_type)
+        return emotions.get(self._normalize_code(code))

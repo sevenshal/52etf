@@ -17,7 +17,6 @@ from ..core.database import (
     StockCooldown,
     SzdtTradeStock,
     TradingLog,
-    TradingState,
     get_db_ctx,
 )
 from ..core.external_trading_database import (
@@ -75,28 +74,10 @@ class SZDTAStockExternalTrader:
             db.add(TradingLog(account_id=account_id, timestamp=datetime.now(), level=level, message=message))
 
     @staticmethod
-    def _set_cooldown(account_id: str, cli_id: str, code: str, duration: timedelta, reason: str) -> None:
-        with get_db_ctx() as db:
-            existing = db.query(StockCooldown).filter_by(
-                account_id=account_id, cli_id=cli_id, stock_code=code,
-            ).first()
-            if existing:
-                existing.until = datetime.now() + duration
-                existing.reason = reason
-            else:
-                db.add(StockCooldown(
-                    account_id=account_id, cli_id=cli_id, stock_code=code,
-                    until=datetime.now() + duration, reason=reason,
-                ))
-
-    @staticmethod
-    def _select_next_stock(account_id: str, cli_id: str) -> Optional[Dict[str, Any]]:
+    def _select_active_stocks(account_id: str, cli_id: str) -> list[Dict[str, Any]]:
+        """返回全部未冷却的启用标的，而不是每轮只轮询一只。"""
         now = datetime.now()
         with get_db_ctx() as db:
-            state = db.query(TradingState).filter_by(account_id=account_id, cli_id=cli_id).first()
-            if not state:
-                state = TradingState(account_id=account_id, cli_id=cli_id, current_index=0)
-                db.add(state)
             stocks = db.query(SzdtTradeStock).filter(
                 SzdtTradeStock.account_id == account_id,
                 SzdtTradeStock.type == 3,
@@ -107,28 +88,49 @@ class SZDTAStockExternalTrader:
                 StockCooldown.cli_id == cli_id,
                 StockCooldown.until < now,
             ).delete(synchronize_session=False)
-            if not stocks:
-                return None
-            if state.current_index >= len(stocks):
-                state.current_index = 0
-            selected = None
-            for _ in range(len(stocks)):
-                stock = stocks[state.current_index]
-                state.current_index = (state.current_index + 1) % len(stocks)
-                if db.query(StockCooldown).filter_by(
-                    account_id=account_id, cli_id=cli_id, stock_code=stock.code,
-                ).first():
-                    continue
-                selected = {
-                    key: getattr(stock, key)
-                    for key in (
-                        "code", "name", "type", "when_buy", "when_sell", "max_position",
-                        "buy_amount", "sell_amount", "buy_factor", "sell_factor", "buy_volume_ratio",
-                        "lever", "emo_area",
-                    )
-                }
-                break
-            return selected
+            cooldown_codes = {
+                row.stock_code for row in db.query(StockCooldown.stock_code).filter_by(
+                    account_id=account_id, cli_id=cli_id,
+                ).all()
+            }
+            return [{
+                key: getattr(stock, key)
+                for key in (
+                    "code", "name", "type", "when_buy", "when_sell", "max_position",
+                    "buy_amount", "sell_amount", "buy_factor", "sell_factor", "buy_volume_ratio",
+                    "lever", "emo_area",
+                )
+            } for stock in stocks if stock.code not in cooldown_codes]
+
+    @staticmethod
+    def _set_cooldowns(
+        account_id: str,
+        cli_id: str,
+        entries: list[tuple[str, timedelta, str]],
+    ) -> None:
+        """在一个事务内写入本轮所有标的的冷却状态。"""
+        if not entries:
+            return
+        codes = {code for code, _, _ in entries}
+        with get_db_ctx() as db:
+            existing = {
+                row.stock_code: row for row in db.query(StockCooldown).filter(
+                    StockCooldown.account_id == account_id,
+                    StockCooldown.cli_id == cli_id,
+                    StockCooldown.stock_code.in_(codes),
+                ).all()
+            }
+            now = datetime.now()
+            for code, duration, reason in entries:
+                row = existing.get(code)
+                if row:
+                    row.until = now + duration
+                    row.reason = reason
+                else:
+                    db.add(StockCooldown(
+                        account_id=account_id, cli_id=cli_id, stock_code=code,
+                        until=now + duration, reason=reason,
+                    ))
 
     @staticmethod
     def _config_snapshot(config: SZDTTradingConfig) -> Dict[str, Any]:
@@ -195,24 +197,30 @@ class SZDTAStockExternalTrader:
                 "external_account_id": account.id, "sub_account_id": sub.id,
             }
 
-    async def _sync_targets(
-        self, config: Dict[str, Any], snapshot: Dict[str, Any], symbol: str, target_quantity: int,
-        price: float, reason: str, additional_targets: Optional[Dict[str, int]] = None,
+    async def _sync_target_batch(
+        self,
+        config: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        target_updates: Dict[str, int],
+        prices: Dict[str, float],
+        reason: str,
     ) -> str:
+        """合并整轮信号，只写一次目标仓位并触发一次执行器。"""
         target_quantities = dict(snapshot["targets"])
         for held_symbol, quantity in snapshot["positions"].items():
             target_quantities.setdefault(held_symbol, quantity)
-        target_quantities[symbol] = max(0, int(target_quantity))
-        for target_symbol, quantity in (additional_targets or {}).items():
-            target_quantities[normalize_symbol(target_symbol)] = max(0, int(quantity))
+        target_quantities.update({
+            normalize_symbol(symbol): max(0, int(quantity))
+            for symbol, quantity in target_updates.items()
+        })
         targets = [{
-            "symbol": target_symbol,
+            "symbol": symbol,
             "target_quantity": quantity,
-            "target_value": round(quantity * price, 2) if target_symbol == symbol else None,
-            "reference_price": round(price, 4) if target_symbol == symbol else None,
+            "target_value": round(quantity * safe_float(prices.get(symbol)), 2) if safe_float(prices.get(symbol)) > 0 else None,
+            "reference_price": round(safe_float(prices.get(symbol)), 4) if safe_float(prices.get(symbol)) > 0 else None,
             "reference_price_source": "szdt_a_stock",
-        } for target_symbol, quantity in target_quantities.items()]
-        signal_id = f"szdt_a:{config['id']}:{symbol}:{datetime.now():%Y%m%d%H%M%S}"
+        } for symbol, quantity in target_quantities.items()]
+        signal_id = f"szdt_a:{config['id']}:batch:{datetime.now():%Y%m%d%H%M%S}"
         with get_external_trading_db_ctx() as db:
             sub = db.query(ExternalTradingSubAccount).filter(
                 ExternalTradingSubAccount.id == snapshot["sub_account_id"],
@@ -226,13 +234,7 @@ class SZDTAStockExternalTrader:
             account_id=config["account_id"], external_account_id=snapshot["external_account_id"],
             trigger_source=f"szdt_a_{reason}",
         )
-        return f"目标仓位={target_quantity}；执行器={result.get('status')}"
-
-    async def _sync_target(
-        self, config: Dict[str, Any], snapshot: Dict[str, Any], symbol: str, target_quantity: int,
-        price: float, reason: str,
-    ) -> str:
-        return await self._sync_targets(config, snapshot, symbol, target_quantity, price, reason)
+        return f"批量目标仓位 {len(target_updates)} 个标的；执行器={result.get('status')}"
 
     async def run_config_once(
         self,
@@ -241,147 +243,131 @@ class SZDTAStockExternalTrader:
     ) -> None:
         account_id = config["account_id"]
         cli_id = f"szdt-a-external-{account_id}"
-        stock = self._select_next_stock(account_id, cli_id)
-        if not stock:
+        stocks = self._select_active_stocks(account_id, cli_id)
+        if not stocks:
             return
-        name = f"{stock['name']}({stock['code']})"
         try:
             snapshot = await self._load_external_snapshot(config)
-            symbol = _external_symbol(stock["code"])
-            quote_symbols = [*snapshot["positions"].keys(), symbol]
+            stock_by_symbol = {_external_symbol(stock["code"]): stock for stock in stocks}
+            quote_symbols = [*snapshot["positions"].keys(), *stock_by_symbol]
             prices = await get_realtime_reference_prices(snapshot["external_account_id"], quote_symbols)
-            price = safe_float(prices.get(symbol))
-            if price <= 0:
-                raise ValueError(f"无法获取 {symbol} 实时价格")
             portfolio_value = snapshot["cash"] + sum(
                 quantity * safe_float(prices.get(position_symbol))
                 for position_symbol, quantity in snapshot["positions"].items()
             )
             if portfolio_value <= 0:
                 raise ValueError("子账户可用资金和持仓市值均为零")
-            quantity = safe_int(snapshot["positions"].get(symbol))
-            position_ratio = quantity * price / portfolio_value * 100
-            emotion = await self._szdt_service.get_fresh_emotion_from_list(3, stock["code"])
-            if not emotion:
-                emotion = await self._szdt_service.get_stock_emotion(stock["code"], stock["lever"], stock["emo_area"])
-            if not emotion or emotion.get("status") != 1:
-                self._log(account_id, "DEBUG", f"{name} 获取情绪失败，跳过")
-                return
-            score = float(emotion["data"]["score"])
+            emotions = await self._szdt_service.get_fresh_etf_emotions_from_list(3)
+            scores: Dict[str, float] = {}
+            cooldowns: list[tuple[str, timedelta, str]] = []
+            target_updates: Dict[str, int] = {}
+            trade_logs: list[str] = []
+            metrics = volume_metrics
+            if metrics is None:
+                metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, [stock["code"] for stock in stocks])
 
-            if score > stock["when_buy"] + 10 and quantity == 0:
-                self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=2), "无持仓且情绪过高")
-                return
-            if score < stock["when_sell"] - 10 and position_ratio > stock["max_position"]:
-                self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=2), "持仓已满且情绪过低")
-                return
-
-            if score <= stock["when_buy"]:
-                volume_ratio_threshold = safe_float(stock.get("buy_volume_ratio"))
-                if volume_ratio_threshold > 0:
-                    metrics = volume_metrics
-                    if metrics is None:
-                        metrics = await asyncio.to_thread(get_a_share_etf_volume_metrics, [stock["code"]])
-                    volume_metric = metrics.get(symbol, {})
-                    volume_ratio = safe_float(volume_metric.get("volume_ratio"))
-                    if volume_ratio <= 0 or volume_ratio < volume_ratio_threshold:
-                        self._log(
-                            account_id,
-                            "DEBUG",
-                            f"{name} 量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}，跳过",
-                        )
-                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(minutes=5), "量比未达买入阈值")
-                        return
-                if position_ratio < stock["max_position"]:
-                    factor = min(1, max(0, (stock["when_buy"] - score) / (stock["when_buy"] + 100)))
-                    requested_buy_amount = stock["buy_amount"] * (3 ** (factor ** stock["buy_factor"]))
-                    available_cash = snapshot["cash"]
-                    rotation_targets: Dict[str, int] = {}
-                    rotation_details = []
-                    if config.get("a_rotation_enabled") and available_cash < requested_buy_amount:
-                        rotation_threshold = float(config.get("a_rotation_threshold", -30))
-                        enabled_stocks = self._enabled_stocks(account_id)
-                        rotation_sources = []
-                        for held_symbol, held_quantity in snapshot["positions"].items():
-                            if held_symbol == symbol or held_quantity < 100:
-                                continue
-                            source_stock = enabled_stocks.get(held_symbol)
-                            source_price = safe_float(prices.get(held_symbol))
-                            if not source_stock or source_price <= 0:
-                                continue
-                            source_emotion = await self._szdt_service.get_fresh_emotion_from_list(3, source_stock["code"])
-                            if not source_emotion:
-                                source_emotion = await self._szdt_service.get_stock_emotion(
-                                    source_stock["code"], source_stock["lever"], source_stock["emo_area"],
-                                )
-                            if not source_emotion or source_emotion.get("status") != 1:
-                                continue
-                            source_score = float(source_emotion["data"]["score"])
-                            if source_score >= rotation_threshold:
-                                rotation_sources.append((source_score, held_symbol, source_price, held_quantity, source_stock))
-                        for source_score, source_symbol, source_price, held_quantity, source_stock in sorted(rotation_sources, reverse=True):
-                            if available_cash >= requested_buy_amount:
-                                break
-                            shortfall = requested_buy_amount - available_cash
-                            sell_quantity = min(held_quantity, max(100, math.ceil(shortfall / source_price / 100) * 100))
-                            rotation_targets[source_symbol] = held_quantity - sell_quantity
-                            available_cash += sell_quantity * source_price
-                            rotation_details.append(f"{source_stock['name']} {sell_quantity}股(贪恐={source_score:.0f})")
-                    buy_amount = min(available_cash, requested_buy_amount)
-                    buy_quantity = int(buy_amount / price / 100) * 100
-                    if buy_quantity >= 100:
-                        if rotation_targets:
-                            result = await self._sync_targets(
-                                config, snapshot, symbol, quantity + buy_quantity, price, "rotation_buy", rotation_targets,
-                            )
-                            self._log(
-                                account_id, "INFO",
-                                f"{name} ROTATE_BUY {buy_quantity}，分数={score:.0f}；腾挪卖出 {', '.join(rotation_details)}；{result}",
-                            )
-                            for source_symbol in rotation_targets:
-                                source_stock = enabled_stocks.get(source_symbol)
-                                if source_stock:
-                                    self._set_cooldown(account_id, cli_id, source_stock["code"], timedelta(hours=12), "轮动腾挪卖出")
-                        else:
-                            result = await self._sync_target(config, snapshot, symbol, quantity + buy_quantity, price, "buy")
-                            self._log(account_id, "INFO", f"{name} BUY {buy_quantity}，分数={score:.0f}；{result}")
-                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=12), "当日买入信号已触发")
-                    else:
-                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=1), "资金不足，冷却1h")
-                else:
-                    self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=1), "仓位已达上限，冷却1h")
-                return
-
-            if score >= stock["when_sell"]:
+            # 先处理卖出，使同一轮产生的现金可供后续买入信号使用。
+            projected_cash = snapshot["cash"]
+            for symbol, stock in stock_by_symbol.items():
+                name = f"{stock['name']}({stock['code']})"
+                price = safe_float(prices.get(symbol))
+                if price <= 0:
+                    self._log(account_id, "DEBUG", f"{name} 无法获取实时价格，跳过")
+                    continue
+                emotion = emotions.get(self._szdt_service._normalize_code(stock["code"]))
+                if not emotion:
+                    emotion = await self._szdt_service.get_stock_emotion(stock["code"], stock["lever"], stock["emo_area"])
+                if not emotion or emotion.get("status") != 1:
+                    self._log(account_id, "DEBUG", f"{name} 获取情绪失败，跳过")
+                    continue
+                score = float(emotion["data"]["score"])
+                scores[symbol] = score
+                quantity = safe_int(snapshot["positions"].get(symbol))
+                position_ratio = quantity * price / portfolio_value * 100
+                if score > stock["when_buy"] + 10 and quantity == 0:
+                    cooldowns.append((stock["code"], timedelta(hours=2), "无持仓且情绪过高"))
+                    continue
+                if score < stock["when_sell"] - 10 and position_ratio > stock["max_position"]:
+                    cooldowns.append((stock["code"], timedelta(hours=2), "持仓已满且情绪过低"))
+                    continue
+                if score < stock["when_sell"] or quantity < 100:
+                    continue
                 if config.get("a_sell_on_ema5_breakdown"):
                     ema5 = await asyncio.to_thread(get_a_share_etf_ema5, stock["code"], price)
                     if ema5 is None or price >= ema5:
-                        self._log(
-                            account_id,
-                            "DEBUG",
+                        self._log(account_id, "DEBUG", (
                             f"{name} 贪婪={score:.0f}，价格 {price:.3f} 未跌破EMA5 {ema5:.3f}" if ema5 else
-                            f"{name} 贪婪={score:.0f}，EMA5 数据不足，继续持有",
-                        )
-                        self._set_cooldown(account_id, cli_id, stock["code"], timedelta(minutes=5), "贪婪等待跌破EMA5")
-                        return
-                if quantity >= 100:
-                    factor = min(1, max(0, (score - stock["when_sell"]) / (100 - stock["when_sell"])))
-                    sell_amount = stock["sell_amount"] * (3 ** (factor ** stock["sell_factor"]))
-                    sell_quantity = min(quantity, max(100, int(sell_amount / price / 100) * 100))
-                    result = await self._sync_target(config, snapshot, symbol, quantity - sell_quantity, price, "sell")
-                    self._log(account_id, "INFO", f"{name} SELL {sell_quantity}，分数={score:.0f}；{result}")
-                    self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=12), "当日卖出信号已触发")
-                else:
-                    self._set_cooldown(account_id, cli_id, stock["code"], timedelta(hours=1), "无可卖持仓，冷却1h")
-                return
+                            f"{name} 贪婪={score:.0f}，EMA5 数据不足，继续持有"
+                        ))
+                        cooldowns.append((stock["code"], timedelta(minutes=5), "贪婪等待跌破EMA5"))
+                        continue
+                factor = min(1, max(0, (score - stock["when_sell"]) / (100 - stock["when_sell"])))
+                sell_amount = stock["sell_amount"] * (3 ** (factor ** stock["sell_factor"]))
+                sell_quantity = min(quantity, max(100, int(sell_amount / price / 100) * 100))
+                target_updates[symbol] = quantity - sell_quantity
+                projected_cash += sell_quantity * price
+                trade_logs.append(f"{name} SELL {sell_quantity}股，金额≈{sell_quantity * price:,.0f}元，分数={score:.0f}")
+                cooldowns.append((stock["code"], timedelta(hours=12), "当日卖出信号已触发"))
 
-            delta = min(score - stock["when_buy"], stock["when_sell"] - score)
-            minutes = round(min(720, 1.6 ** delta))
-            if minutes > 1:
-                self._set_cooldown(account_id, cli_id, stock["code"], timedelta(minutes=minutes), "情绪中性")
+            # 再按恐慌程度从低到高买入，统一使用投影后的可用现金和目标仓位。
+            enabled_stocks = self._enabled_stocks(account_id)
+            for symbol, stock in sorted(stock_by_symbol.items(), key=lambda item: scores.get(item[0], 101)):
+                score = scores.get(symbol)
+                if score is None or score > stock["when_buy"]:
+                    continue
+                name = f"{stock['name']}({stock['code']})"
+                price = safe_float(prices.get(symbol))
+                quantity = target_updates.get(symbol, safe_int(snapshot["positions"].get(symbol)))
+                position_ratio = quantity * price / portfolio_value * 100
+                volume_ratio_threshold = safe_float(stock.get("buy_volume_ratio"))
+                volume_ratio = safe_float(metrics.get(symbol, {}).get("volume_ratio"))
+                if volume_ratio_threshold > 0 and (volume_ratio <= 0 or volume_ratio < volume_ratio_threshold):
+                    self._log(account_id, "DEBUG", f"{name} 量比 {volume_ratio or '-'} 未达买入阈值 {volume_ratio_threshold:.2f}，跳过")
+                    cooldowns.append((stock["code"], timedelta(minutes=5), "量比未达买入阈值"))
+                    continue
+                if position_ratio >= stock["max_position"]:
+                    cooldowns.append((stock["code"], timedelta(hours=1), "仓位已达上限，冷却1h"))
+                    continue
+                factor = min(1, max(0, (stock["when_buy"] - score) / (stock["when_buy"] + 100)))
+                requested_buy_amount = stock["buy_amount"] * (3 ** (factor ** stock["buy_factor"]))
+                rotation_details = []
+                if config.get("a_rotation_enabled") and projected_cash < requested_buy_amount:
+                    threshold = float(config.get("a_rotation_threshold", -30))
+                    sources = []
+                    for held_symbol, held_quantity in snapshot["positions"].items():
+                        source_quantity = target_updates.get(held_symbol, held_quantity)
+                        source_stock = enabled_stocks.get(held_symbol)
+                        source_price = safe_float(prices.get(held_symbol))
+                        source_score = scores.get(held_symbol)
+                        if held_symbol != symbol and source_stock and source_quantity >= 100 and source_price > 0 and source_score is not None and source_score >= threshold:
+                            sources.append((source_score, held_symbol, source_price, source_quantity, source_stock))
+                    for source_score, source_symbol, source_price, source_quantity, source_stock in sorted(sources, reverse=True):
+                        if projected_cash >= requested_buy_amount:
+                            break
+                        sell_quantity = min(source_quantity, max(100, math.ceil((requested_buy_amount - projected_cash) / source_price / 100) * 100))
+                        target_updates[source_symbol] = source_quantity - sell_quantity
+                        projected_cash += sell_quantity * source_price
+                        rotation_details.append(f"{source_stock['name']} {sell_quantity}股(贪恐={source_score:.0f})")
+                        cooldowns.append((source_stock["code"], timedelta(hours=12), "轮动腾挪卖出"))
+                buy_quantity = int(min(projected_cash, requested_buy_amount) / price / 100) * 100
+                if buy_quantity < 100:
+                    cooldowns.append((stock["code"], timedelta(hours=1), "资金不足，冷却1h"))
+                    continue
+                target_updates[symbol] = quantity + buy_quantity
+                projected_cash -= buy_quantity * price
+                action = "ROTATE_BUY" if rotation_details else "BUY"
+                rotation_text = f"；腾挪卖出 {', '.join(rotation_details)}" if rotation_details else ""
+                trade_logs.append(f"{name} {action} {buy_quantity}股，金额≈{buy_quantity * price:,.0f}元，分数={score:.0f}{rotation_text}")
+                cooldowns.append((stock["code"], timedelta(hours=12), "当日买入信号已触发"))
+
+            if target_updates:
+                result = await self._sync_target_batch(config, snapshot, target_updates, prices, "batch")
+                for message in trade_logs:
+                    self._log(account_id, "INFO", f"{message}；{result}")
+            self._set_cooldowns(account_id, cli_id, cooldowns)
         except Exception as exc:
             logger.exception("SZDT A股外部交易执行失败 account=%s", account_id)
-            self._log(account_id, "ERROR", f"{name} 外部自动交易异常: {exc}")
+            self._log(account_id, "ERROR", f"A股批量外部自动交易异常: {exc}")
             send_alert_email("守猪逮兔A股自动交易报错", traceback.format_exc(), scenario_key="szdt_a_external_error")
 
     async def worker_loop(self) -> None:
