@@ -1477,6 +1477,9 @@ class TaskDefinition:
     default_allow_queue: bool = True
     default_timezone: str = DEFAULT_TASK_TIMEZONE
     parameter_schema: tuple[TaskParameterDefinition, ...] = ()
+    # 只表达数据/业务前置条件，不表达单纯的时间先后。执行前若任一上游最新一次
+    # 状态为 FAILED，下游会直接记录为 FAILED，而不会使用可能不完整的输入继续运行。
+    depends_on: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1571,6 +1574,7 @@ class ScheduledTaskManager:
                 default_enabled=False,
                 sort_order=13,
                 runner=_run_us_stock_industry_sync,
+                depends_on=("etf_holdings_backfill",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="candidate_etfs",
@@ -1607,6 +1611,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=20,
                 runner=_run_etf_fair_value_analysis,
+                depends_on=("etf_holdings_backfill", "evc_stock_fetch"),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="symbols",
@@ -1720,6 +1725,12 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=60,
                 runner=_run_etf_fear_greed_backfill,
+                depends_on=(
+                    "evc_static_info_sync",
+                    "etf_holdings_backfill",
+                    "etf_put_call_ratio_sync",
+                    "cnn_fear_greed_fetch",
+                ),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="start_date",
@@ -1788,6 +1799,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=26,
                 runner=_run_market_alert_baseline,
+                depends_on=("chan_minute_sync", "sw_minute_sync"),
                 default_cron_rule="15 9 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
@@ -1855,6 +1867,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=27,
                 runner=_run_market_alert_scan,
+                depends_on=("market_alert_baseline",),
                 default_cron_rule="*/1 9-15 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
@@ -1897,6 +1910,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=30,
                 runner=_run_szdt_us_trading,
+                depends_on=("szdt_us_volume_baseline",),
                 default_cron_rule="30 10 * * mon-fri\n55 15 * * mon-fri",
                 default_timezone="America/New_York",
             ),
@@ -1957,6 +1971,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_a_stock_innovation100_rebuild,
+                depends_on=("a_stock_base_data_sync",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="start_date",
@@ -1989,6 +2004,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_a_stock_micro400_rebuild,
+                depends_on=("a_stock_base_data_sync",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="start_date",
@@ -2021,6 +2037,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_a_stock_etf_fear_greed_backfill,
+                depends_on=("a_stock_base_data_sync",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="start_date",
@@ -2064,6 +2081,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=77,
                 runner=_run_a_stock_consensus_pe_band_refresh,
+                depends_on=("a_stock_base_data_sync",),
             ),
             "a_stock_index_valuation_refresh": TaskDefinition(
                 task_key="a_stock_index_valuation_refresh",
@@ -2117,6 +2135,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=81,
                 runner=_run_sector_nine_turn_daily,
+                depends_on=("a_stock_base_data_sync",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="as_of",
@@ -2170,6 +2189,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=75,
                 runner=_run_a_stock_fear_greed_intraday,
+                depends_on=("a_stock_base_data_sync",),
                 default_cron_rule="0 12 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
@@ -2244,6 +2264,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_a_stock_earnings_gap_scan,
+                depends_on=("a_stock_base_data_sync", "a_stock_announcement_sync"),
                 default_cron_rule="20 18,20,22,23 * * mon-fri",
             ),
             "hk_stock_base_data_sync": TaskDefinition(
@@ -2302,6 +2323,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=78,
                 runner=_run_hk_index_fear_greed_backfill,
+                depends_on=("hk_stock_base_data_sync",),
                 parameter_schema=(
                     TaskParameterDefinition(
                         key="start_date", label="输出开始", value_type="string", default="",
@@ -2406,6 +2428,7 @@ class ScheduledTaskManager:
                 default_enabled=True,
                 sort_order=25,
                 runner=_run_xueqiu_top_holdings_rebalance,
+                depends_on=("xueqiu_top_holdings_cache_refresh",),
                 default_cron_rule="35 9 * * mon-fri",
                 parameter_schema=(
                     TaskParameterDefinition(
@@ -3171,6 +3194,13 @@ class ScheduledTaskManager:
         )
 
         try:
+            failed_dependencies = self._failed_dependencies(task)
+            if failed_dependencies:
+                detail = "；".join(
+                    f"{dependency['name']}({dependency['task_key']})"
+                    for dependency in failed_dependencies
+                )
+                raise RuntimeError(f"依赖任务最新执行失败，已阻止本次执行: {detail}")
             result_message = task.runner(**runner_kwargs)
             if result_message:
                 message = str(result_message)
@@ -3216,6 +3246,57 @@ class ScheduledTaskManager:
             )
             self._publish_tasks_event(task.task_key)
 
+    def _failed_dependencies(self, task: TaskDefinition) -> List[dict]:
+        """Return failed upstream task snapshots immediately before execution.
+
+        The status is deliberately read at execution time (rather than enqueue
+        time): a queued downstream task can still proceed if an operator fixes
+        and successfully reruns its upstream task while it is waiting.
+        """
+        if not task.depends_on:
+            return []
+        with get_db_ctx() as db:
+            configs = db.query(ScheduledTaskConfig).filter(
+                ScheduledTaskConfig.task_key.in_(task.depends_on)
+            ).all()
+            status_by_key = {
+                config.task_key: config.last_run_status
+                for config in configs
+            }
+        return [
+            {
+                "task_key": dependency_key,
+                "name": self.task_definitions[dependency_key].name,
+                "last_run_status": status_by_key.get(dependency_key),
+            }
+            for dependency_key in task.depends_on
+            if status_by_key.get(dependency_key) == "FAILED"
+        ]
+
+    def _serialize_dependencies(self, task: Optional[TaskDefinition]) -> List[dict]:
+        if not task or not task.depends_on:
+            return []
+        with get_db_ctx() as db:
+            configs = db.query(ScheduledTaskConfig).filter(
+                ScheduledTaskConfig.task_key.in_(task.depends_on)
+            ).all()
+            snapshots = {
+                config.task_key: self._snapshot_config(config)
+                for config in configs
+            }
+        dependencies = []
+        for dependency_key in task.depends_on:
+            definition = self.task_definitions[dependency_key]
+            snapshot = snapshots.get(dependency_key, {})
+            finished_at = snapshot.get("last_run_finished_at")
+            dependencies.append({
+                "task_key": dependency_key,
+                "name": definition.name,
+                "last_run_status": snapshot.get("last_run_status"),
+                "last_run_finished_at": finished_at.isoformat() if finished_at else None,
+            })
+        return dependencies
+
     def _serialize_task(
         self,
         config: dict,
@@ -3237,6 +3318,7 @@ class ScheduledTaskManager:
             "timezone": config["timezone"],
             "allow_queue": config["allow_queue"],
             "parameters": config.get("parameters") or {},
+            "dependencies": self._serialize_dependencies(task),
             "parameter_schema": [
                 definition.serialize()
                 for definition in (task.parameter_schema if task else ())

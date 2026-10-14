@@ -27,6 +27,13 @@ class ScheduledTaskRunRequest(BaseModel):
     symbols: Optional[List[str]] = None
 
 
+class ScheduledTaskDependencyResponse(BaseModel):
+    task_key: str
+    name: str
+    last_run_status: Optional[str] = None
+    last_run_finished_at: Optional[str] = None
+
+
 class ScheduledTaskResponse(BaseModel):
     task_key: str
     name: str
@@ -37,6 +44,7 @@ class ScheduledTaskResponse(BaseModel):
     timezone: str = "Asia/Shanghai"
     allow_queue: bool = True
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    dependencies: List[ScheduledTaskDependencyResponse] = Field(default_factory=list)
     parameter_schema: List[Dict[str, Any]] = Field(default_factory=list)
     first_daily_trigger_minutes: Optional[int] = None
     sort_order: int

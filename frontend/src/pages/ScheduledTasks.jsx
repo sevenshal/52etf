@@ -178,6 +178,16 @@ const buildStatusTag = (task) => {
   return <Tag>未执行</Tag>;
 };
 
+const buildDependencyStatusTag = (dependency) => {
+  if (dependency.last_run_status === 'SUCCESS') {
+    return <Tag color="success">成功</Tag>;
+  }
+  if (dependency.last_run_status === 'FAILED') {
+    return <Tag color="error">失败</Tag>;
+  }
+  return <Tag>未执行</Tag>;
+};
+
 const getMessagePreview = (messageText) => {
   if (!messageText || messageText.length <= RESULT_PREVIEW_LENGTH) {
     return messageText;
@@ -431,6 +441,26 @@ const ScheduledTasks = () => {
           <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }}>
             {task.description}
           </Text>
+          {Array.isArray(task.dependencies) && task.dependencies.length > 0 ? (
+            <Space size={[4, 4]} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>依赖：</Text>
+              {task.dependencies.map((dependency) => (
+                <Tooltip
+                  key={dependency.task_key}
+                  title={dependency.last_run_finished_at
+                    ? `上次结束：${formatDateTime(dependency.last_run_finished_at)}`
+                    : '上游任务尚未执行'}
+                >
+                  <Space size={2}>
+                    <Text type={dependency.last_run_status === 'FAILED' ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+                      {dependency.name}
+                    </Text>
+                    {buildDependencyStatusTag(dependency)}
+                  </Space>
+                </Tooltip>
+              ))}
+            </Space>
+          ) : null}
         </Space>
       ),
     },
