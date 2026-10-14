@@ -908,6 +908,28 @@ class TushareService(QuoteProvider):
             result[column] = pd.to_numeric(result[column], errors="coerce")
         return result.dropna(subset=["trade_time", "open", "close", "high", "low"]).sort_values("trade_time")
 
+    def get_a_share_etf_realtime_minute_daily_frame(self, ts_code: str) -> pd.DataFrame:
+        """场内 ETF 当日开盘至今的 1 分钟实时行情（``rt_etf_min_daily``）。"""
+        symbol = self.normalize_symbol(ts_code)
+        if not self._is_a_share_etf_ts_code(symbol):
+            return pd.DataFrame()
+        self._minute_rate_limiter.wait()
+        frame = self.pro.rt_etf_min_daily(ts_code=symbol, freq="1MIN")
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        result = frame.copy().rename(columns={"code": "ts_code", "time": "trade_time"})
+        if "ts_code" not in result.columns:
+            result["ts_code"] = symbol
+        result["ts_code"] = result["ts_code"].astype(str).str.strip().str.upper()
+        result["trade_time"] = pd.to_datetime(result.get("trade_time"), errors="coerce")
+        for column in ("open", "close", "high", "low", "vol", "amount"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        required = ("trade_time", "close", "vol")
+        if not set(required).issubset(result.columns):
+            return pd.DataFrame()
+        return result.dropna(subset=list(required)).sort_values("trade_time")
+
     def get_a_stock_realtime_minute_batch_frame(self, ts_codes: List[str], freq: str = "1MIN") -> pd.DataFrame:
         """Fetch the latest realtime minute bar for up to 300 A-share symbols."""
         symbols = [self.normalize_symbol(item) for item in ts_codes]

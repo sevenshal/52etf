@@ -322,12 +322,16 @@ def get_a_share_etf_intraday_volume_compare(code: Any) -> Dict[str, Any]:
     finally:
         connection.close()
 
-    # 盘中分钟线尚未写入分析库时，按需读取 ETF 专用分钟接口；单标的点击才请求一次。
+    # 盘中分钟线尚未写入分析库时，读取 ETF 当日实时分钟接口；单标的点击才请求一次。
     if not rows:
         try:
-            frame = TushareService.get_instance().get_a_share_etf_historical_minute_frame(
-                symbol, datetime.combine(today, dtime(9, 30)), datetime.now(),
-            )
+            service = TushareService.get_instance()
+            frame = service.get_a_share_etf_realtime_minute_daily_frame(symbol)
+            # 收盘后实时分钟接口可能不再返回数据，回退到历史 ETF 分钟线。
+            if frame.empty:
+                frame = service.get_a_share_etf_historical_minute_frame(
+                    symbol, datetime.combine(today, dtime(9, 30)), datetime.now(),
+                )
             rows = list(frame[["trade_time", "vol", "close"]].itertuples(index=False, name=None)) if not frame.empty else []
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取 ETF 当日分钟成交量失败 %s: %s", symbol, exc)
