@@ -380,6 +380,46 @@
   margin-bottom: 12px;
 }
 
+.soxx-fear-components-detail {
+  margin-bottom: 12px;
+}
+
+.soxx-fear-components-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.soxx-fear-component {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+
+.soxx-fear-component-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #595959;
+  font-size: 12px;
+}
+
+.soxx-fear-component-values b {
+  color: #1f1f1f;
+}
+
+.soxx-fear-component .ant-typography-secondary {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .soxx-fear-holdings {
   margin-bottom: 12px;
 }
@@ -450,12 +490,20 @@
   .soxx-fear-industry-group.is-wide .soxx-fear-summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .soxx-fear-components-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
   .soxx-fear-industry-groups,
   .soxx-fear-compact-groups,
   .soxx-fear-industry-loading {
+    grid-template-columns: 1fr;
+  }
+
+  .soxx-fear-components-grid {
     grid-template-columns: 1fr;
   }
 

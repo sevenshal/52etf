@@ -41,6 +41,18 @@ const DEFAULT_DETAIL_STATE = {
   latest_holdings: [],
 };
 
+const COMPONENT_LABELS = {
+  market_momentum: '市场动量',
+  stock_price_strength: '成分股强度',
+  stock_price_breadth: '成分股广度',
+  put_call_options: '期权 Put/Call',
+  market_volatility: '市场波动率',
+  safe_haven_demand: '避险需求',
+  junk_bond_demand: '垃圾债需求',
+  cnn_fear_greed: 'CNN 贪恐',
+  szdt_fear_greed: '守猪逮兔贪恐',
+};
+
 const isFiniteNumber = value => value !== null && value !== undefined && Number.isFinite(Number(value));
 
 const formatNumber = (value, digits = 1) => (
@@ -201,7 +213,7 @@ const SOXXFearGreed = () => {
         const { data } = await request.get('/api/cnn/etf-fear-greed-clone/history', {
           params: {
             symbol: expandedSymbol,
-            include_components: false,
+            include_components: true,
             include_latest_holdings: true,
           },
         });
@@ -484,6 +496,9 @@ const SOXXFearGreed = () => {
     || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
+  // 详情优先显示盘中计算的分量；没有实时结果时使用最新入库日线分量。
+  const componentValues = realtime?.components || latest?.components || {};
+  const componentEntries = Object.entries(componentValues);
 
   const detailRef = useRef(null);
 
@@ -560,6 +575,28 @@ const SOXXFearGreed = () => {
               <Statistic title="历史样本" value={expandedSummary?.history_points ?? expandedDetail.count ?? '-'} />
             </Col>
           </Row>
+
+          {componentEntries.length > 0 && (
+            <Card
+              size="small"
+              className="soxx-fear-components-detail"
+              title={realtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
+            >
+              <div className="soxx-fear-components-grid">
+                {componentEntries.map(([key, component]) => (
+                  <div className="soxx-fear-component" key={key}>
+                    <Text strong>{COMPONENT_LABELS[key] || component.name || key}</Text>
+                    <div className="soxx-fear-component-values">
+                      <span>原始值 <b>{formatNumber(component.raw_value, 3)}</b></span>
+                      <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
+                    </div>
+                    {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
+                    {component.raw_label && <Text type="secondary">{component.raw_label}</Text>}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
 
           {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
             <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
