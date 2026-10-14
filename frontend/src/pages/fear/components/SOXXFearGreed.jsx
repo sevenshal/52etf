@@ -53,6 +53,19 @@ const COMPONENT_LABELS = {
   szdt_fear_greed: '守猪逮兔贪恐',
 };
 
+const COMPONENT_VALUE_META = {
+  put_call_options: {
+    label: '实际 P/C（5日均值）',
+    // 后端为使“低 P/C = 高分”而存入 -P/C；展示时还原为通常的正数 P/C。
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
+    description: 'Put/Call 比例越低，得分越高',
+  },
+  market_volatility: {
+    label: '相对波动变化',
+    description: '正值表示20日实现波动率低于50日均值；波动率升高会令得分下降',
+  },
+};
+
 const isFiniteNumber = value => value !== null && value !== undefined && Number.isFinite(Number(value));
 
 const formatNumber = (value, digits = 1) => (
@@ -587,11 +600,21 @@ const SOXXFearGreed = () => {
                   <div className="soxx-fear-component" key={key}>
                     <Text strong>{COMPONENT_LABELS[key] || component.name || key}</Text>
                     <div className="soxx-fear-component-values">
-                      <span>原始值 <b>{formatNumber(component.raw_value, 3)}</b></span>
+                      <span>
+                        {COMPONENT_VALUE_META[key]?.label || '模型原始值'}{' '}
+                        <b>{formatNumber(
+                          COMPONENT_VALUE_META[key]?.displayValue?.(component.raw_value) ?? component.raw_value,
+                          3
+                        )}</b>
+                      </span>
                       <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
                     </div>
                     {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
-                    {component.raw_label && <Text type="secondary">{component.raw_label}</Text>}
+                    {(COMPONENT_VALUE_META[key]?.description || component.raw_label) && (
+                      <Text type="secondary">
+                        {COMPONENT_VALUE_META[key]?.description || component.raw_label}
+                      </Text>
+                    )}
                   </div>
                 ))}
               </div>
