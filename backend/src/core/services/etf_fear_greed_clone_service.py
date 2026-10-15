@@ -564,10 +564,10 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
-        name="ETF Volatility",
-        raw_label="-(20-day realized volatility / 50-day average - 1)",
-        source="LongPort daily prices via QuoteService",
-        proxy_note="ETF-specific replacement for CNN's VIX component.",
+        name="Market Implied Volatility (VIX)",
+        raw_label="-VIXCLS",
+        source="FRED VIXCLS",
+        proxy_note="VIX absolute level, rolling z-score normalized; higher VIX lowers the score.",
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",
@@ -741,7 +741,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "score": round(latest_score, 2),
                 "rating": self.rating(latest_score),
                 "date": latest_date.date().isoformat(),
-                "method": "equal-weighted rolling z-score normal CDF",
+                "method": "equal-weighted rolling z-score normal CDF; VIX absolute IV replaces realized-volatility change",
                 "history_days": history_days,
                 "score_window": score_window,
                 "min_periods": min_periods,
@@ -824,7 +824,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                     "date": timestamp.date().isoformat(),
                     "score": round(score, 4),
                     "rating": self.rating(score),
-                    "method": "equal-weighted rolling z-score normal CDF",
+                    "method": "equal-weighted rolling z-score normal CDF; VIX absolute IV replaces realized-volatility change",
                     "history_days": history_days,
                     "score_window": score_window,
                     "min_periods": min_periods,
@@ -1049,7 +1049,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "rating": self.rating(score),
                 "date": realtime_date.isoformat(),
                 "timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
-                "method": "equal-weighted rolling z-score normal CDF",
+                "method": "equal-weighted rolling z-score normal CDF; VIX absolute IV replaces realized-volatility change",
                 "mode": "intraday price-driven",
                 "history_days": history_days,
                 "score_window": score_window,
@@ -1477,7 +1477,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
         tlt_prices = self._fetch_price_history(
             "TLT.US", start_date, end_date
         ).reindex(index).ffill()
-        fred = self._fetch_fred(["BAMLH0A0HYM2", "BAMLC0A0CM"]).reindex(index).ffill()
+        fred = self._fetch_fred(["VIXCLS", "BAMLH0A0HYM2", "BAMLC0A0CM"]).reindex(index).ffill()
         put_call = self._fetch_market_put_call_ratio(
             etf_symbol, start_date, end_date
         ).reindex(index).ffill(limit=3)
@@ -1507,9 +1507,6 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             raise FearGreedCloneError(f"LongPort returned no usable holding history for {etf_symbol}")
 
         etf_close = etf_prices["close"]
-        etf_returns = etf_close.pct_change()
-        realized_vol = etf_returns.rolling(20).std() * np.sqrt(252)
-
         df = pd.DataFrame(index=index)
         df["market_momentum"] = etf_close / etf_close.rolling(125).mean() - 1.0
         df["stock_price_strength"] = self._weighted_range_position(
@@ -1519,7 +1516,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             holding_frames, holdings_by_date, index
         )
         df["put_call_options"] = -put_call.rolling(5, min_periods=3).mean()
-        df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
+        df["market_volatility"] = -fred["VIXCLS"]
         df["safe_haven_demand"] = etf_close.pct_change(20) - tlt_prices["close"].pct_change(20)
         df["junk_bond_demand"] = -(fred["BAMLH0A0HYM2"] - fred["BAMLC0A0CM"])
         df["cnn_fear_greed"] = cnn_fear_greed

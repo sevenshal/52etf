@@ -145,5 +145,6 @@ def test_component_raw_is_negative_five_day_average_of_cboe_ratio(monkeypatch):
     raw = calc._build_raw_signals("SPY.US", {}, index[0].date(), index[-1].date())
 
     assert raw["put_call_options"].iloc[-1] == pytest.approx(-ratios.tail(5).mean())
+    assert raw["market_volatility"].iloc[-1] == pytest.approx(-1.0)
     assert raw["cnn_fear_greed"].isna().all()
     assert raw["szdt_fear_greed"].isna().all()

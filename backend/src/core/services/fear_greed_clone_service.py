@@ -72,10 +72,10 @@ COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
-        name="Market Volatility",
-        raw_label="-(VIX / 50-day moving average - 1)",
+        name="Market Implied Volatility (VIX)",
+        raw_label="-VIXCLS",
         source="FRED VIXCLS",
-        proxy_note="Close match to CNN's published VIX/50-day component.",
+        proxy_note="VIX absolute level, rolling z-score normalized; higher VIX lowers the score.",
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",
@@ -235,7 +235,7 @@ class FearGreedCloneCalculator:
             prices["RSP"].pct_change(20) - prices["SPY"].pct_change(20)
         )
         df["put_call_options"] = -put_call.rolling(5, min_periods=3).mean()
-        df["market_volatility"] = -(fred["VIXCLS"] / fred["VIXCLS"].rolling(50).mean() - 1.0)
+        df["market_volatility"] = -fred["VIXCLS"]
         df["safe_haven_demand"] = prices["SPY"].pct_change(20) - prices["TLT"].pct_change(20)
         df["junk_bond_demand"] = -(fred["BAMLH0A0HYM2"] - fred["BAMLC0A0CM"])
 

@@ -155,12 +155,16 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
             "constituent weight each option's underlying index covers."
         ),
     ),
-    "market_volatility": ComponentSpec(
-        key="market_volatility",
-        name="A-share Index Volatility",
-        raw_label="-(20-day realized volatility / 50-day average - 1)",
-        source="A-share index level daily data",
-        proxy_note="Realized-volatility replacement for CNN's VIX component.",
+    "implied_volatility": ComponentSpec(
+        key="implied_volatility",
+        name="A-share Option Implied Volatility",
+        raw_label="-annualized near-30-day at-the-money option IV proxy",
+        source="A-share option settlement prices + underlying ETF/index daily closes",
+        proxy_note=(
+            "Direct option IV is used when the tracked index has its own option chain; "
+            "otherwise proxy implied variances are blended by constituent-overlap weights. "
+            "Higher IV represents greater expected risk and lowers the score."
+        ),
     ),
     "safe_haven_demand": ComponentSpec(
         key="safe_haven_demand",
@@ -178,17 +182,16 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
 }
 
-# 展示实验分量：保留独立的滚动 z-score，供页面和研究使用，但绝不进入总分。
+# 诊断分量：保留实现波动率相对变化，便于与 IV 对照，但不参与总分。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
-    "implied_volatility": ComponentSpec(
-        key="implied_volatility",
-        name="A-share Option Implied Volatility",
-        raw_label="-annualized near-30-day at-the-money option IV proxy",
-        source="A-share option settlement prices + underlying ETF/index daily closes",
+    "market_volatility": ComponentSpec(
+        key="market_volatility",
+        name="A-share Realized Volatility",
+        raw_label="-(20-day realized volatility / 50-day average - 1)",
+        source="A-share index level daily data",
         proxy_note=(
-            "Direct option IV is used when the tracked index has its own option chain; "
-            "otherwise proxy implied variances are blended by constituent-overlap weights. "
-            "Display-only experimental component; excluded from the Fear & Greed total."
+            "Retained as a diagnostic comparison against option IV; excluded from "
+            "the Fear & Greed total."
         ),
     ),
 }
@@ -284,7 +287,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                     "date": day.isoformat(),
                     "score": round(score, 4),
                     "rating": FearGreedCloneCalculator.rating(score),
-                    "method": "available-component equal-weighted rolling z-score normal CDF",
+                    "method": "available-component equal-weighted rolling z-score normal CDF; IV replaces realized-volatility change",
                     "history_days": history_days,
                     "score_window": score_window,
                     "min_periods": min_periods,
@@ -531,7 +534,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             "trade_date": today,
             "score": round(score, 4),
             "rating": FearGreedCloneCalculator.rating(score),
-            "method": "available-component equal-weighted rolling z-score normal CDF (intraday)",
+            "method": "available-component equal-weighted rolling z-score normal CDF; IV replaces realized-volatility change (intraday)",
             "history_days": history_days,
             "score_window": score_window,
             "min_periods": min_periods,
@@ -1007,7 +1010,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["stock_price_breadth"] = self._weighted_advancing_amount_ratio(market_frames, holdings_by_date, index)
         df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
         df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
-        # 负号让 IV 越高（预期风险越高）时分数越低；仅作展示实验分量，不进总分。
+        # 负号让 IV 越高（预期风险越高）时分数越低，并作为总分的波动率分量。
         df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
         df["junk_bond_demand"] = -credit_spread
@@ -1744,7 +1747,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             f"This is an independent {self.label}-specific clone, not CNN's undisclosed calculation.",
             f"Scores use rolling z-score/CDF and equal-weighted available components; at least {A_STOCK_MIN_COMPONENT_COUNT} components are required.",
             option_warning,
-            "The implied-volatility component is an experimental display-only proxy based on option settlement prices; it is not included in the Fear & Greed total.",
+            "The implied-volatility component is a settlement-price IV proxy; it replaces relative realized-volatility change in the Fear & Greed total.",
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

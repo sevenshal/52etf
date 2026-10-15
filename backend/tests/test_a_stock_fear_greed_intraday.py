@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 
 from src.core.services.a_stock_fear_greed_clone_service import (
+    A_STOCK_COMPONENTS,
+    A_STOCK_DISPLAY_ONLY_COMPONENTS,
     AStockInnovation100FearGreedCloneCalculator,
 )
 
@@ -109,6 +111,12 @@ def _build_synthetic_context(calculator, n_days: int = 600):
     }
 
 
+def test_iv_replaces_relative_realized_volatility_in_a_share_total():
+    assert "implied_volatility" in A_STOCK_COMPONENTS
+    assert "market_volatility" not in A_STOCK_COMPONENTS
+    assert "market_volatility" in A_STOCK_DISPLAY_ONLY_COMPONENTS
+
+
 def test_calculate_intraday_uses_all_components():
     calculator = AStockInnovation100FearGreedCloneCalculator("000300.SH")
     ctx = _build_synthetic_context(calculator)
@@ -126,7 +134,8 @@ def test_calculate_intraday_uses_all_components():
 
     assert result["component_count"] == 7
     assert len(result["components_used"]) == 7
-    assert result["components"]["implied_volatility"]["included_in_total"] is False
+    assert result["components"]["implied_volatility"]["included_in_total"] is True
+    assert result["components"]["market_volatility"]["included_in_total"] is False
     assert 0.0 <= result["score"] <= 100.0
     assert result["quote_source"] == "rt_idx_k"
     assert result["index_level"] == ctx["intraday"]["level"]

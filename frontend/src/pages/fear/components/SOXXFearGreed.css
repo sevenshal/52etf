@@ -386,26 +386,57 @@
 
 .soxx-fear-components-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
 }
 
 .soxx-fear-component {
   display: grid;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
-  padding: 10px;
+  padding: 7px 8px;
   background: #fafafa;
   border: 1px solid #f0f0f0;
-  border-radius: 6px;
+  border-radius: 5px;
+}
+
+.soxx-fear-component-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.soxx-fear-component-header .ant-typography {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.soxx-fear-component-tags {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.soxx-fear-component-tags .ant-tag {
+  margin-inline-end: 0;
+  padding-inline: 4px;
+  font-size: 10px;
+  line-height: 17px;
 }
 
 .soxx-fear-component-values {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
   color: #595959;
-  font-size: 12px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .soxx-fear-component-values b {
@@ -492,7 +523,7 @@
   }
 
   .soxx-fear-components-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -504,7 +535,7 @@
   }
 
   .soxx-fear-components-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .soxx-fear-compact-groups > .soxx-fear-industry-group.is-pair {
@@ -559,5 +590,11 @@
 
   .soxx-fear-chart {
     height: 430px;
+  }
+}
+
+@media (max-width: 480px) {
+  .soxx-fear-components-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -63,13 +63,13 @@ const COMPONENT_VALUE_META = {
   },
   market_volatility: {
     label: '相对波动变化',
-    description: '正值表示20日实现波动率低于50日均值；波动率升高会令得分下降',
+    description: 'A股：20日实现波动率相对50日均值，仅作诊断，不参与总分',
   },
   implied_volatility: {
     label: '年化 IV（%）',
     // 后端为使“IV 越高 = 越恐慌”而以 -IV 参与标准化；展示时还原为正数百分比。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) * 100 : value),
-    description: '期权隐含的未来波动率代理；暂未参与总分计算',
+    description: '期权隐含的未来波动率代理；IV 越高，得分越低',
   },
 };
 
@@ -609,24 +609,38 @@ const SOXXFearGreed = () => {
               <div className="soxx-fear-components-grid">
                 {componentEntries.map(([key, component]) => (
                   <div className="soxx-fear-component" key={key}>
-                    <Text strong>{COMPONENT_LABELS[key] || component.name || key}</Text>
+                    <div className="soxx-fear-component-header">
+                      <Text strong>{key === 'market_volatility' && component.raw_label === '-VIXCLS'
+                        ? '市场隐含波动率（VIX）'
+                        : COMPONENT_LABELS[key] || component.name || key}</Text>
+                      <span className="soxx-fear-component-tags">
+                        {component.included_in_total === false && (
+                          <Tag color="default">暂未参与总分</Tag>
+                        )}
+                        {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
+                      </span>
+                    </div>
                     <div className="soxx-fear-component-values">
                       <span>
-                        {COMPONENT_VALUE_META[key]?.label || '模型原始值'}{' '}
+                        {key === 'market_volatility' && component.raw_label === '-VIXCLS'
+                          ? 'VIX（点）'
+                          : COMPONENT_VALUE_META[key]?.label || '模型原始值'}{' '}
                         <b>{formatNumber(
-                          COMPONENT_VALUE_META[key]?.displayValue?.(component.raw_value) ?? component.raw_value,
+                          key === 'market_volatility' && component.raw_label === '-VIXCLS'
+                            ? (isFiniteNumber(component.raw_value) ? -Number(component.raw_value) : component.raw_value)
+                            : COMPONENT_VALUE_META[key]?.displayValue?.(component.raw_value) ?? component.raw_value,
                           3
                         )}</b>
                       </span>
                       <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
                     </div>
-                    {component.included_in_total === false && (
-                      <Tag color="default">暂未参与总分计算</Tag>
-                    )}
-                    {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
-                    {(COMPONENT_VALUE_META[key]?.description || component.raw_label) && (
+                    {(key === 'market_volatility' && component.raw_label === '-VIXCLS'
+                      ? 'VIX（市场隐含波动率）越高，得分越低'
+                      : COMPONENT_VALUE_META[key]?.description || component.raw_label) && (
                       <Text type="secondary">
-                        {COMPONENT_VALUE_META[key]?.description || component.raw_label}
+                        {key === 'market_volatility' && component.raw_label === '-VIXCLS'
+                          ? 'VIX（市场隐含波动率）越高，得分越低'
+                          : COMPONENT_VALUE_META[key]?.description || component.raw_label}
                       </Text>
                     )}
                   </div>
