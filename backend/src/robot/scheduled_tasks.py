@@ -15,6 +15,11 @@ from ..core.database import ScheduledTaskConfig, get_db_ctx
 from ..core.event_stream import publish_event
 from ..core.utils import send_alert_email
 
+# 全模块共用一个 logger：只在文件头部定义一次，runner 里直接 logger.xxx 即可。
+# 历史上有 7 个 runner 各自复制了这份定义，漏掉的那个在 except 分支里抛
+# NameError: name 'logger' is not defined，把真实异常顶掉了，所以统一到这里。
+logger = logging.getLogger("ScheduledTaskManager")
+
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 CRON_RULE_SPLIT_PATTERN = re.compile(r"[;\n]+")
 DEFAULT_TASK_TIMEZONE = "Asia/Shanghai"
@@ -200,7 +205,7 @@ def _run_us_stock_base_data_sync(
     static_result = us_result.get("static_snapshot") or {}
     daily_errors = us_result.get("daily_errors") or []
 
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         (
             "US stock base data synced: status=%s static_symbols=%s static_fetched=%s "
             "daily_symbols=%s us_static_info_fetched=%s daily_saved_rows=%s "
@@ -256,7 +261,7 @@ def _run_us_stock_industry_sync(
         limit=limit,
         force=force_refresh,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         (
             "US stock industry synced: symbols=%s target=%s saved=%s skipped=%s "
             "profile_skipped=%s remaining=%s api_calls=%s errors=%s"
@@ -310,7 +315,7 @@ def _run_etf_holdings_ingest():
     finally:
         ingest.close()
 
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "ETF latest holdings ingest saved=%s skipped=%s errors=%s dates=%s",
         result.get("saved"),
         result.get("skipped"),
@@ -338,7 +343,7 @@ def _run_etf_historical_holdings_backfill(start_date: Optional[str] = None):
     finally:
         backfill.close()
 
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "ETF historical holdings backfill saved=%s skipped=%s range=%s~%s errors=%s",
         result.get("saved"),
         result.get("skipped"),
@@ -392,7 +397,7 @@ def _run_etf_put_call_ratio_sync(
     finally:
         syncer.close()
 
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "ETF option data sync mode=%s symbols=%s history_saved=%s expirations_saved=%s errors=%s",
         result.get("mode"),
         result.get("symbols"),
@@ -457,7 +462,6 @@ def _run_etf_fear_greed_backfill(
 
     calculation_start_date = output_start_date - timedelta(days=history_days)
     calculator = ETFFearGreedCloneCalculator()
-    logger = logging.getLogger("ScheduledTaskManager")
     for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS:
         result = calculator.backfill_to_db(
             symbol=symbol,
@@ -573,7 +577,7 @@ def _run_a_stock_base_data_sync(
         end_date=parsed_end_date,
         incremental=incremental and parsed_start_date is None,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
             "index_daily_saved=%s index_daily_jobs=%s index_daily_errors=%s "
@@ -665,7 +669,6 @@ def _run_market_alert_replay(
 
     end = date_cls.fromisoformat(end_date) if end_date else date_cls.today() - timedelta_cls(days=1)
     start = date_cls.fromisoformat(start_date) if start_date else end - timedelta_cls(days=30)
-    logger = logging.getLogger("ScheduledTaskManager")
 
     def progress(index, total, result):
         logger.info("提示看板回放 %s/%s %s %s%s", index, total, result.get("date"), result.get("status"),
@@ -714,7 +717,7 @@ def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
     from ..core.services.szdt_etf_volume import sync_registered_etf_minutes
 
     etf_result = sync_registered_etf_minutes()
-    logging.getLogger("ScheduledTaskManager").info("Minute data synced: %s", state)
+    logger.info("Minute data synced: %s", state)
     return (
         f"{state.get('status')} 个股分钟 {state.get('saved_rows', 0)} 行 · "
         f"错误 {len(state.get('errors') or [])} 条 · "
@@ -781,7 +784,7 @@ def _run_a_stock_innovation100_rebuild(
         end_date=_parse_optional_task_date(end_date, "结束日期"),
         full_rebuild=full_rebuild,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "A stock innovation100 refreshed: mode=%s, status=%s, latest_date=%s, latest_level=%s, levels_saved=%s, rebalances_saved=%s",
         result.get("mode"),
         result.get("status"),
@@ -804,7 +807,7 @@ def _run_a_stock_micro400_rebuild(
         end_date=_parse_optional_task_date(end_date, "结束日期"),
         full_rebuild=full_rebuild,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "A stock micro400 refreshed: mode=%s, status=%s, latest_date=%s, latest_level=%s, levels_saved=%s, rebalances_saved=%s",
         result.get("mode"),
         result.get("status"),
@@ -848,7 +851,6 @@ def _run_a_stock_etf_fear_greed_backfill(
     if unknown_symbols:
         raise ValueError(f"未知A股贪恐指数: {','.join(unknown_symbols)}")
 
-    logger = logging.getLogger("ScheduledTaskManager")
     results = []
     errors = []
     for target in targets:
@@ -916,7 +918,7 @@ def _run_a_stock_index_valuation_refresh(symbols: Optional[Any] = None):
             errors,
             lambda item: f"{item.get('symbol')}: {item.get('error')}",
         )
-        logging.getLogger("ScheduledTaskManager").warning("%s: %s", message, preview)
+        logger.warning("%s: %s", message, preview)
     return message
 
 
@@ -1167,8 +1169,9 @@ def _run_a_stock_announcement_sync(
                     f"tushare{label} saved={outcome.get('saved_rows')} fetched={outcome.get('fetched_rows')}"
                 )
             except Exception as exc:  # 东财时刻已落库，tushare 数字晚一轮不影响整体同步
-                logger.warning("业绩公告流同步: tushare%s 增量失败 %s", label, exc)
-                extras.append(f"tushare{label} failed={exc}")
+                # 失败原因必须留在任务结果里（带异常类型），否则只能看到一句笼统的 failed
+                logger.warning("业绩公告流同步: tushare%s 增量失败: %s", label, exc, exc_info=True)
+                extras.append(f"tushare{label} failed={type(exc).__name__}: {exc}")
         message += "；" + "；".join(extras)
     return message
 
@@ -1222,7 +1225,6 @@ def _run_a_stock_fear_greed_intraday(
     if unknown:
         raise ValueError(f"未知A股贪恐指数: {','.join(unknown)}")
 
-    logger = logging.getLogger("ScheduledTaskManager")
     now_value = datetime.now(ZoneInfo("Asia/Shanghai"))
     results = []
     errors = []
@@ -1280,7 +1282,6 @@ def _run_external_trading_fee_reconcile(
         check_and_alert_missing_deliver_records,
     )
 
-    logger = logging.getLogger("ScheduledTaskManager")
     now_shanghai = datetime.now(ZoneInfo("Asia/Shanghai"))
     today = parsed_check_date or now_shanghai.date()
 
@@ -1308,7 +1309,6 @@ def _is_china_trading_day(check_date: date) -> bool:
     if check_date.weekday() >= 5:
         return False
 
-    logger = logging.getLogger("ScheduledTaskManager")
     try:
         from ..core.services.tushare import TushareService
 
@@ -1340,7 +1340,7 @@ def _run_external_trading_sub_account_net_asset_snapshot(
     )
     from .external_trading_log import summarize_external_trading_net_asset_snapshot
 
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "External trading sub-account net asset snapshot result: %s",
         summarize_external_trading_net_asset_snapshot(result),
     )
@@ -1370,7 +1370,7 @@ def _run_xueqiu_top_holdings_rebalance(
         active_rebalance_days=active_rebalance_days,
         sell_rank=sell_rank,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "Xueqiu top holdings rebalance result: %s",
         result,
     )
@@ -1395,7 +1395,7 @@ def _run_xueqiu_top_holdings_cache_refresh(
         activity_cache_ttl_hours=activity_cache_ttl_hours,
         activity_request_min_interval_ms=activity_request_min_interval_ms,
     )
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "Xueqiu top holdings cache refresh result: %s",
         result,
     )
@@ -1410,7 +1410,7 @@ def _run_xueqiu_holdings_refresh():
     from .xueqiu_top_holdings_report import process_xueqiu_holdings_refresh_for_robot
 
     result = process_xueqiu_holdings_refresh_for_robot()
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "Xueqiu holdings refresh result: %s", result,
     )
     return result
@@ -1424,7 +1424,7 @@ def _run_eastmoney_holdings_refresh():
     from .eastmoney_holdings import process_eastmoney_holdings_refresh_for_robot
 
     result = process_eastmoney_holdings_refresh_for_robot()
-    logging.getLogger("ScheduledTaskManager").info(
+    logger.info(
         "Eastmoney holdings refresh result: %s", result,
     )
     return result
