@@ -497,14 +497,18 @@ const SOXXFearGreed = () => {
     setExpandedSymbol(current => (current === symbol ? null : symbol));
   };
 
-  const realtimeMeta = realtime?.fear_and_greed_clone;
-  const realtimeScore = realtimeMeta?.score;
   const realtimePrice = realtime?.etf_price?.close ?? realtime?.etf_price?.quote?.price;
   const latest = expandedDetail.latest || expandedSummary?.latest;
   const latestPrice = latest?.etf_price?.close;
   // 今日已收盘入库：点位/价格与概要卡片、历史曲线保持一致（日线收盘值）；
   // 盘中（history 尚未更新今日）才用实时快照点位（A股为盘中快照指数点位）。
   const closeIsToday = latest?.date === chinaToday;
+  // 日线已回填当日时，盘中快照可能来自部署前的旧计算版本；不能让它覆盖最新日线的
+  // 子指标。只有当日日线尚未入库时才将盘中快照作为详情的实时来源。
+  const useRealtimeDetail = Boolean(realtime && !closeIsToday);
+  const displayedRealtime = useRealtimeDetail ? realtime : null;
+  const displayedRealtimeMeta = displayedRealtime?.fear_and_greed_clone;
+  const displayedRealtimeScore = displayedRealtimeMeta?.score;
   const displayPrice = closeIsToday ? latestPrice : (realtimePrice ?? latestPrice);
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
   const valuation = expandedDetail.valuation || expandedSummary?.valuation;
@@ -516,8 +520,8 @@ const SOXXFearGreed = () => {
     || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
-  // 详情优先显示盘中计算的分量；没有实时结果时使用最新入库日线分量。
-  const componentValues = realtime?.components || latest?.components || {};
+  // 仅在当日日线尚未入库时显示盘中分量；收盘回填后统一展示最新日线。
+  const componentValues = displayedRealtime?.components || latest?.components || {};
   const componentEntries = Object.entries(componentValues);
 
   const detailRef = useRef(null);
@@ -536,8 +540,8 @@ const SOXXFearGreed = () => {
           <Text strong>{expandedETF?.ticker}</Text>
           <Text type="secondary" style={{ marginLeft: 8 }}>{expandedETF?.symbol}</Text>
         </div>
-        <Tag color={fearColor(realtimeScore ?? latest?.score)}>
-          {fearStatus(realtimeScore ?? latest?.score)}
+        <Tag color={fearColor(displayedRealtimeScore ?? latest?.score)}>
+          {fearStatus(displayedRealtimeScore ?? latest?.score)}
         </Tag>
       </div>
 
@@ -567,9 +571,9 @@ const SOXXFearGreed = () => {
             <Col xs={12} sm={8} lg={4}>
               <Statistic
                 title={realtimeEnabled ? '实时/最新' : '最新'}
-                value={realtimeScore ?? latest.score}
+                value={displayedRealtimeScore ?? latest.score}
                 precision={1}
-                valueStyle={{ color: fearTextColor(realtimeScore ?? latest.score) }}
+                valueStyle={{ color: fearTextColor(displayedRealtimeScore ?? latest.score) }}
                 suffix="/100"
               />
               {realtimeEnabled && realtimeLoading && <Tag color="processing">实时计算中</Tag>}
@@ -589,7 +593,7 @@ const SOXXFearGreed = () => {
               <Statistic title="数据日期" value={latest.date} />
             </Col>
             <Col xs={12} sm={8} lg={4}>
-              <Statistic title="报价时间" value={realtimeEnabled ? formatDateTime(realtimeMeta?.timestamp) : '日线'} />
+              <Statistic title="报价时间" value={useRealtimeDetail ? formatDateTime(displayedRealtimeMeta?.timestamp) : '日线'} />
             </Col>
             <Col xs={12} sm={8} lg={4}>
               <Statistic title="历史样本" value={expandedSummary?.history_points ?? expandedDetail.count ?? '-'} />
@@ -600,7 +604,7 @@ const SOXXFearGreed = () => {
             <Card
               size="small"
               className="soxx-fear-components-detail"
-              title={realtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
+              title={displayedRealtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
             >
               <div className="soxx-fear-components-grid">
                 {componentEntries.map(([key, component]) => (
