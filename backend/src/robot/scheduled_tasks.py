@@ -1753,7 +1753,7 @@ class ScheduledTaskManager:
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
                 name="美股ETF贪恐回跑入库",
-                description="计算 SOXX/SPY/QQQ/DIA 七因子及 GLD 黄金六因子（含 GVZ）贪恐指数并保存历史。",
+                description="计算 SOXX/SPY/QQQ/DIA 七因子及 GLD 黄金五因子贪恐指数并保存历史；GVZ 作为展示观察分项。",
                 default_time="06:00",
                 default_enabled=True,
                 sort_order=60,

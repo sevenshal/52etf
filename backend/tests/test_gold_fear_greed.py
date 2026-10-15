@@ -69,7 +69,9 @@ def test_gold_five_factor_history_and_backfill(tmp_path):
         assert len(latest) == 7
         assert set(latest) == {'gold_price_momentum', 'gold_options', 'gold_implied_volatility', 'cot_positioning', 'gold_etf_demand', 'real_yield_dollar', 'szdt_fear_greed'}
         assert latest['gold_implied_volatility']['raw_value'] > 0
-        # 外部来源缺失时分量字段为空，但总分仍是六因子均值（不阻塞历史）
+        # GVZ 作为展示观察值，不参与总分；外部来源缺失时主计算仍不受影响
+        assert latest['gold_implied_volatility']['included_in_total'] is False
+        assert latest['gold_implied_volatility']['used_in_score'] is False
         assert latest['szdt_fear_greed']['score'] is None
         szdt_col = db.execute(__import__('sqlalchemy').text("SELECT szdt_fear_greed_score FROM etf_fear_greed_clone_history WHERE symbol='GLD.US' ORDER BY date DESC LIMIT 1")).scalar_one()
         assert szdt_col is None

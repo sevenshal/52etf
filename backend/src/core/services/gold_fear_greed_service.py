@@ -14,11 +14,17 @@ from .fear_greed_clone_service import FearGreedCloneCalculator
 GOLD_COMPONENTS = {
     "gold_price_momentum": ("黄金价格趋势", "GLD收盘价相对125日均线"),
     "gold_options": ("黄金期权情绪", "GLD五日平均Put/Call成交量比（反向）"),
-    "gold_implied_volatility": ("黄金隐含波动率（GVZ）", "GVZ：GLD期权隐含30日波动率（正向，黄金过热代理）"),
     "cot_positioning": ("COMEX投机持仓", "Managed Money净多头占未平仓量"),
     "gold_etf_demand": ("黄金ETF持仓需求", "实物黄金ETF持仓吨数/份额四个披露期变化"),
     "real_yield_dollar": ("实际利率与美元", "10年实际利率与广义美元20日变化（反向）"),
 }
+
+# GVZ 保留为可观察的评分分量，但阶段顶/底和顶信号回测未显示其改善总分，
+# 暂不纳入 GLD 总分；后续积累更多样本后再重新验证。
+GOLD_DISPLAY_ONLY_COMPONENTS = {
+    "gold_implied_volatility": ("黄金隐含波动率（GVZ）", "GVZ：GLD期权隐含30日波动率（正向，暂未参与总分）"),
+}
+GOLD_Z_SCORE_COMPONENTS = {**GOLD_COMPONENTS, **GOLD_DISPLAY_ONLY_COMPONENTS}
 
 # 直接分量：外部已是 0-100 分数，不做滚动 z-score 归一化；
 # 缺失时自动从等权平均中剔除，不阻塞历史。
@@ -26,11 +32,11 @@ GOLD_DIRECT_COMPONENTS = {
     "szdt_fear_greed": ("外部来源贪恐", "外部来源 GLD 情绪分（-100..100 线性映射为 0-100）"),
 }
 
-GOLD_ALL_COMPONENTS = {**GOLD_COMPONENTS, **GOLD_DIRECT_COMPONENTS}
+GOLD_ALL_COMPONENTS = {**GOLD_Z_SCORE_COMPONENTS, **GOLD_DIRECT_COMPONENTS}
 
 
 class GoldFearGreedCalculator:
-    """GLD专用六因子贪恐，所有低频数据只从其实际可用日起向后填充。"""
+    """GLD专用五因子贪恐，GVZ作为展示观察分量。"""
 
     def calculate_history(
         self,
@@ -85,7 +91,7 @@ class GoldFearGreedCalculator:
         raw = raw.replace([np.inf, -np.inf], np.nan)
 
         scored = pd.DataFrame(index=index)
-        for key in GOLD_COMPONENTS:
+        for key in GOLD_Z_SCORE_COMPONENTS:
             series = raw[key]
             mean = series.rolling(score_window, min_periods=min_periods).mean()
             std = series.rolling(score_window, min_periods=min_periods).std(ddof=0).replace(0, np.nan)
@@ -95,7 +101,8 @@ class GoldFearGreedCalculator:
                 index=index,
             ).clip(0, 100)
         scored["szdt_fear_greed"] = raw["szdt_fear_greed"].clip(0, 100)
-        # 六个 z-score 分量必须齐全；外部来源有数据时按 1/7 等权，缺失时自动剔除
+        # 五个总分 z-score 分量必须齐全；GVZ 仅展示，不参与总分。
+        # 外部来源有数据时按 1/6 等权，缺失时自动剔除。
         z_score_mean = scored[list(GOLD_COMPONENTS)].mean(axis=1, skipna=False)
         scored["score"] = (
             pd.concat([z_score_mean, scored["szdt_fear_greed"]], axis=1)
@@ -111,12 +118,15 @@ class GoldFearGreedCalculator:
             for key, (name, label) in GOLD_ALL_COMPONENTS.items():
                 component_score = score_row[key]
                 raw_value = raw.loc[timestamp, key]
+                included_in_total = key in GOLD_COMPONENTS or key in GOLD_DIRECT_COMPONENTS
                 if pd.isna(component_score):
                     components[key] = {
                         "name": name,
                         "score": None,
                         "rating": None,
                         "raw_value": None,
+                        "used_in_score": False,
+                        "included_in_total": included_in_total,
                         "raw_label": label,
                     }
                     continue
@@ -125,6 +135,8 @@ class GoldFearGreedCalculator:
                     "score": round(float(component_score), 2),
                     "rating": self.rating(float(component_score)),
                     "raw_value": round(float(raw_value), 8),
+                    "used_in_score": included_in_total,
+                    "included_in_total": included_in_total,
                     "raw_label": label,
                 }
             price = prices.loc[timestamp]
@@ -133,7 +145,7 @@ class GoldFearGreedCalculator:
                 "date": timestamp.date().isoformat(),
                 "score": round(float(score_row["score"]), 2),
                 "rating": self.rating(float(score_row["score"])),
-                "method": "gold 6 z-score factors (including GVZ) + external direct component equal-weight",
+                "method": "gold 5 z-score factors + external direct component equal-weight; GVZ display-only",
                 "components": components,
                 "etf_price": {key: self._finite(price.get(key)) for key in ("open", "high", "low", "close", "volume", "turnover")},
             })
@@ -183,7 +195,7 @@ class GoldFearGreedCalculator:
                     szdt_fear_greed_raw=szdt_component.get("raw_value"),
                     components=components,
                     warnings=[
-                        "GLD专用模型：6 个 z-score 分量（含 GVZ 黄金期权隐含波动率）+ 外部来源贪恐直接分量等权，不使用股票ETF七因子。",
+                        "GLD专用模型：5 个 z-score 分量 + 外部来源贪恐直接分量等权；GVZ 黄金期权隐含波动率仅展示，不参与总分。",
                         "外部来源 GLD 贪恐（-100..100 映射为 0-100）为直接分量，缺失时自动从等权平均中剔除。",
                         "COT按周五公布日生效；黄金ETF持仓按来源发布日期向后填充。",
                     ], updated_at=datetime.now(),

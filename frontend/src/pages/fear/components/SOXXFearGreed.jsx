@@ -74,7 +74,7 @@ const COMPONENT_VALUE_META = {
   },
   gold_implied_volatility: {
     label: 'GVZ（点）',
-    description: 'GLD期权隐含的30日波动率；黄金阶段顶时通常更高，故正向计入总分',
+    description: 'GLD期权隐含的30日波动率；暂未参与总分',
   },
   szdt_fear_greed: {
     label: '外部情绪分',
