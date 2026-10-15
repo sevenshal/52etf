@@ -599,11 +599,11 @@ ETF_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "szdt_fear_greed": ComponentSpec(
         key="szdt_fear_greed",
-        name="SZDT Emotion (守猪逮兔贪恐)",
-        raw_label="(守猪逮兔 emotion score + 100) / 2",
+        name="External-source Fear & Greed",
+        raw_label="external-source emotion score mapped to 0-100",
         source="szdt.tech /invest/stock_emotion/history",
         proxy_note=(
-            "守猪逮兔's per-ETF emotion score is published on a -100..100 scale; "
+            "The external per-ETF emotion score is published on a -100..100 scale; "
             "it is linearly mapped to 0-100 and used directly without "
             "re-normalization."
         ),

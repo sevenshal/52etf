@@ -55,17 +55,21 @@ def test_gold_five_factor_history_and_backfill(tmp_path):
         GoldFearGreedCalculator._fetch_szdt_emotion_series = staticmethod(
             lambda start, end: pd.Series(dtype=float)
         )
+        GoldFearGreedCalculator._fetch_gvz_series = staticmethod(
+            lambda start, end: pd.Series(20 + np.sin(np.arange(len(days)) / 15), index=days)
+        )
         calc = GoldFearGreedCalculator()
         result = calc.backfill_to_db(start_date=days[0].date(), end_date=days[-1].date(), score_window=60, min_periods=40, history_days=620)
         assert result['saved'] > 300
-        assert result['component_count'] == 6
+        assert result['component_count'] == 7
         db = Session()
         latest = db.execute(__import__('sqlalchemy').text("SELECT components FROM etf_fear_greed_clone_history WHERE symbol='GLD.US' ORDER BY date DESC LIMIT 1")).scalar_one()
         if isinstance(latest, str):
             latest = __import__('json').loads(latest)
-        assert len(latest) == 6
-        assert set(latest) == {'gold_price_momentum', 'gold_options', 'cot_positioning', 'gold_etf_demand', 'real_yield_dollar', 'szdt_fear_greed'}
-        # 守猪逮兔缺失时分量字段为空，但总分仍是五因子均值（不阻塞历史）
+        assert len(latest) == 7
+        assert set(latest) == {'gold_price_momentum', 'gold_options', 'gold_implied_volatility', 'cot_positioning', 'gold_etf_demand', 'real_yield_dollar', 'szdt_fear_greed'}
+        assert latest['gold_implied_volatility']['raw_value'] > 0
+        # 外部来源缺失时分量字段为空，但总分仍是六因子均值（不阻塞历史）
         assert latest['szdt_fear_greed']['score'] is None
         szdt_col = db.execute(__import__('sqlalchemy').text("SELECT szdt_fear_greed_score FROM etf_fear_greed_clone_history WHERE symbol='GLD.US' ORDER BY date DESC LIMIT 1")).scalar_one()
         assert szdt_col is None

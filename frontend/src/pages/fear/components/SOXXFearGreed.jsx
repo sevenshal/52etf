@@ -48,10 +48,11 @@ const COMPONENT_LABELS = {
   put_call_options: '期权 Put/Call',
   market_volatility: '市场波动率',
   implied_volatility: '期权隐含波动率（IV）',
+  gold_implied_volatility: '黄金隐含波动率（GVZ）',
   safe_haven_demand: '避险需求',
   junk_bond_demand: '垃圾债需求',
   cnn_fear_greed: 'CNN 贪恐',
-  szdt_fear_greed: '守猪逮兔贪恐',
+  szdt_fear_greed: '外部来源贪恐',
 };
 
 const COMPONENT_VALUE_META = {
@@ -70,6 +71,14 @@ const COMPONENT_VALUE_META = {
     // 后端为使“IV 越高 = 越恐慌”而以 -IV 参与标准化；展示时还原为正数百分比。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) * 100 : value),
     description: '期权隐含的未来波动率代理；IV 越高，得分越低',
+  },
+  gold_implied_volatility: {
+    label: 'GVZ（点）',
+    description: 'GLD期权隐含的30日波动率；黄金阶段顶时通常更高，故正向计入总分',
+  },
+  szdt_fear_greed: {
+    label: '外部情绪分',
+    description: '外部来源的标的情绪评分，已映射为 0–100 分',
   },
 };
 
@@ -520,8 +529,12 @@ const SOXXFearGreed = () => {
     || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
-  // 仅在当日日线尚未入库时显示盘中分量；收盘回填后统一展示最新日线。
-  const componentValues = displayedRealtime?.components || latest?.components || {};
+  // 日线作为完整基底；盘中快照只覆盖自身确实返回的字段，避免旧快照缺少新分量
+  // （例如 A 股 IV）时把最新日线分量抹掉。
+  const componentValues = {
+    ...(latest?.components || {}),
+    ...(displayedRealtime?.components || {}),
+  };
   const componentEntries = Object.entries(componentValues);
 
   const detailRef = useRef(null);

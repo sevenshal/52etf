@@ -389,7 +389,7 @@ class ETFFearGreedCloneHistory(Base):
     put_call_options_raw = Column(Float)
     market_volatility_score = Column(Float)
     market_volatility_raw = Column(Float)
-    # 仅展示的期权隐含波动率代理：暂不纳入恐贪总分。
+    # 期权隐含波动率代理；不同市场模型可将其纳入恐贪总分。
     implied_volatility_score = Column(Float)
     implied_volatility_raw = Column(Float)
     safe_haven_demand_score = Column(Float)
