@@ -47,6 +47,7 @@ const COMPONENT_LABELS = {
   stock_price_breadth: '成分股广度',
   put_call_options: '期权 Put/Call',
   market_volatility: '市场波动率',
+  implied_volatility: '期权隐含波动率（IV）',
   safe_haven_demand: '避险需求',
   junk_bond_demand: '垃圾债需求',
   cnn_fear_greed: 'CNN 贪恐',
@@ -63,6 +64,12 @@ const COMPONENT_VALUE_META = {
   market_volatility: {
     label: '相对波动变化',
     description: '正值表示20日实现波动率低于50日均值；波动率升高会令得分下降',
+  },
+  implied_volatility: {
+    label: '年化 IV（%）',
+    // 后端为使“IV 越高 = 越恐慌”而以 -IV 参与标准化；展示时还原为正数百分比。
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) * 100 : value),
+    description: '期权隐含的未来波动率代理；暂未参与总分计算',
   },
 };
 
@@ -609,6 +616,9 @@ const SOXXFearGreed = () => {
                       </span>
                       <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
                     </div>
+                    {component.included_in_total === false && (
+                      <Tag color="default">暂未参与总分计算</Tag>
+                    )}
                     {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
                     {(COMPONENT_VALUE_META[key]?.description || component.raw_label) && (
                       <Text type="secondary">

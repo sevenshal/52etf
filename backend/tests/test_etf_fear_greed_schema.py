@@ -11,6 +11,8 @@ NEW_COLUMNS = (
     "cnn_fear_greed_raw",
     "szdt_fear_greed_score",
     "szdt_fear_greed_raw",
+    "implied_volatility_score",
+    "implied_volatility_raw",
 )
 
 

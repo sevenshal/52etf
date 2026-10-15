@@ -389,6 +389,9 @@ class ETFFearGreedCloneHistory(Base):
     put_call_options_raw = Column(Float)
     market_volatility_score = Column(Float)
     market_volatility_raw = Column(Float)
+    # 仅展示的期权隐含波动率代理：暂不纳入恐贪总分。
+    implied_volatility_score = Column(Float)
+    implied_volatility_raw = Column(Float)
     safe_haven_demand_score = Column(Float)
     safe_haven_demand_raw = Column(Float)
     junk_bond_demand_score = Column(Float)
@@ -2253,6 +2256,8 @@ def ensure_table_columns():
             "cnn_fear_greed_raw": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN cnn_fear_greed_raw FLOAT",
             "szdt_fear_greed_score": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN szdt_fear_greed_score FLOAT",
             "szdt_fear_greed_raw": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN szdt_fear_greed_raw FLOAT",
+            "implied_volatility_score": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN implied_volatility_score FLOAT",
+            "implied_volatility_raw": "ALTER TABLE etf_fear_greed_clone_history ADD COLUMN implied_volatility_raw FLOAT",
         },
         "szdt_trade_stocks": {
             # 存量已配置标的保持原有自动交易行为。

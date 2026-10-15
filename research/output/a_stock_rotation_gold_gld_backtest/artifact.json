@@ -1,0 +1,39 @@
+{
+  "window":{
+    "start":"2023-03-22",
+    "train_end":"2025-03-31",
+    "test_start":"2025-04-01",
+    "end":"2026-09-30"
+  },
+  "gold":{
+    "trading_symbol":"518880.SH",
+    "fear_source":"GLD.US",
+    "volume_source":"GLD.US",
+    "valuation_gate":"disabled"
+  },
+  "search":{
+    "gold_buy_threshold_lte":[
+      15,
+      20,
+      25,
+      30,
+      35,
+      40,
+      45
+    ],
+    "gold_volume_ratio_threshold_gte":[
+      1.0,
+      1.2,
+      1.4,
+      1.6,
+      1.8
+    ],
+    "selection":"highest train annualized return; test period not used for selection"
+  },
+  "baseline_assertion":{
+    "total_return":375.752895469,
+    "annualized_return":58.1915715712,
+    "max_drawdown":17.389131078,
+    "sharpe_ratio":2.1301239006
+  }
+}

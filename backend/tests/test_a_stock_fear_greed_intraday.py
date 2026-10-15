@@ -92,6 +92,7 @@ def _build_synthetic_context(calculator, n_days: int = 600):
     bond = pd.Series(np.linspace(100, 108, n_days), index=days)
     option_pcr = pd.Series(np.random.uniform(0.8, 1.4, n_days), index=days)
     credit_spread = pd.Series(np.random.uniform(0.5, 1.5, n_days), index=days)
+    implied_volatility = pd.Series(np.random.uniform(0.2, 0.5, n_days), index=days)
 
     return {
         "today": today,
@@ -104,6 +105,7 @@ def _build_synthetic_context(calculator, n_days: int = 600):
         "bond": bond,
         "option_pcr": option_pcr,
         "credit_spread": credit_spread,
+        "implied_volatility": implied_volatility,
     }
 
 
@@ -118,11 +120,13 @@ def test_calculate_intraday_uses_all_components():
          patch.object(calculator, "_realtime_quotes", return_value=ctx["quotes"]), \
          patch.object(calculator, "_load_index_close", return_value=ctx["bond"]), \
          patch.object(calculator, "_load_option_volume_pcr", return_value=ctx["option_pcr"]), \
+         patch.object(calculator, "_load_option_implied_volatility", return_value=ctx["implied_volatility"]), \
          patch.object(calculator, "_load_credit_spread", return_value=ctx["credit_spread"]):
         result = calculator.calculate_intraday(now=pd.Timestamp(ctx["today"]))
 
     assert result["component_count"] == 7
     assert len(result["components_used"]) == 7
+    assert result["components"]["implied_volatility"]["included_in_total"] is False
     assert 0.0 <= result["score"] <= 100.0
     assert result["quote_source"] == "rt_idx_k"
     assert result["index_level"] == ctx["intraday"]["level"]

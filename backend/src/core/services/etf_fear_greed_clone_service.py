@@ -2726,6 +2726,7 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
                 "stock_price_breadth": row.stock_price_breadth_score,
                 "put_call_options": row.put_call_options_score,
                 "market_volatility": row.market_volatility_score,
+                "implied_volatility": row.implied_volatility_score,
                 "safe_haven_demand": row.safe_haven_demand_score,
                 "junk_bond_demand": row.junk_bond_demand_score,
                 "cnn_fear_greed": row.cnn_fear_greed_score,

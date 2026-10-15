@@ -53,6 +53,23 @@ OPTION_UNDERLYING_TRACKED_INDEX: Dict[str, str] = {
     "OP159901.SZ": "399330.SZ",   # 深证100ETF期权
 }
 
+# 计算期权 IV 时，每个期权标的必须与其自身的 ETF/指数现货配对，不能把不同 ETF
+# 的执行价与某一个统一现货混算。元组第一个元素是 DuckDB 日线表类型。
+OPTION_UNDERLYING_SPOT: Dict[str, Tuple[str, str]] = {
+    "OP000016.SH": ("index", "000016.SH"),
+    "OP510050.SH": ("fund", "510050.SH"),
+    "OP000300.SH": ("index", "000300.SH"),
+    "OP510300.SH": ("fund", "510300.SH"),
+    "OP159919.SZ": ("fund", "159919.SZ"),
+    "OP000852.SH": ("index", "000852.SH"),
+    "OP510500.SH": ("fund", "510500.SH"),
+    "OP159922.SZ": ("fund", "159922.SZ"),
+    "OP588000.SH": ("fund", "588000.SH"),
+    "OP588080.SH": ("fund", "588080.SH"),
+    "OP159915.SZ": ("fund", "159915.SZ"),
+    "OP159901.SZ": ("fund", "159901.SZ"),
+}
+
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
 A_STOCK_INNO100_INDEX_CODE = A_STOCK_INNO100_FEAR_SYMBOL
 A_STOCK_INNO100_SAFE_HAVEN_INDEX = "H11006.CSI"
@@ -161,6 +178,26 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
 }
 
+# 展示实验分量：保留独立的滚动 z-score，供页面和研究使用，但绝不进入总分。
+A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
+    "implied_volatility": ComponentSpec(
+        key="implied_volatility",
+        name="A-share Option Implied Volatility",
+        raw_label="-annualized near-30-day at-the-money option IV proxy",
+        source="A-share option settlement prices + underlying ETF/index daily closes",
+        proxy_note=(
+            "Direct option IV is used when the tracked index has its own option chain; "
+            "otherwise proxy implied variances are blended by constituent-overlap weights. "
+            "Display-only experimental component; excluded from the Fear & Greed total."
+        ),
+    ),
+}
+
+A_STOCK_ALL_COMPONENTS: Dict[str, ComponentSpec] = {
+    **A_STOCK_COMPONENTS,
+    **A_STOCK_DISPLAY_ONLY_COMPONENTS,
+}
+
 
 class AStockInnovation100FearGreedCloneCalculator:
     """A-share index Fear & Greed clone using local A-share DuckDB data."""
@@ -181,6 +218,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             option_underlyings = A_STOCK_INNO100_OPTION_UNDERLYINGS
         self.option_underlyings = tuple(option_underlyings)
         self.custom_index_source = CUSTOM_INDEX_SOURCES.get(self.index_code)
+        self._implied_volatility_mode = "unavailable"
 
     def calculate_history(
         self,
@@ -356,6 +394,8 @@ class AStockInnovation100FearGreedCloneCalculator:
                         put_call_options_raw=components["put_call_options"]["raw_value"],
                         market_volatility_score=components["market_volatility"]["score"],
                         market_volatility_raw=components["market_volatility"]["raw_value"],
+                        implied_volatility_score=components["implied_volatility"]["score"],
+                        implied_volatility_raw=components["implied_volatility"]["raw_value"],
                         safe_haven_demand_score=components["safe_haven_demand"]["score"],
                         safe_haven_demand_raw=components["safe_haven_demand"]["raw_value"],
                         junk_bond_demand_score=components["junk_bond_demand"]["score"],
@@ -956,6 +996,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         option_pcr = self._load_option_volume_pcr(
             start_date, end_date, holdings_by_date, holdings_as_of_by_date,
         ).reindex(index).ffill(limit=3)
+        implied_volatility = self._load_option_implied_volatility(
+            start_date, end_date, holdings_by_date, holdings_as_of_by_date,
+        ).reindex(index).ffill(limit=3)
         credit_spread = self._load_credit_spread(start_date, end_date).reindex(index).ffill(limit=3)
 
         df = pd.DataFrame(index=index)
@@ -964,6 +1007,8 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["stock_price_breadth"] = self._weighted_advancing_amount_ratio(market_frames, holdings_by_date, index)
         df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
         df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
+        # 负号让 IV 越高（预期风险越高）时分数越低；仅作展示实验分量，不进总分。
+        df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
         df["junk_bond_demand"] = -credit_spread
         df["etf_open"] = pd.to_numeric(levels["open"], errors="coerce").reindex(index).ffill() if "open" in levels.columns else level
@@ -1294,6 +1339,227 @@ class AStockInnovation100FearGreedCloneCalculator:
         blended = (pcr.fillna(0.0) * aligned).sum(axis=1) / total.replace(0, np.nan)
         return blended.dropna().sort_index()
 
+    @staticmethod
+    def _normal_cdf(value: float) -> float:
+        return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+    @classmethod
+    def _black_scholes_implied_volatility(
+        cls,
+        spot: float,
+        strike: float,
+        years_to_expiry: float,
+        option_price: float,
+        is_call: bool,
+        risk_free_rate: float = 0.02,
+    ) -> Optional[float]:
+        """从日结算价反推 Black-Scholes IV；无 bid/ask 时仅作为日频代理。"""
+        if min(spot, strike, years_to_expiry, option_price) <= 0:
+            return None
+
+        def price(volatility: float) -> float:
+            sqrt_time = math.sqrt(years_to_expiry)
+            d1 = (
+                math.log(spot / strike)
+                + (risk_free_rate + 0.5 * volatility * volatility) * years_to_expiry
+            ) / (volatility * sqrt_time)
+            d2 = d1 - volatility * sqrt_time
+            discount = math.exp(-risk_free_rate * years_to_expiry)
+            if is_call:
+                return spot * cls._normal_cdf(d1) - strike * discount * cls._normal_cdf(d2)
+            return strike * discount * cls._normal_cdf(-d2) - spot * cls._normal_cdf(-d1)
+
+        lower, upper = 0.0001, 5.0
+        if not price(lower) <= option_price <= price(upper):
+            return None
+        for _ in range(60):
+            middle = (lower + upper) / 2.0
+            if price(middle) < option_price:
+                lower = middle
+            else:
+                upper = middle
+        return (lower + upper) / 2.0
+
+    def _load_option_implied_volatility_by_tracked_index(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        """按期权所跟踪指数计算近 30 日、近平值的结算价 IV 代理。
+
+        同一标的的不同期权链先分别估算，再以持仓量加权隐含方差合并，避免期权
+        合约数量多的链直接主导结果。此处不是官方 VIX：库中没有 bid/ask，故不能
+        做完整 OTM-strip 方差复制。
+        """
+        option_codes = list(OPTION_UNDERLYING_SPOT)
+        placeholders = ", ".join(f":iv_opt_{index}" for index in range(len(option_codes)))
+        params: Dict[str, Any] = {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            **{f"iv_opt_{index}": code for index, code in enumerate(option_codes)},
+        }
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(
+                text(
+                    f"""
+                    SELECT d.trade_date, b.opt_code, b.call_put, b.exercise_price,
+                           b.maturity_date, d.settle, d.oi
+                    FROM a_stock_option_daily d
+                    JOIN a_stock_option_basic b ON b.ts_code = d.ts_code
+                    WHERE d.trade_date >= :start_date
+                      AND d.trade_date <= :end_date
+                      AND b.opt_code IN ({placeholders})
+                      AND d.settle > 0
+                      AND COALESCE(d.vol, 0) > 0
+                    """
+                ),
+                params,
+            ).fetchall()
+            if not rows:
+                return pd.DataFrame()
+
+            option_frame = pd.DataFrame(
+                [tuple(row) for row in rows],
+                columns=["date", "opt_code", "call_put", "strike", "maturity_date", "settle", "open_interest"],
+            )
+            option_frame["date"] = pd.to_datetime(option_frame["date"])
+            option_frame["maturity_date"] = pd.to_datetime(option_frame["maturity_date"])
+            option_frame["spot_key"] = option_frame["opt_code"].map(
+                lambda code: ":".join(OPTION_UNDERLYING_SPOT[str(code)])
+            )
+
+            spot_frames: List[pd.DataFrame] = []
+            for table_name, source_name in (("a_stock_fund_daily", "fund"), ("a_stock_index_daily", "index")):
+                symbols = sorted({
+                    symbol for source, symbol in OPTION_UNDERLYING_SPOT.values()
+                    if source == source_name
+                })
+                if not symbols:
+                    continue
+                symbol_placeholders = ", ".join(
+                    f":iv_spot_{source_name}_{index}" for index in range(len(symbols))
+                )
+                spot_params = {
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    **{f"iv_spot_{source_name}_{index}": symbol for index, symbol in enumerate(symbols)},
+                }
+                spot_rows = analytics_db.execute(
+                    text(
+                        f"""
+                        SELECT trade_date, ts_code, close
+                        FROM {table_name}
+                        WHERE trade_date >= :start_date
+                          AND trade_date <= :end_date
+                          AND ts_code IN ({symbol_placeholders})
+                          AND close > 0
+                        """
+                    ),
+                    spot_params,
+                ).fetchall()
+                if spot_rows:
+                    frame = pd.DataFrame([tuple(row) for row in spot_rows], columns=["date", "symbol", "spot"])
+                    frame["date"] = pd.to_datetime(frame["date"])
+                    frame["spot_key"] = f"{source_name}:" + frame["symbol"].astype(str)
+                    spot_frames.append(frame[["date", "spot_key", "spot"]])
+        finally:
+            AnalyticsSession.remove()
+
+        if not spot_frames:
+            return pd.DataFrame()
+        option_frame = option_frame.merge(pd.concat(spot_frames, ignore_index=True), on=["date", "spot_key"], how="inner")
+        option_frame["days_to_expiry"] = (option_frame["maturity_date"] - option_frame["date"]).dt.days
+        option_frame = option_frame[option_frame["days_to_expiry"].between(20, 45)].copy()
+        if option_frame.empty:
+            return pd.DataFrame()
+        option_frame["expiry_distance"] = (option_frame["days_to_expiry"] - 30).abs()
+        option_frame = option_frame[
+            option_frame["expiry_distance"] == option_frame.groupby(["date", "opt_code"])["expiry_distance"].transform("min")
+        ].copy()
+        option_frame["log_moneyness"] = np.log(
+            pd.to_numeric(option_frame["strike"], errors="coerce")
+            / pd.to_numeric(option_frame["spot"], errors="coerce")
+        )
+        option_frame = option_frame[option_frame["log_moneyness"].abs() <= 0.12].copy()
+
+        def calculate_iv(row: pd.Series) -> Optional[float]:
+            return self._black_scholes_implied_volatility(
+                float(row["spot"]), float(row["strike"]), float(row["days_to_expiry"]) / 365.0,
+                float(row["settle"]), str(row["call_put"]).upper() == "C",
+            )
+
+        option_frame["iv"] = option_frame.apply(calculate_iv, axis=1)
+        option_frame = option_frame.dropna(subset=["iv"])
+        if option_frame.empty:
+            return pd.DataFrame()
+        by_option = option_frame.groupby(["date", "opt_code"], as_index=False).agg(
+            implied_variance=("iv", lambda values: float(np.nanmedian(np.square(values)))),
+            open_interest=("open_interest", "sum"),
+            contract_count=("iv", "count"),
+        )
+        by_option = by_option[by_option["contract_count"] >= 4].copy()
+        by_option["tracked"] = by_option["opt_code"].map(OPTION_UNDERLYING_TRACKED_INDEX)
+        by_option = by_option.dropna(subset=["tracked"])
+        if by_option.empty:
+            return pd.DataFrame()
+        by_option["weight"] = pd.to_numeric(by_option["open_interest"], errors="coerce").clip(lower=0).fillna(0.0)
+        by_option["weight"] = by_option["weight"].where(by_option["weight"] > 0, 1.0)
+        by_option["weighted_variance"] = by_option["implied_variance"] * by_option["weight"]
+        by_tracked = by_option.groupby(["date", "tracked"], as_index=False).agg(
+            weighted_variance=("weighted_variance", "sum"),
+            total_weight=("weight", "sum"),
+        )
+        by_tracked["implied_variance"] = (
+            by_tracked["weighted_variance"] / by_tracked["total_weight"].replace(0, np.nan)
+        )
+        by_tracked["iv"] = np.sqrt(by_tracked["implied_variance"])
+        return by_tracked.pivot(index="date", columns="tracked", values="iv").sort_index()
+
+    def _load_option_implied_volatility(
+        self,
+        start_date: date,
+        end_date: date,
+        holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]],
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]],
+    ) -> pd.Series:
+        iv_by_tracked = self._load_option_implied_volatility_by_tracked_index(start_date, end_date)
+        if iv_by_tracked.empty:
+            self._implied_volatility_mode = "unavailable"
+            return pd.Series(dtype=float)
+        # 目标指数自身有期权时只使用直接链；其它指数才使用成分覆盖代理。
+        if self.target_symbol in iv_by_tracked.columns:
+            self._implied_volatility_mode = "direct"
+            return iv_by_tracked[self.target_symbol].dropna().sort_index()
+
+        candidate_codes = (
+            list(OPTION_UNDERLYING_TRACKED_INDEX)
+            if ALL_A_STOCK_OPTIONS in self.option_underlyings
+            else list(self.option_underlyings)
+        )
+        candidates = [
+            OPTION_UNDERLYING_TRACKED_INDEX[code]
+            for code in candidate_codes
+            if code in OPTION_UNDERLYING_TRACKED_INDEX and OPTION_UNDERLYING_TRACKED_INDEX[code] in iv_by_tracked.columns
+        ]
+        candidates = list(dict.fromkeys(candidates))
+        if not candidates:
+            self._implied_volatility_mode = "unavailable"
+            return pd.Series(dtype=float)
+        weights = self._option_proxy_weights(
+            candidates, holdings_by_date, holdings_as_of_by_date, start_date, end_date,
+        )
+        if weights is None or weights.empty:
+            self._implied_volatility_mode = "unavailable"
+            return pd.Series(dtype=float)
+        iv = iv_by_tracked.reindex(columns=candidates)
+        aligned = weights.reindex(iv.index, method="ffill").fillna(0.0)
+        aligned = aligned.where(iv.notna(), 0.0)
+        total_weight = aligned.sum(axis=1)
+        blended_variance = (np.square(iv).fillna(0.0) * aligned).sum(axis=1) / total_weight.replace(0, np.nan)
+        self._implied_volatility_mode = "proxy"
+        return np.sqrt(blended_variance).dropna().sort_index()
+
     def _load_credit_spread(self, start_date: date, end_date: date, term: float = 3.0) -> pd.Series:
         analytics_db = AnalyticsSession()
         try:
@@ -1405,7 +1671,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         min_periods: int,
     ) -> pd.DataFrame:
         result = raw.copy()
-        for key in A_STOCK_COMPONENTS:
+        for key in A_STOCK_ALL_COMPONENTS:
             series = raw[key]
             mean = series.rolling(score_window, min_periods=min_periods).mean()
             std = series.rolling(score_window, min_periods=min_periods).std(ddof=0)
@@ -1420,20 +1686,24 @@ class AStockInnovation100FearGreedCloneCalculator:
         latest_date: pd.Timestamp,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
-        for key, spec in A_STOCK_COMPONENTS.items():
+        for key, spec in A_STOCK_ALL_COMPONENTS.items():
             component_score = self._finite_float_or_none(scores.loc[latest_date, f"{key}_score"])
             raw_value = self._finite_float_or_none(raw.loc[latest_date, key])
-            used_in_score = component_score is not None
+            included_in_total = key in A_STOCK_COMPONENTS
+            used_in_score = component_score is not None and included_in_total
             payload[key] = {
                 "name": spec.name,
                 "score": round(component_score, 2) if component_score is not None else None,
                 "rating": FearGreedCloneCalculator.rating(component_score) if component_score is not None else None,
                 "raw_value": round(raw_value, 6) if raw_value is not None else None,
                 "used_in_score": used_in_score,
+                "included_in_total": included_in_total,
                 "raw_label": spec.raw_label,
                 "source": spec.source,
                 "proxy_note": spec.proxy_note,
             }
+            if key == "implied_volatility":
+                payload[key]["calculation_mode"] = self._implied_volatility_mode
         return payload
 
     @staticmethod
@@ -1474,6 +1744,7 @@ class AStockInnovation100FearGreedCloneCalculator:
             f"This is an independent {self.label}-specific clone, not CNN's undisclosed calculation.",
             f"Scores use rolling z-score/CDF and equal-weighted available components; at least {A_STOCK_MIN_COMPONENT_COUNT} components are required.",
             option_warning,
+            "The implied-volatility component is an experimental display-only proxy based on option settlement prices; it is not included in the Fear & Greed total.",
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

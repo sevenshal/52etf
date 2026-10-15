@@ -1,0 +1,42 @@
+{
+  "window": {
+    "start": "2025-02-07",
+    "train_end": "2025-09-30",
+    "test_start": "2025-10-01",
+    "end": "2026-09-30"
+  },
+  "score_transform": "engine_score = (szdt_raw_score + 100) / 2",
+  "mappings": {
+    "510880.SH": "SH.510880",
+    "512480.SH": "SH.512480",
+    "159509.SZ": "SZ.159509",
+    "516510.SH": {
+      "software_proxy": "SH.515230",
+      "ai_proxy": "SZ.159819"
+    }
+  },
+  "search": {
+    "buy_grid_native_szdt": [
+      -90,
+      -60,
+      -30,
+      0
+    ],
+    "greed_grid_native_szdt": [
+      40,
+      60,
+      80
+    ],
+    "swap_grid_native_szdt": [
+      0,
+      30,
+      60
+    ],
+    "selection": "choose rank 1 by train annualized return (at least two buys); test period never participates in selection"
+  },
+  "notes": [
+    "No forward filling of SZDT scores.",
+    "Valuation gates and all price/volume/execution assumptions are retained from the original strategy.",
+    "516510.SH has no exact SZDT ETF history in the supplied list; software and AI ETFs are explicitly proxy tests."
+  ]
+}
