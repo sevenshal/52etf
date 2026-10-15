@@ -126,6 +126,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
 # 手动执行弹窗里可以临时限定标的的任务。这里传的 symbols 只对这一次执行生效，
 # 不会写进任务配置，避免一次性回填之后每天的定时执行也被缩到这几个指数。
 SYMBOLS_RUN_TASK_KEYS = frozenset({
+    "soxx_fear_greed_backfill",
     "a_stock_etf_fear_greed_backfill",
     "a_stock_index_valuation_refresh",
 })
@@ -445,6 +446,7 @@ def _run_etf_fear_greed_backfill(
     min_periods: int = ETF_FEAR_GREED_DEFAULT_MIN_PERIODS,
     max_holdings: int = ETF_FEAR_GREED_DEFAULT_MAX_HOLDINGS,
     use_historical_holdings: bool = True,
+    symbols: Optional[Any] = None,
 ):
     from ..core.services.etf_fear_greed_clone_service import (
         DEFAULT_ETF_FEAR_GREED_SYMBOLS,
@@ -461,8 +463,19 @@ def _run_etf_fear_greed_backfill(
         output_start_date = end_value - timedelta(days=recent_days)
 
     calculation_start_date = output_start_date - timedelta(days=history_days)
+    requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
+    available_symbols = {symbol.upper() for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS} | {"GLD.US"}
+    unknown_symbols = sorted(requested_symbols - available_symbols)
+    if unknown_symbols:
+        raise ValueError(f"未知美股ETF贪恐标的: {','.join(unknown_symbols)}")
+    etf_symbols = [
+        symbol for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS
+        if not requested_symbols or symbol.upper() in requested_symbols
+    ]
+    include_gld = not requested_symbols or "GLD.US" in requested_symbols
+
     calculator = ETFFearGreedCloneCalculator()
-    for symbol in DEFAULT_ETF_FEAR_GREED_SYMBOLS:
+    for symbol in etf_symbols:
         result = calculator.backfill_to_db(
             symbol=symbol,
             start_date=calculation_start_date,
@@ -481,8 +494,28 @@ def _run_etf_fear_greed_backfill(
             result.get("start_date"),
             result.get("end_date"),
         )
+
+    if include_gld:
+        # GLD 使用独立的黄金模型（含 GVZ），不是通用股票 ETF 七因子模型。
+        # 把它放到同一回跑任务，避免历史补数还要触发全市场的美股基础数据同步。
+        from ..core.services.gold_fear_greed_service import GoldFearGreedCalculator
+
+        gold_result = GoldFearGreedCalculator().backfill_to_db(
+            start_date=calculation_start_date,
+            end_date=end_value,
+            output_start_date=output_start_date,
+            history_days=history_days,
+            score_window=score_window,
+            min_periods=min_periods,
+        )
+        logger.info(
+            "GLD fear greed backfill saved %s rows, range=%s~%s",
+            gold_result.get("saved"),
+            gold_result.get("start_date"),
+            gold_result.get("end_date"),
+        )
     try:
-        notified = notify_latest_turn_signals(DEFAULT_ETF_FEAR_GREED_SYMBOLS)
+        notified = notify_latest_turn_signals(etf_symbols)
         if notified:
             logger.info("ETF fear greed turn-signal email sent for %s signals", notified)
     except Exception as exc:
@@ -1720,7 +1753,7 @@ class ScheduledTaskManager:
             "soxx_fear_greed_backfill": TaskDefinition(
                 task_key="soxx_fear_greed_backfill",
                 name="美股ETF贪恐回跑入库",
-                description="计算 SOXX/SPY/QQQ/DIA 七因子贪恐指数并保存历史；GLD黄金五因子随美股基础数据同步任务计算。",
+                description="计算 SOXX/SPY/QQQ/DIA 七因子及 GLD 黄金六因子（含 GVZ）贪恐指数并保存历史。",
                 default_time="06:00",
                 default_enabled=True,
                 sort_order=60,
@@ -1756,6 +1789,13 @@ class ScheduledTaskManager:
                         step=1,
                         suffix="天",
                         description="未填写输出开始日期时，回写最近多少个自然日。",
+                    ),
+                    TaskParameterDefinition(
+                        key="symbols",
+                        label="标的代码",
+                        value_type="string",
+                        default="",
+                        description="可选，逗号/空格分隔，例如 GLD.US；为空时回跑全部美股ETF贪恐标的。",
                     ),
                 ),
             ),

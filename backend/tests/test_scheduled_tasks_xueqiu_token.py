@@ -202,6 +202,7 @@ class XueqiuTokenMonitorTest(TestCase):
                 "start_date",
                 "end_date",
                 "recent_days",
+                "symbols",
             },
             "a_stock_base_data_sync": {"start_date", "end_date", "incremental"},
             "chan_minute_sync": set(),
