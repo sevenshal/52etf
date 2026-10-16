@@ -479,8 +479,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub3_symbol: values.sub3_symbol || undefined,
           sub3_fear_source: values.sub3_fear_source || 'a_stock_930851_csi',
           sub3_volume_signal_symbol: values.sub3_volume_signal_symbol || undefined,
-          sub3_buy_threshold: values.sub3_buy_threshold ?? 20,
-          sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
+          sub3_buy_threshold_values: String(values.sub3_buy_threshold ?? 20),
+          sub3_volume_ratio_threshold_values: String(values.sub3_volume_ratio_threshold ?? 1.3),
           sell_ma5_confirm: values.sell_ma5_confirm || 'off',
           // 估值点位闸门按实盘配置原样传过去（留空=关闭 → none）
           valuation_window_values: [values.valuation_window ?? 252],

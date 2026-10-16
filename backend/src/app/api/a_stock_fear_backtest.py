@@ -19,9 +19,22 @@ from .a_stock_fear_volume_config import (
 
 router = APIRouter(prefix="/api/a-stock-fear-backtest", tags=["A-stock Fear Volume Backtest"])
 
+# 仅回测可选：513120 跟踪港股创新药，交易所在 A 股、历史价格在 A 股基金日线中。
+# 不复用实盘策略的交易池，避免本次研究 UI 扩大线上自动交易标的范围。
+A_STOCK_BACKTEST_EXTRA_TARGET_OPTIONS = (
+    {"label": "港股创新药ETF 513120.SH", "value": "513120.SH", "market": "a_stock"},
+)
+A_STOCK_BACKTEST_TARGET_OPTIONS = [
+    *A_STOCK_TARGET_OPTIONS,
+    *[
+        item for item in A_STOCK_BACKTEST_EXTRA_TARGET_OPTIONS
+        if item["value"] not in {option["value"] for option in A_STOCK_TARGET_OPTIONS}
+    ],
+]
+
 
 def _validate_a_stock_symbol(symbol: str) -> None:
-    valid_symbols = {item["value"] for item in A_STOCK_TARGET_OPTIONS}
+    valid_symbols = {item["value"] for item in A_STOCK_BACKTEST_TARGET_OPTIONS}
     if str(symbol or "").strip().upper() not in valid_symbols:
         raise ValueError("A 股情绪量能回测仅支持 A 股 ETF 标的")
 
@@ -29,8 +42,8 @@ def _validate_a_stock_symbol(symbol: str) -> None:
 @router.get("/options")
 def get_a_stock_fear_backtest_options(account_id: str = Depends(valid_admin_account)):
     return {
-        "symbol_options": A_STOCK_TARGET_OPTIONS,
-        "volume_signal_symbol_options": A_STOCK_TARGET_OPTIONS,
+        "symbol_options": A_STOCK_BACKTEST_TARGET_OPTIONS,
+        "volume_signal_symbol_options": A_STOCK_BACKTEST_TARGET_OPTIONS,
         "fear_source_options": [
             {"label": config["label"], "value": key, "symbol": config.get("symbol"), "market": config.get("market")}
             for key, config in FEAR_SOURCE_OPTIONS.items()

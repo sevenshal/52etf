@@ -16,6 +16,7 @@ from ...robot.a_stock_base_data_config import (
     A_STOCK_ETF_DAILY_NAMES,
     A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS,
 )
+from ...robot.hk_stock_base_data_config import HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL
 
 
 VALUATION_POSITION_WINDOWS = (
@@ -31,6 +32,16 @@ SELL_MA5_CONFIRM_MODES = {
     SELL_MA5_CONFIRM_NON_MAIN,
 }
 A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ")
+# 港股主题指数的自算贪恐已由港股任务计算入库；这里只把既有历史接入回测信号，
+# 不新增计算口径，也不加入实盘 A 股策略的 ``A_STOCK_FEAR_SOURCE_OPTIONS``。
+HK_INNOVATION_DRUG_FEAR_SOURCE_KEY = "hk_931250_csi"
+_HK_INNOVATION_DRUG_TARGET = HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL["931250.CSI"]
+HK_INNOVATION_DRUG_FEAR_SOURCE = {
+    "label": f"{_HK_INNOVATION_DRUG_TARGET['label']} 自算贪恐",
+    "column": "etf_fear_greed",
+    "symbol": _HK_INNOVATION_DRUG_TARGET["symbol"],
+    "market": "hk",
+}
 
 
 def _normalize_symbol(value: str) -> str:
@@ -114,4 +125,5 @@ FEAR_SOURCE_OPTIONS = {
     "qqq_clone": {"label": "QQQ 纳指100自算贪恐", "column": "etf_fear_greed", "symbol": "QQQ.US", "market": "us"},
     "dia_clone": {"label": "DIA 道琼斯自算贪恐", "column": "etf_fear_greed", "symbol": "DIA.US", "market": "us"},
     **A_STOCK_FEAR_SOURCE_OPTIONS,
+    HK_INNOVATION_DRUG_FEAR_SOURCE_KEY: HK_INNOVATION_DRUG_FEAR_SOURCE,
 }
