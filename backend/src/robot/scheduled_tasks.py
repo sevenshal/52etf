@@ -115,6 +115,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "evc_static_info_sync",
     "cnn_fear_greed_fetch",
     "a_stock_base_data_sync",
+    "a_stock_chinabond_curve_backfill",
     "etf_holdings_backfill",
     "soxx_fear_greed_backfill",
     "a_stock_etf_fear_greed_backfill",
@@ -665,6 +666,29 @@ def _run_a_stock_base_data_sync(
         result.get("fund_flow_errors"),
     )
     return _format_a_stock_base_data_sync_result(result)
+
+
+def _run_a_stock_chinabond_curve_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """定向补中债曲线，避免信用利差研究触发整个 A 股基础库回跑。"""
+    from .a_stock_base_data_sync import sync_a_stock_chinabond_yield_curves
+
+    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2019, 1, 1)
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    if start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+    result = sync_a_stock_chinabond_yield_curves(
+        start_date=start_value,
+        end_date=end_value,
+    )
+    return (
+        "中债收益率曲线回补完成: "
+        f"range={result.get('start_date')}~{result.get('end_date')} "
+        f"trading_days={result.get('trading_days')} refresh_dates={result.get('refresh_dates')} "
+        f"saved_rows={result.get('saved_rows')} errors={len(result.get('errors') or [])}"
+    )
 
 
 def _run_market_alert_scan(
@@ -1828,6 +1852,34 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=True,
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
+            ),
+            "a_stock_chinabond_curve_backfill": TaskDefinition(
+                task_key="a_stock_chinabond_curve_backfill",
+                name="中债收益率曲线回补",
+                description=(
+                    "仅补中债国债及信用收益率曲线，用于信用风险溢价研究；"
+                    "不会重刷 A 股行情、财报或期权数据。"
+                ),
+                default_time="18:10",
+                default_enabled=False,
+                sort_order=73,
+                runner=_run_a_stock_chinabond_curve_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="2019-01-01",
+                        description="YYYY-MM-DD；默认从 2019-01-01 补至今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时补至今天。",
                     ),
                 ),
             ),

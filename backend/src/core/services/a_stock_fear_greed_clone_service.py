@@ -120,7 +120,8 @@ A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL = {
     str(item["symbol"]).upper(): item
     for item in A_STOCK_FEAR_GREED_TARGETS
 }
-A_STOCK_MIN_COMPONENT_COUNT = 6
+# 六个总分分量中允许一个临时缺失，和此前七个分量时“至少六项有效”的容错一致。
+A_STOCK_MIN_COMPONENT_COUNT = 5
 
 
 A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
@@ -173,16 +174,10 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
         source="A-share index level daily data + a_stock_index_daily",
         proxy_note="Compares target index with a China bond index as the risk-on/risk-off proxy.",
     ),
-    "junk_bond_demand": ComponentSpec(
-        key="junk_bond_demand",
-        name="Credit Spread Demand",
-        raw_label="-mean 3Y AA-AAA credit spread across medium-note, enterprise-bond and urban-investment curves",
-        source="ChinaBond yield curves in DuckDB",
-        proxy_note="ChinaBond AA/AAA credit spread proxy for risk appetite; narrower spread is greed.",
-    ),
 }
 
-# 诊断分量：保留实现波动率相对变化，便于与 IV 对照，但不参与总分。
+# 诊断分量：保留实现波动率相对变化与 AA/AAA 信用利差，便于与总分分量对照，
+# 但均不参与总分。后者在 A 股阶段顶底样本中的方向不稳定，因此只作展示。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
     "market_volatility": ComponentSpec(
         key="market_volatility",
@@ -192,6 +187,17 @@ A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
         proxy_note=(
             "Retained as a diagnostic comparison against option IV; excluded from "
             "the Fear & Greed total."
+        ),
+    ),
+    "junk_bond_demand": ComponentSpec(
+        key="junk_bond_demand",
+        name="AA/AAA Credit Spread",
+        raw_label="-mean 3Y AA-AAA credit spread across medium-note, enterprise-bond and urban-investment curves",
+        source="ChinaBond yield curves in DuckDB",
+        proxy_note=(
+            "ChinaBond AA/AAA credit-spread diagnostic. Retained for reference only; "
+            "excluded from the Fear & Greed total because its historical A-share "
+            "top/bottom direction is unstable."
         ),
     ),
 }
@@ -287,7 +293,10 @@ class AStockInnovation100FearGreedCloneCalculator:
                     "date": day.isoformat(),
                     "score": round(score, 4),
                     "rating": FearGreedCloneCalculator.rating(score),
-                    "method": "available-component equal-weighted rolling z-score normal CDF; IV replaces realized-volatility change",
+                    "method": (
+                        "available-component equal-weighted rolling z-score normal CDF; "
+                        "IV replaces realized-volatility change; AA/AAA credit spread is display-only"
+                    ),
                     "history_days": history_days,
                     "score_window": score_window,
                     "min_periods": min_periods,
@@ -534,7 +543,10 @@ class AStockInnovation100FearGreedCloneCalculator:
             "trade_date": today,
             "score": round(score, 4),
             "rating": FearGreedCloneCalculator.rating(score),
-            "method": "available-component equal-weighted rolling z-score normal CDF; IV replaces realized-volatility change (intraday)",
+            "method": (
+                "available-component equal-weighted rolling z-score normal CDF; "
+                "IV replaces realized-volatility change; AA/AAA credit spread is display-only (intraday)"
+            ),
             "history_days": history_days,
             "score_window": score_window,
             "min_periods": min_periods,

@@ -5376,6 +5376,39 @@ def sync_a_stock_base_data(
         service.close()
 
 
+def sync_a_stock_chinabond_yield_curves(
+    start_date: date,
+    end_date: date,
+    force_refresh: bool = False,
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    """只同步中债收益率曲线，供历史信用利差研究和定向补数使用。
+
+    不能复用 ``sync_a_stock_base_data``：后者填写较早开始日期会连带重刷全市场
+    行情、财报等大量无关数据。该入口只写入中债曲线定义和日度期限点表。
+    """
+    service = AStockBaseDataSyncService(
+        analytics_db=analytics_db,
+        tushare_service=tushare_service,
+        progress_callback=progress_callback,
+    )
+    try:
+        defs_saved = service.sync_chinabond_curve_defs()
+        result = service.sync_chinabond_yield_curves(
+            start_date,
+            end_date,
+            force_refresh=force_refresh,
+        )
+        return {
+            "curve_defs_saved": defs_saved,
+            **result,
+        }
+    finally:
+        service.close()
+
+
 def _normalize_fund_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "ts_code",

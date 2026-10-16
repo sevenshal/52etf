@@ -50,7 +50,7 @@ const COMPONENT_LABELS = {
   implied_volatility: '期权隐含波动率（IV）',
   gold_implied_volatility: '黄金隐含波动率（GVZ）',
   safe_haven_demand: '避险需求',
-  junk_bond_demand: '垃圾债需求',
+  junk_bond_demand: 'AA/AAA 信用利差',
   cnn_fear_greed: 'CNN 贪恐',
   szdt_fear_greed: '外部来源贪恐',
 };
@@ -71,6 +71,9 @@ const COMPONENT_VALUE_META = {
     // 后端为使“IV 越高 = 越恐慌”而以 -IV 参与标准化；展示时还原为正数百分比。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) * 100 : value),
     description: '期权隐含的未来波动率代理；IV 越高，得分越低',
+  },
+  junk_bond_demand: {
+    description: '中国债券 AA/AAA 信用利差诊断项；暂未参与总分',
   },
   gold_implied_volatility: {
     label: 'GVZ（点）',

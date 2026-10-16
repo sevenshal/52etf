@@ -2,7 +2,8 @@
 
 核心验证：calculate_intraday 复用日频 _build_raw_signals/_score_raw_signals，
 仅注入今日盘中指数点位（rt_idx_k）与实时成分股行情；日频专属组件（期权 PCR、
-信用利差、国债避险）通过 ffill 沿用最近日频值，最终 7 个组件全部参与评分。
+信用利差、国债避险）通过 ffill 沿用最近日频值；其中 AA/AAA 信用利差仅展示，
+最终 6 个组件参与评分。
 """
 from datetime import date
 from unittest.mock import patch
@@ -115,9 +116,11 @@ def test_iv_replaces_relative_realized_volatility_in_a_share_total():
     assert "implied_volatility" in A_STOCK_COMPONENTS
     assert "market_volatility" not in A_STOCK_COMPONENTS
     assert "market_volatility" in A_STOCK_DISPLAY_ONLY_COMPONENTS
+    assert "junk_bond_demand" not in A_STOCK_COMPONENTS
+    assert "junk_bond_demand" in A_STOCK_DISPLAY_ONLY_COMPONENTS
 
 
-def test_calculate_intraday_uses_all_components():
+def test_calculate_intraday_excludes_display_only_components_from_total():
     calculator = AStockInnovation100FearGreedCloneCalculator("000300.SH")
     ctx = _build_synthetic_context(calculator)
 
@@ -132,10 +135,12 @@ def test_calculate_intraday_uses_all_components():
          patch.object(calculator, "_load_credit_spread", return_value=ctx["credit_spread"]):
         result = calculator.calculate_intraday(now=pd.Timestamp(ctx["today"]))
 
-    assert result["component_count"] == 7
-    assert len(result["components_used"]) == 7
+    assert result["component_count"] == 6
+    assert len(result["components_used"]) == 6
     assert result["components"]["implied_volatility"]["included_in_total"] is True
     assert result["components"]["market_volatility"]["included_in_total"] is False
+    assert result["components"]["junk_bond_demand"]["included_in_total"] is False
+    assert result["components"]["junk_bond_demand"]["used_in_score"] is False
     assert 0.0 <= result["score"] <= 100.0
     assert result["quote_source"] == "rt_idx_k"
     assert result["index_level"] == ctx["intraday"]["level"]
