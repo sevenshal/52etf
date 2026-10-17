@@ -73,7 +73,7 @@ const COMPONENT_VALUE_META = {
     description: '期权隐含的未来波动率代理；IV 越高，得分越低',
   },
   junk_bond_demand: {
-    description: '中国债券 AA/AAA 信用利差诊断项；暂未参与总分',
+    description: '中债 AA/AAA 信用利差诊断项；暂未参与总分',
   },
   gold_implied_volatility: {
     label: 'GVZ（点）',
@@ -83,6 +83,37 @@ const COMPONENT_VALUE_META = {
     label: '外部情绪分',
     description: '外部来源的标的情绪评分，已映射为 0–100 分',
   },
+};
+
+// 信用利差组件按市场区分，不能共用一条说明：
+// - A股指数：中债 3 年期 AA/AAA 利差均值，仅诊断、不参与总分；
+// - 美股 ETF：FRED 美国企业债期权调整利差（高收益−投资级），参与总分。
+// 两种后端都存「-利差」，展示时统一还原为正数（利差越阔 = 风险偏好越差 = 得分越低）。
+const JUNK_BOND_META_BY_MARKET = {
+  CN: {
+    label: '中债 AA−AAA 信用利差（pct）',
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
+    description: '中债 3 年期 AA/AAA 信用利差均值（中票/企业债/城投债曲线）；仅作诊断，历史顶底方向不稳定，未参与总分',
+  },
+  DEFAULT: {
+    label: '高收益−投资级信用利差（OAS，pct）',
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
+    description: '美国企业债期权调整利差（FRED：高收益 BAMLH0A0HYM2 − 投资级 BAMLC0A0CM）；利差越阔（风险偏好越差），得分越低',
+  },
+};
+
+// 分项的展示元信息按市场取：junk_bond_demand 美股/A股数据源完全不同
+const getComponentValueMeta = (key, market) => (
+  key === 'junk_bond_demand'
+    ? (JUNK_BOND_META_BY_MARKET[market] || JUNK_BOND_META_BY_MARKET.DEFAULT)
+    : COMPONENT_VALUE_META[key]
+);
+
+const getComponentLabel = (key, market) => {
+  if (key === 'junk_bond_demand') {
+    return market === 'CN' ? 'AA/AAA 信用利差' : '信用利差（高收益−投资级）';
+  }
+  return COMPONENT_LABELS[key];
 };
 
 const isFiniteNumber = value => value !== null && value !== undefined && Number.isFinite(Number(value));
@@ -623,48 +654,45 @@ const SOXXFearGreed = () => {
               title={displayedRealtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
             >
               <div className="soxx-fear-components-grid">
-                {componentEntries.map(([key, component]) => (
-                  <div className="soxx-fear-component" key={key}>
-                    <div className="soxx-fear-component-header">
-                      <Text strong>{key === 'market_volatility' && component.raw_label === '-VIXCLS'
-                        ? '市场隐含波动率（VIX）'
-                        : COMPONENT_LABELS[key] || component.name || key}</Text>
-                      <span className="soxx-fear-component-tags">
-                        {component.included_in_total === false && (
-                          <Tag color="default">暂未参与总分</Tag>
-                        )}
-                        {isFiniteNumber(component.score) && (
-                          // 分项评级统一用前端的五档（极端恐慌/恐慌/中性/贪婪/极端贪婪），
-                          // 不再展示后端入库的英文 rating，避免同一分数两套口径。
-                          <Tag color={fearColor(component.score)}>{fearStatus(component.score)}</Tag>
-                        )}
-                      </span>
+                {componentEntries.map(([key, component]) => {
+                  const meta = getComponentValueMeta(key, expandedETF?.market);
+                  const isVixRaw = key === 'market_volatility' && component.raw_label === '-VIXCLS';
+                  const displayLabel = isVixRaw ? 'VIX（点）' : meta?.label || '模型原始值';
+                  const displayRaw = isVixRaw
+                    ? (isFiniteNumber(component.raw_value) ? -Number(component.raw_value) : component.raw_value)
+                    : meta?.displayValue?.(component.raw_value) ?? component.raw_value;
+                  const description = isVixRaw
+                    ? 'VIX（市场隐含波动率）越高，得分越低'
+                    : meta?.description || component.raw_label;
+                  return (
+                    <div className="soxx-fear-component" key={key}>
+                      <div className="soxx-fear-component-header">
+                        <Text strong>{isVixRaw
+                          ? '市场隐含波动率（VIX）'
+                          : getComponentLabel(key, expandedETF?.market) || component.name || key}</Text>
+                        <span className="soxx-fear-component-tags">
+                          {component.included_in_total === false && (
+                            <Tag color="default">暂未参与总分</Tag>
+                          )}
+                          {isFiniteNumber(component.score) && (
+                            // 分项评级统一用前端的五档（极端恐慌/恐慌/中性/贪婪/极端贪婪），
+                            // 不再展示后端入库的英文 rating，避免同一分数两套口径。
+                            <Tag color={fearColor(component.score)}>{fearStatus(component.score)}</Tag>
+                          )}
+                        </span>
+                      </div>
+                      <div className="soxx-fear-component-values">
+                        <span>
+                          {displayLabel} <b>{formatNumber(displayRaw, 3)}</b>
+                        </span>
+                        <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
+                      </div>
+                      {description && (
+                        <Text type="secondary">{description}</Text>
+                      )}
                     </div>
-                    <div className="soxx-fear-component-values">
-                      <span>
-                        {key === 'market_volatility' && component.raw_label === '-VIXCLS'
-                          ? 'VIX（点）'
-                          : COMPONENT_VALUE_META[key]?.label || '模型原始值'}{' '}
-                        <b>{formatNumber(
-                          key === 'market_volatility' && component.raw_label === '-VIXCLS'
-                            ? (isFiniteNumber(component.raw_value) ? -Number(component.raw_value) : component.raw_value)
-                            : COMPONENT_VALUE_META[key]?.displayValue?.(component.raw_value) ?? component.raw_value,
-                          3
-                        )}</b>
-                      </span>
-                      <span>得分 <b>{formatNumber(component.score, 1)}</b>/100</span>
-                    </div>
-                    {(key === 'market_volatility' && component.raw_label === '-VIXCLS'
-                      ? 'VIX（市场隐含波动率）越高，得分越低'
-                      : COMPONENT_VALUE_META[key]?.description || component.raw_label) && (
-                      <Text type="secondary">
-                        {key === 'market_volatility' && component.raw_label === '-VIXCLS'
-                          ? 'VIX（市场隐含波动率）越高，得分越低'
-                          : COMPONENT_VALUE_META[key]?.description || component.raw_label}
-                      </Text>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Card>
           )}
