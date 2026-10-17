@@ -422,7 +422,8 @@ class BacktestPosition(BaseModel):
     code: str
     name: str = ""
     quantity: int = Field(..., ge=0)
-    price: float = Field(..., gt=0)
+    # 实盘独有持仓按 0 股清仓时可能拿不到价格，允许 0。
+    price: float = Field(0, ge=0)
 
 
 class BacktestPositionSyncRequest(BaseModel):
@@ -449,6 +450,12 @@ async def run_a_stock_backtest(
         "buy_factor": row.buy_factor, "sell_factor": row.sell_factor,
         "buy_volume_ratio": row.buy_volume_ratio,
     } for row in rows]
+    # 实盘可能持有不在启用配置里的标的，名称回退用账户下全部配置的名称。
+    stock_names = {
+        code: name for code, name in db.query(SzdtTradeStock.code, SzdtTradeStock.name).filter(
+            SzdtTradeStock.account_id == account_id,
+        ).all() if name
+    }
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     sell_on_ema5_breakdown = bool(config and config.a_sell_on_ema5_breakdown)
     rotation_enabled = bool(config and config.a_rotation_enabled)
@@ -478,14 +485,30 @@ async def run_a_stock_backtest(
         # 回测末日仓位与当前实盘实际持仓并列展示；读取失败不影响回测本身。
         if live_config["id"] and live_config["external_trading_account_id"] and live_config["live_sub_account_id"]:
             try:
+                from ...core.services.external_trading_valuation import get_realtime_reference_prices
+                from ...core.services.szdt_position_diff import a_stock_backtest_code, merge_backtest_live_positions
                 from ...robot.szdt_a_stock_external_trader import SZDTAStockExternalTrader, _external_symbol
 
                 snapshot = await SZDTAStockExternalTrader()._load_external_snapshot(live_config)
                 live_positions = snapshot["positions"]
-                for position in result.get("latest_positions", []):
-                    live_quantity = int(live_positions.get(_external_symbol(position["code"]), 0) or 0)
-                    position["live_quantity"] = live_quantity
-                    position["live_quantity_diff"] = int(position["quantity"]) - live_quantity
+                # 实盘独有持仓没有回测价，用实时参考价补“价格”列；取不到就留空。
+                live_prices = {}
+                held_symbols = [symbol for symbol, quantity in live_positions.items() if int(quantity or 0) > 0]
+                if held_symbols:
+                    try:
+                        live_prices = await get_realtime_reference_prices(
+                            live_config["external_trading_account_id"], held_symbols,
+                        )
+                    except Exception:  # noqa: BLE001
+                        live_prices = {}
+                result["latest_positions"] = merge_backtest_live_positions(
+                    result.get("latest_positions") or [],
+                    live_positions,
+                    to_live_symbol=_external_symbol,
+                    to_backtest_code=a_stock_backtest_code,
+                    names={_external_symbol(code): name for code, name in stock_names.items()},
+                    prices=live_prices,
+                )
             except Exception:  # noqa: BLE001
                 # 账户未绑定、账本暂不可读等不应让只读回测失败。
                 pass
@@ -515,6 +538,12 @@ async def run_us_backtest(
         "buy_factor": row.buy_factor, "sell_factor": row.sell_factor,
         "buy_volume_ratio": row.buy_volume_ratio, "type": row.type,
     } for row in rows]
+    # 实盘可能持有不在启用配置里的标的，名称回退用账户下全部配置的名称。
+    stock_names = {
+        code: name for code, name in db.query(SzdtTradeStock.code, SzdtTradeStock.name).filter(
+            SzdtTradeStock.account_id == account_id,
+        ).all() if name
+    }
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     rotation_enabled = bool(config and config.us_rotation_enabled)
     rotation_threshold = int(config.us_rotation_threshold) if config else -30
@@ -536,15 +565,38 @@ async def run_us_backtest(
         # 美股没有本地持仓账本，使用独立 IB client ID 只读查询，避免占用自动交易连接。
         if live_config["id"] and live_config["ib_port"]:
             try:
+                from ...core.services.szdt_position_diff import (
+                    merge_backtest_live_positions,
+                    us_backtest_code,
+                    us_live_symbol,
+                )
                 from ...robot.szdt_us_trader import SZDTUSTrader
 
                 ib_service = await SZDTUSTrader()._ensure_ib_connected(
                     live_config["ib_port"], 3_000 + live_config["id"],
                 )
-                for position in result.get("latest_positions", []):
-                    live_quantity = int(ib_service.get_position(position["code"]).get("qty") or 0)
-                    position["live_quantity"] = live_quantity
-                    position["live_quantity_diff"] = int(position["quantity"]) - live_quantity
+                # 账户里的其他策略持仓同样会被 IB 返回，一并展示，避免“实盘有、回测没有”被隐藏。
+                live_positions = {}
+                live_prices = {}
+                for symbol, detail in ib_service.get_positions_dict().items():
+                    quantity = int(float((detail or {}).get("qty") or 0))
+                    if quantity <= 0:
+                        continue
+                    live_positions[symbol] = quantity
+                    try:
+                        price = float((detail or {}).get("price") or 0)
+                    except (TypeError, ValueError):
+                        price = 0.0
+                    if price > 0:
+                        live_prices[symbol] = price
+                result["latest_positions"] = merge_backtest_live_positions(
+                    result.get("latest_positions") or [],
+                    live_positions,
+                    to_live_symbol=us_live_symbol,
+                    to_backtest_code=us_backtest_code,
+                    names={us_live_symbol(code): name for code, name in stock_names.items()},
+                    prices=live_prices,
+                )
             except Exception:  # noqa: BLE001
                 # IB 临时不可用时仍返回回测结果，由前端显示“-”。
                 pass
@@ -561,7 +613,11 @@ async def sync_backtest_positions(
     account_id: str = Depends(get_account_id),
     db: Session = Depends(get_db),
 ):
-    """将用户明确勾选的回测持仓提交为实盘目标；前端已二次确认。"""
+    """将用户明确勾选的回测持仓提交为实盘目标；前端已二次确认。
+
+    回测之外的实盘持仓（“实盘独有”）也允许提交，但只能按 0 股清仓，
+    并且必须确实是当前实盘持有，避免往任意代码写目标仓位。
+    """
     stock_types = [3] if payload.market == "a" else list(US_STOCK_TYPES)
     codes = [item.code.upper() for item in payload.positions]
     rows = db.query(SzdtTradeStock).filter(
@@ -571,8 +627,13 @@ async def sync_backtest_positions(
         SzdtTradeStock.code.in_(codes),
     ).all()
     allowed_codes = {row.code.upper() for row in rows}
-    if len(allowed_codes) != len(set(codes)):
-        raise HTTPException(status_code=400, detail="所选标的必须是当前已启用的对应市场配置")
+    clear_only_codes = {code for code in set(codes) if code not in allowed_codes}
+    for item in payload.positions:
+        if item.code.upper() in clear_only_codes and int(item.quantity) != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{item.code} 不在当前启用配置中，只能按 0 股清仓",
+            )
     config = db.query(SZDTTradingConfig).filter(SZDTTradingConfig.account_id == account_id).first()
     if not config:
         raise HTTPException(status_code=400, detail="未找到守猪逮兔策略配置")
@@ -596,6 +657,12 @@ async def sync_backtest_positions(
 
         trader = SZDTAStockExternalTrader()
         snapshot = await trader._load_external_snapshot(config_snapshot)
+        live_symbols = {
+            symbol for symbol, quantity in snapshot["positions"].items() if int(quantity or 0) > 0
+        }
+        for item in payload.positions:
+            if item.code.upper() in clear_only_codes and _external_symbol(item.code) not in live_symbols:
+                raise HTTPException(status_code=400, detail=f"{item.code} 不在实盘持仓中，无法清仓")
         # _sync_target_batch 会先保留已有目标和持仓，只覆盖用户明确勾选的目标；
         # 因此从回测同步一个子集不会把未勾选的实盘仓位变成 0。
         target_updates = {_external_symbol(item.code): item.quantity for item in payload.positions}
@@ -611,10 +678,18 @@ async def sync_backtest_positions(
 
     if not config_snapshot["ib_account_id"]:
         raise HTTPException(status_code=400, detail="美股守猪逮兔未绑定 IB 账户")
+    from ...core.services.szdt_position_diff import us_live_symbol
     from ...robot.szdt_us_trader import SZDTUSTrader
 
     trader = SZDTUSTrader()
     ib_service = await trader._ensure_ib_connected(config_snapshot["ib_port"], 2000 + config_snapshot["id"])
+    live_symbols = {
+        symbol for symbol, detail in ib_service.get_positions_dict().items()
+        if int(float((detail or {}).get("qty") or 0)) > 0
+    }
+    for item in payload.positions:
+        if item.code.upper() in clear_only_codes and us_live_symbol(item.code) not in live_symbols:
+            raise HTTPException(status_code=400, detail=f"{item.code} 不在实盘持仓中，无法清仓")
     submitted = []
     for item in payload.positions:
         current = ib_service.get_position(item.code)

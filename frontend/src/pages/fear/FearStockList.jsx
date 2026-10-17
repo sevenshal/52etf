@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin } from 'antd';
+import { Table, Button, Space, Popconfirm, message, Modal, Form, Input, Select, Layout, Tooltip, Tabs, Switch, Empty, Spin, Tag } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined, LeftOutlined, EyeOutlined, FileTextOutlined, LineChartOutlined, ExperimentOutlined, SettingOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import request from '../../utils/request';
@@ -7,6 +7,13 @@ import ReactECharts from 'echarts-for-react';
 import { SZDTConfigForm } from '../SZDTAutoTrading';
 
 const normalizeCode = (code) => String(code || '').replace('.', '').toUpperCase();
+// 同步接口只认 code/name/quantity/price；实盘独有行可能没有价格，按 0 提交（后端仅用于估值参考）。
+const toSyncPosition = (item) => ({
+  code: item.code,
+  name: item.name || '',
+  quantity: Number(item.quantity) || 0,
+  price: Number(item.price) || 0,
+});
 const toAStockTsCode = (code) => {
   const [market, ticker] = String(code || '').toUpperCase().split('.');
   return market && ticker ? `${ticker}.${market}` : String(code || '').toUpperCase();
@@ -423,11 +430,15 @@ const FearStockList = () => {
   };
 
   const syncBacktestPositions = async () => {
-    const positions = (backtestResult?.latest_positions || []).filter(item => selectedBacktestPositions.includes(item.code));
+    const positions = (backtestResult?.latest_positions || [])
+      .filter(item => selectedBacktestPositions.includes(item.code));
     if (!positions.length) return;
     setSyncingBacktestPositions(true);
     try {
-      const { data } = await request.post('/api/quant/backtest/sync-positions', { market: backtestMarket, positions });
+      const { data } = await request.post('/api/quant/backtest/sync-positions', {
+        market: backtestMarket,
+        positions: positions.map(toSyncPosition),
+      });
       message.success(data?.message || '已提交实盘仓位对齐');
     } catch (error) {
       message.error(error.response?.data?.detail || '同步实盘仓位失败');
@@ -436,7 +447,42 @@ const FearStockList = () => {
     }
   };
 
+  // 实盘独有持仓：回测里没有，只做“提交 0 股目标”的清仓，不参与普通仓位对齐。
+  const clearLiveOnlyPositions = async () => {
+    const positions = (backtestResult?.latest_positions || []).filter(item => item.live_only);
+    if (!positions.length) return;
+    setSyncingBacktestPositions(true);
+    try {
+      const { data } = await request.post('/api/quant/backtest/sync-positions', {
+        market: backtestMarket,
+        positions: positions.map(toSyncPosition),
+      });
+      message.success(data?.message || `已提交 ${positions.length} 只实盘独有持仓清仓`);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '清仓实盘独有持仓失败');
+    } finally {
+      setSyncingBacktestPositions(false);
+    }
+  };
+
   const backtestCurve = backtestResult?.curve || [];
+  const backtestLiveOnlyPositions = useMemo(
+    () => (backtestResult?.latest_positions || []).filter(item => item.live_only),
+    [backtestResult],
+  );
+  const backtestLiveSummary = useMemo(() => {
+    const positions = backtestResult?.latest_positions || [];
+    if (!positions.some(item => item.live_quantity != null)) {
+      return '实盘持仓暂不可读（账户未绑定或账本/IB 未连接）';
+    }
+    const backtestCount = positions.filter(item => Number(item.quantity) > 0).length;
+    const liveCount = positions.filter(item => Number(item.live_quantity) > 0).length;
+    const liveOnlyCount = positions.filter(item => item.live_only).length;
+    const summary = `回测 ${backtestCount} 只 / 实盘 ${liveCount} 只`;
+    return liveOnlyCount > 0
+      ? `${summary}（其中 ${liveOnlyCount} 只实盘独有：回测末日无此持仓，可按 0 股清仓）`
+      : summary;
+  }, [backtestResult]);
   const backtestExposureMax = backtestPercentAxisLimit(Math.max(0, ...backtestCurve.map(item => Number(item.gross_exposure) || 0)));
   const backtestDrawdownMin = -backtestPercentAxisLimit(Math.max(0, ...backtestCurve.map(item => -(Number(item.drawdown_pct) || 0))));
 
@@ -1173,15 +1219,25 @@ const FearStockList = () => {
             dataSource={[{ key: 'metrics', ...backtestResult.metrics }]}
           />
           <ReactECharts option={backtestChartOption} style={{ height: 430 }} />
-          <Space style={{ margin: '8px 0' }}>
+          <Space style={{ margin: '8px 0' }} wrap>
             <span>最新回测持仓（可选择同步到实盘仓位）</span>
             <Popconfirm
-              title="确认把所选回测持仓提交为实盘目标仓位吗？会产生真实调仓订单。"
+              title="确认把所选持仓提交为实盘目标仓位吗？实盘独有行会按 0 股清仓，都会产生真实订单。"
               onConfirm={syncBacktestPositions}
               disabled={!selectedBacktestPositions.length}
             >
               <Button type="primary" size="small" loading={syncingBacktestPositions} disabled={!selectedBacktestPositions.length}>同步所选到实盘</Button>
             </Popconfirm>
+            {backtestLiveOnlyPositions.length > 0 && (
+              <Popconfirm
+                title={`确认把 ${backtestLiveOnlyPositions.length} 只实盘独有持仓提交为 0 股目标仓位吗？会产生真实卖出订单。`}
+                description={`标的：${backtestLiveOnlyPositions.slice(0, 5).map(item => item.code).join('、')}${backtestLiveOnlyPositions.length > 5 ? ' 等' : ''}${backtestMarket === 'us' ? '；美股取的是 IB 账户全量持仓，可能包含其他策略' : ''}`}
+                onConfirm={clearLiveOnlyPositions}
+              >
+                <Button danger size="small" loading={syncingBacktestPositions}>清掉实盘独有（{backtestLiveOnlyPositions.length}）</Button>
+              </Popconfirm>
+            )}
+            <span style={{ color: '#8c8c8c', fontSize: 12 }}>{backtestLiveSummary}</span>
           </Space>
           <Table
             size="small"
@@ -1189,8 +1245,14 @@ const FearStockList = () => {
             pagination={false}
             rowSelection={{ selectedRowKeys: selectedBacktestPositions, onChange: setSelectedBacktestPositions }}
             columns={[
-              { title: '标的', dataIndex: 'name' }, { title: '代码', dataIndex: 'code' },
-              { title: '仓位', dataIndex: 'position_pct', render: value => `${Number(value).toFixed(2)}%` },
+              {
+                title: '标的', dataIndex: 'name',
+                render: (value, record) => record.live_only
+                  ? <Space size={4}><span>{value}</span><Tag color="orange" style={{ marginInlineEnd: 0 }}>实盘独有</Tag></Space>
+                  : value,
+              },
+              { title: '代码', dataIndex: 'code' },
+              { title: '仓位', dataIndex: 'position_pct', render: value => value == null ? '-' : `${Number(value).toFixed(2)}%` },
               { title: '回测股数', dataIndex: 'quantity' },
               { title: '实盘股数', dataIndex: 'live_quantity', render: value => value == null ? '-' : Number(value).toLocaleString('zh-CN') },
               {
@@ -1201,8 +1263,9 @@ const FearStockList = () => {
                   </span>
                 ),
               },
-              { title: '价格', dataIndex: 'price' }, { title: '贪恐', dataIndex: 'score' },
-              { title: '市值', dataIndex: 'market_value', render: value => Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) },
+              { title: '价格', dataIndex: 'price', render: value => value == null ? '-' : value },
+              { title: '贪恐', dataIndex: 'score', render: value => value == null ? '-' : value },
+              { title: '市值', dataIndex: 'market_value', render: value => value == null ? '-' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) },
             ]}
             dataSource={backtestResult.latest_positions || []}
           />
