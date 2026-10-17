@@ -1,5 +1,5 @@
 import React from 'react';
-import { Col, Divider, Row, Tag, Typography } from 'antd';
+import { Col, Row, Tag, Tooltip, Typography } from 'antd';
 import { FEAR_GREED_BANDS, fearStatus, fearTextColor } from '../utils';
 
 const { Text } = Typography;
@@ -61,42 +61,48 @@ const getDataTime = (fearGreedData) => {
   );
 };
 
-const CompareCell = ({ label, score }) => {
+const boxStyle = { background: '#fafafa', borderRadius: 10, padding: '12px 16px', height: '100%' };
+
+// 中间一列：昨收 / 一周前 / 一月前 / 一年前，紧凑两栏行
+const CompareRow = ({ label, score }) => {
   const hasScore = isFiniteScore(score);
   const color = fearTextColor(score);
   return (
-    <div style={{ padding: '10px 14px', background: '#fafafa', borderRadius: 8 }}>
-      <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, color }}>
-        {hasScore ? Math.round(Number(score)) : '-'}
-      </div>
-      <div style={{ fontSize: 12, color }}>{hasScore ? fearStatus(score) : '-'}</div>
+    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '4px 0' }}>
+      <span style={{ fontSize: 12, color: '#8c8c8c' }}>{label}</span>
+      <span style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <span style={{ fontSize: 16, fontWeight: 700, color }}>{hasScore ? Math.round(Number(score)) : '-'}</span>
+        <span style={{ fontSize: 11, color }}>{hasScore ? fearStatus(score) : '-'}</span>
+      </span>
     </div>
   );
 };
 
+// 右侧一列：分项一行一个，名称 + 细进度条 + 分数 + 档位标签
 const ComponentRow = ({ name, hint, score }) => {
   const hasScore = isFiniteScore(score);
   const color = fearTextColor(score);
   const percent = hasScore ? Math.min(100, Math.max(0, Number(score))) : 0;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
-      <div style={{ width: 148, flex: '0 0 148px' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: '#262626' }}>{name}</div>
-        <div style={{ fontSize: 11, color: '#bfbfbf', lineHeight: 1.3 }}>{hint}</div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '3px 0' }}>
+      <div
+        style={{ width: 76, flex: '0 0 76px', fontSize: 12, color: '#262626', whiteSpace: 'nowrap' }}
+        title={hint}
+      >
+        {name}
       </div>
-      <div style={{ flex: 1, minWidth: 80 }}>
-        <div style={{ height: 8, borderRadius: 4, background: '#f0f0f0', overflow: 'hidden' }}>
-          <div style={{ width: `${percent}%`, height: '100%', borderRadius: 4, background: color }} />
+      <div style={{ flex: 1, minWidth: 60 }}>
+        <div style={{ height: 6, borderRadius: 3, background: '#f0f0f0', overflow: 'hidden' }}>
+          <div style={{ width: `${percent}%`, height: '100%', borderRadius: 3, background: color }} />
         </div>
       </div>
-      <div style={{ width: 52, textAlign: 'right', fontSize: 16, fontWeight: 700, color }}>
+      <div style={{ width: 40, textAlign: 'right', fontSize: 13, fontWeight: 700, color }}>
         {hasScore ? Number(score).toFixed(1) : '-'}
       </div>
-      <div style={{ width: 72, textAlign: 'right' }}>
+      <div style={{ width: 68, textAlign: 'right' }}>
         {hasScore
-          ? <Tag style={bandTagStyle(score)}>{fearStatus(score)}</Tag>
-          : <Text type="secondary">-</Text>}
+          ? <Tag style={{ ...bandTagStyle(score), fontSize: 11, lineHeight: '18px', padding: '0 6px' }}>{fearStatus(score)}</Tag>
+          : <Text type="secondary" style={{ fontSize: 11 }}>-</Text>}
       </div>
     </div>
   );
@@ -120,63 +126,49 @@ const FearGreedCurrent = ({ fearGreedData }) => {
   }));
 
   return (
-    <>
-      <Row gutter={[16, 16]}>
-        <Col xs={24} sm={24} md={9} lg={8} xl={8}>
-          <div style={{ background: '#fafafa', borderRadius: 10, padding: '16px 20px' }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>当前恐贪值</Text>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 48, fontWeight: 700, lineHeight: 1.1, color: scoreColor }}>
-                {hasScore ? Math.round(Number(score)) : '-'}
-              </span>
-              <span style={{ fontSize: 14, color: '#8c8c8c' }}>/100</span>
-              {hasScore && (
-                <Tag style={{ ...bandTagStyle(score), marginInlineStart: 4 }}>
-                  {fearStatus(score)}
-                </Tag>
-              )}
-            </div>
-            <div style={{ marginTop: 8, fontSize: 12, color: '#8c8c8c' }}>
-              较昨收 {change === null ? '-' : `${change > 0 ? '+' : ''}${change.toFixed(1)}`}
-            </div>
-            {dataTime && (
-              <div style={{ marginTop: 4, fontSize: 12, color: '#8c8c8c' }}>
-                数据时间：{dataTime}
-              </div>
-            )}
+    // 一行三列：当前分数 | 昨收/一周/一月/一年前 | 七个分项
+    <Row gutter={[16, 12]} align="stretch">
+      <Col xs={24} md={6} lg={4}>
+        <div style={boxStyle}>
+          <Text type="secondary" style={{ fontSize: 12 }}>当前恐贪值</Text>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 36, fontWeight: 700, lineHeight: 1.15, color: scoreColor }}>
+              {hasScore ? Math.round(Number(score)) : '-'}
+            </span>
+            <span style={{ fontSize: 13, color: '#8c8c8c' }}>/100</span>
+            {hasScore && <Tag style={{ ...bandTagStyle(score), marginInlineStart: 2 }}>{fearStatus(score)}</Tag>}
           </div>
-        </Col>
-        <Col xs={24} sm={24} md={15} lg={16} xl={16}>
-          <Row gutter={[12, 12]}>
-            <Col xs={12} sm={6}>
-              <CompareCell label="昨日收盘" score={fearAndGreed.previous_close} />
-            </Col>
-            <Col xs={12} sm={6}>
-              <CompareCell label="一周前" score={fearAndGreed.previous_1_week} />
-            </Col>
-            <Col xs={12} sm={6}>
-              <CompareCell label="一月前" score={fearAndGreed.previous_1_month} />
-            </Col>
-            <Col xs={12} sm={6}>
-              <CompareCell label="一年前" score={fearAndGreed.previous_1_year} />
-            </Col>
-          </Row>
-        </Col>
-      </Row>
-
-      <Divider style={{ margin: '16px 0 8px' }} />
-
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <Text strong>分项得分</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>{BAND_HINT}</Text>
-      </div>
-
-      <div style={{ marginTop: 4 }}>
-        {components.map(({ key, name, hint, score: componentScore }) => (
-          <ComponentRow key={key} name={name} hint={hint} score={componentScore} />
-        ))}
-      </div>
-    </>
+          <div style={{ marginTop: 6, fontSize: 12, color: '#8c8c8c' }}>
+            较昨收 {change === null ? '-' : `${change > 0 ? '+' : ''}${change.toFixed(1)}`}
+          </div>
+          {dataTime && (
+            <div style={{ fontSize: 12, color: '#8c8c8c' }}>数据时间：{dataTime}</div>
+          )}
+        </div>
+      </Col>
+      <Col xs={24} md={6} lg={4}>
+        <div style={boxStyle}>
+          <CompareRow label="昨日收盘" score={fearAndGreed.previous_close} />
+          <CompareRow label="一周前" score={fearAndGreed.previous_1_week} />
+          <CompareRow label="一月前" score={fearAndGreed.previous_1_month} />
+          <CompareRow label="一年前" score={fearAndGreed.previous_1_year} />
+        </div>
+      </Col>
+      <Col xs={24} md={12} lg={16}>
+        <div style={boxStyle}>
+          <Tooltip title={BAND_HINT}>
+            <Text type="secondary" style={{ fontSize: 12, cursor: 'default' }}>
+              分项得分（档位说明见悬浮提示）
+            </Text>
+          </Tooltip>
+          <div style={{ marginTop: 2 }}>
+            {components.map(({ key, name, hint, score: componentScore }) => (
+              <ComponentRow key={key} name={name} hint={hint} score={componentScore} />
+            ))}
+          </div>
+        </div>
+      </Col>
+    </Row>
   );
 };
 
