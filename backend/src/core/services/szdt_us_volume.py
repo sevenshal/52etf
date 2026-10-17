@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from ..database import (
     LongPortAccount,
+    SoxlFearStrategyConfig,
     SZDTUSIntradayVolumeSnapshot,
     SzdtTradeStock,
     get_db_ctx,
@@ -36,7 +37,9 @@ VOLUME_BASELINE_MINUTES = _session_minute_labels()
 VOLUME_BASELINE_MINUTE_SET = frozenset(VOLUME_BASELINE_MINUTES)
 
 
-def _longport_account_id(account_id: str) -> str:
+def _longport_account_id(account_id: str, preferred_longport_account_id: str | None = None) -> str:
+    if preferred_longport_account_id:
+        return str(preferred_longport_account_id)
     with get_db_ctx() as db:
         row = db.query(LongPortAccount).filter(LongPortAccount.account_id == account_id).first()
         if row:
@@ -94,21 +97,40 @@ def _historical_cumulative_volumes(
     return result
 
 
-def _volume_baseline_codes() -> List[Tuple[str, str, bool]]:
-    """返回需维护基准的代码、账户及是否已具备完整 20 日基准。"""
+def _volume_baseline_codes() -> List[Tuple[str, str, str | None, bool]]:
+    """返回需维护基准的代码、账户、优先行情账户及是否已有完整 20 日基准。"""
     with get_db_ctx() as db:
         rows = db.query(SzdtTradeStock.account_id, SzdtTradeStock.code).filter(
             SzdtTradeStock.enabled.is_(True),
             SzdtTradeStock.type.in_([1, 2, 7]),
             SzdtTradeStock.buy_volume_ratio > 0,
         ).all()
-        selected: Dict[str, str] = {}
+        selected: Dict[str, Tuple[str, str | None]] = {}
         for account_id, code in rows:
             normalized = str(code or "").upper()
             if normalized and normalized not in selected:
-                selected[normalized] = str(account_id or "")
-        result: List[Tuple[str, str, bool]] = []
-        for code, account_id in selected.items():
+                selected[normalized] = (str(account_id or ""), None)
+
+        # SOXL 情绪量能实盘与守猪逮兔共用同一份美股分钟累计量基准。
+        # 成交量由标的决定，按代码持久化即可；LongPort 实盘配置可指定行情账户。
+        soxl_rows = db.query(
+            SoxlFearStrategyConfig.account_id,
+            SoxlFearStrategyConfig.symbol,
+            SoxlFearStrategyConfig.account_type,
+            SoxlFearStrategyConfig.longport_account_id,
+        ).filter(
+            SoxlFearStrategyConfig.enabled.is_(True),
+            SoxlFearStrategyConfig.volume_ratio_threshold > 0,
+        ).all()
+        for account_id, symbol, account_type, longport_account_id in soxl_rows:
+            normalized = _code_from_symbol(str(symbol or ""))
+            if not normalized.startswith("US.") or normalized in selected:
+                continue
+            preferred = str(longport_account_id) if account_type == "longport" and longport_account_id else None
+            selected[normalized] = (str(account_id or ""), preferred)
+
+        result: List[Tuple[str, str, str | None, bool]] = []
+        for code, (account_id, preferred_longport_account_id) in selected.items():
             rows = db.query(
                 SZDTUSIntradayVolumeSnapshot.trade_date,
                 SZDTUSIntradayVolumeSnapshot.minute_label,
@@ -125,7 +147,7 @@ def _volume_baseline_codes() -> List[Tuple[str, str, bool]]:
                 for labels in labels_by_date.values()
             )
             # 即使已有 20 日，也须每天更新最近一个交易日，保证滚动窗口不会过期。
-            result.append((account_id, code, complete >= VOLUME_BASELINE_LOOKBACK))
+            result.append((account_id, code, preferred_longport_account_id, complete >= VOLUME_BASELINE_LOOKBACK))
     return result
 
 
@@ -140,9 +162,9 @@ def warm_us_volume_baselines(*, now: datetime | None = None) -> Dict[str, Any]:
     current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
     targets = _volume_baseline_codes()
     result: Dict[str, Any] = {"targets": len(targets), "warmed": 0, "saved": 0, "errors": []}
-    for account_id, code, is_warm in targets:
+    for account_id, code, preferred_longport_account_id, is_warm in targets:
         try:
-            service = LongPortService.get_instance(_longport_account_id(account_id))
+            service = LongPortService.get_instance(_longport_account_id(account_id, preferred_longport_account_id))
             cursor = datetime.combine(current.date(), time(9, 30), tzinfo=NEW_YORK)
             candles: List[Dict[str, Any]] = []
             # 已预热的标的每天只需最新一页（约 2.5 个交易日）；首次则向前补满 20 日。
@@ -258,7 +280,11 @@ def get_us_stock_list_metrics(
 
 
 def get_us_stock_volume_metrics(
-    account_id: str, codes: Iterable[str], *, now: datetime | None = None,
+    account_id: str,
+    codes: Iterable[str],
+    *,
+    now: datetime | None = None,
+    preferred_longport_account_id: str | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     """当前累计分钟量 ÷ 前 20 个交易日同一分钟累计量均值。
 
@@ -269,7 +295,7 @@ def get_us_stock_volume_metrics(
     current = current.replace(tzinfo=NEW_YORK) if current.tzinfo is None else current.astimezone(NEW_YORK)
     minute_label = current.strftime("%H:%M")
     trade_date = current.date()
-    service = LongPortService.get_instance(_longport_account_id(account_id))
+    service = LongPortService.get_instance(_longport_account_id(account_id, preferred_longport_account_id))
     metrics: Dict[str, Dict[str, Any]] = {}
     for code in dict.fromkeys(str(item).upper() for item in codes if str(item).strip()):
         symbol = _symbol(code)

@@ -57,6 +57,7 @@ from ..core.services.ib_service import IBKRService
 from ..core.services.longport import LongPortService
 from ..core.services.market import MarketService
 from ..core.services.quote import QuoteService
+from ..core.services.szdt_us_volume import get_us_stock_volume_metrics
 from ..core.services.trade import OrderSide, OrderType, OutsideRTH, TimeInForceType
 from ..core.utils import mask_account_id, send_alert_email, send_configured_email
 from .cnn_fear_index import CNNFearGreedIndexScraper, CNN_HISTORY_SYMBOL
@@ -86,7 +87,6 @@ class SoxlFearStrategyTrader:
     UTC_TZ = ZoneInfo("UTC")
     MARKET_OPEN_TIME = dtime(9, 30)
     MANUAL_GREED_STATE_UPDATE_WINDOW_MINUTES = 10
-    VOLUME_PROJECTION_WINDOW_MINUTES = 30
     MAIN_DB_WRITE_RETRY_ATTEMPTS = 4
     MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
     MAIN_DB_WRITE_RETRY_MAX_SECONDS = 8.0
@@ -258,9 +258,10 @@ class SoxlFearStrategyTrader:
             f"仓位变化: {position_ratio_before:.2f}% -> {position_ratio_after:.2f}%",
             f"CNN 情绪分数: {cnn_score:.2f}",
             f"CNN 更新时间: {cnn_timestamp_text}",
-            f"量能倍数: {volume_ratio:.4f}",
-            f"原始量能倍数: {raw_volume_ratio:.4f}",
-            f"量能来源: {market_snapshot.get('volume_projection_source') or '-'}",
+            f"同刻累计量比: {volume_ratio:.4f}",
+            f"累计成交量: {float(market_snapshot.get('current_volume') or 0):.0f}",
+            f"前20日同刻均量: {float(market_snapshot.get('baseline_volume') or 0):.0f}",
+            f"量比时点: {market_snapshot.get('volume_ratio_time') or '-'}",
             f"行情时间: {quote_timestamp_text}",
             f"触发来源: {trigger_source}",
             "",
@@ -365,42 +366,6 @@ class SoxlFearStrategyTrader:
         if value.tzinfo is not None:
             return value.astimezone(self.EASTERN_TZ)
         return value.replace(tzinfo=self.SHANGHAI_TZ).astimezone(self.EASTERN_TZ)
-
-    def _fallback_volume_completion_ratio(self, now_et: datetime, market_date: date) -> Tuple[float, str]:
-        close_time = MarketService.get_us_market_close_time(market_date)
-        open_at = datetime.combine(market_date, self.MARKET_OPEN_TIME, tzinfo=now_et.tzinfo)
-        close_at = datetime.combine(market_date, close_time, tzinfo=now_et.tzinfo)
-        if now_et >= close_at:
-            return 1.0, "complete"
-        if now_et <= open_at:
-            return 1.0, "raw_pre_open"
-
-        minutes_remaining = max(0.0, (close_at - now_et).total_seconds() / 60.0)
-        if minutes_remaining > self.VOLUME_PROJECTION_WINDOW_MINUTES:
-            return 1.0, "raw_not_near_close"
-
-        # Median SOXL.US 09:30-16:00 ET minute-volume completion over the
-        # latest 20 complete sessions sampled on 2026-04-30 ET:
-        # 2026-04-01..2026-04-29, skipping 2026-04-03 (no minute data).
-        points = [
-            (0.0, 1.0),
-            (1.0, 0.9910),
-            (2.0, 0.9858),
-            (3.0, 0.9821),
-            (4.0, 0.9781),
-            (5.0, 0.9726),
-            (10.0, 0.9495),
-            (30.0, 0.9043),
-        ]
-        for index in range(1, len(points)):
-            prev_minutes, prev_completion = points[index - 1]
-            next_minutes, next_completion = points[index]
-            if minutes_remaining <= next_minutes:
-                span = next_minutes - prev_minutes
-                weight = (minutes_remaining - prev_minutes) / span if span > 0 else 0.0
-                completion = prev_completion + (next_completion - prev_completion) * weight
-                return completion, "fallback_close_curve"
-        return points[-1][1], "fallback_close_curve"
 
     def _should_update_greed_state(self, trigger_source: str, now_et: datetime, market_date: date) -> bool:
         if str(trigger_source or "").lower() == "auto":
@@ -616,55 +581,13 @@ class SoxlFearStrategyTrader:
         )
         return processed_dates[-1]
 
-    def _project_current_volume(
-        self,
-        current_volume: float,
-        now_et: datetime,
-        market_date: date,
-    ) -> Dict[str, object]:
-        quote_volume = max(0.0, float(current_volume or 0.0))
-        completion_ratio, projection_source = self._fallback_volume_completion_ratio(now_et, market_date)
-
-        if quote_volume <= 0:
-            return {
-                "current_volume": 0.0,
-                "current_volume_source": "quote",
-                "current_volume_timestamp": now_et,
-                "quote_volume": quote_volume,
-                "projected_volume": 0.0,
-                "completion_ratio": 1.0,
-                "projection_factor": 1.0,
-                "projection_source": "empty_volume",
-            }
-
-        completion_ratio = max(0.50, min(1.0, float(completion_ratio or 1.0)))
-        projection_factor = 1.0 / completion_ratio if completion_ratio > 0 else 1.0
-        projected_volume = max(quote_volume, quote_volume * projection_factor)
-        return {
-            "current_volume": quote_volume,
-            "current_volume_source": "quote",
-            "current_volume_timestamp": now_et,
-            "quote_volume": quote_volume,
-            "projected_volume": projected_volume,
-            "completion_ratio": completion_ratio,
-            "projection_factor": projection_factor,
-            "projection_source": projection_source,
-        }
-
-    def _format_volume_projection_message(self, market_snapshot: dict) -> str:
+    def _format_volume_ratio_message(self, market_snapshot: dict) -> str:
         volume_ratio = float(market_snapshot.get("volume_ratio") or 0)
-        raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0)
-        detail_parts = []
-        if abs(volume_ratio - raw_volume_ratio) >= 0.0005:
-            detail_parts.append(f"原始 {raw_volume_ratio:.2f}")
-        detail_parts.extend([
-            f"预计全天量 {float(market_snapshot.get('projected_volume') or 0):.0f}",
-            f"完成率 {float(market_snapshot.get('volume_completion_ratio') or 1) * 100:.1f}%",
-            str(market_snapshot.get("volume_projection_source") or "raw"),
-        ])
         return (
-            f"量比 {volume_ratio:.2f}"
-            f"（{'，'.join(detail_parts)}）"
+            f"同刻量比 {volume_ratio:.2f}"
+            f"（{market_snapshot.get('volume_ratio_time') or '-'} 累计量 "
+            f"{float(market_snapshot.get('current_volume') or 0):.0f} / "
+            f"前20日均量 {float(market_snapshot.get('baseline_volume') or 0):.0f}）"
         )
 
     def _build_realtime_dataframe(
@@ -701,13 +624,20 @@ class SoxlFearStrategyTrader:
             }
             for item in history
         ]
-        quote_volume = float(quote.get("volume") or 0)
-        projection = self._project_current_volume(
-            quote_volume,
-            now_et,
-            current_market_date,
+        normalized_symbol = str(symbol or "").upper()
+        volume_code = (
+            normalized_symbol
+            if normalized_symbol.startswith("US.")
+            else f"US.{normalized_symbol.split('.', 1)[0]}"
         )
-        current_volume = float(projection.get("current_volume") or quote_volume)
+        volume_metric = get_us_stock_volume_metrics(
+            account_id,
+            [volume_code],
+            now=now_et,
+            preferred_longport_account_id=preferred_longport_account_id,
+        )
+        volume_metric = volume_metric.get(volume_code, {})
+        current_volume = float(volume_metric.get("volume") or 0)
         rows.append(
             {
                 "date": current_market_date,
@@ -715,7 +645,7 @@ class SoxlFearStrategyTrader:
                 "high": float(quote.get("high") or quote["price"]),
                 "low": float(quote.get("low") or quote["price"]),
                 "close": float(quote["price"]),
-                "volume": float(projection["projected_volume"]),
+                "volume": current_volume,
             }
         )
         df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
@@ -727,22 +657,18 @@ class SoxlFearStrategyTrader:
         if pd.isna(latest["ma20"]) or pd.isna(latest["volume_ma20"]):
             raise ValueError(f"{symbol} 可用历史数据不足 20 天")
 
-        raw_volume_ratio = current_volume / float(latest["volume_ma20"]) if float(latest["volume_ma20"]) > 0 else 0.0
+        volume_ratio = volume_metric.get("volume_ratio")
         return df, {
             "current_price": float(latest["close"]),
             "current_high": float(latest["high"]),
             "current_volume": current_volume,
-            "current_volume_source": projection.get("current_volume_source") or "quote",
-            "current_volume_timestamp": projection.get("current_volume_timestamp") or now_et,
-            "quote_volume": quote_volume,
-            "projected_volume": float(projection["projected_volume"]),
+            "baseline_volume": float(volume_metric.get("baseline_volume") or 0),
+            "baseline_days": int(volume_metric.get("baseline_days") or 0),
+            "volume_ratio_time": volume_metric.get("minute_label"),
             "ma20": float(latest["ma20"]),
             "volume_ma20": float(latest["volume_ma20"]),
-            "raw_volume_ratio": raw_volume_ratio,
-            "volume_ratio": float(latest["volume_ratio"]) if pd.notna(latest["volume_ratio"]) else 0.0,
-            "volume_completion_ratio": float(projection["completion_ratio"]),
-            "volume_projection_factor": float(projection["projection_factor"]),
-            "volume_projection_source": projection["projection_source"],
+            "raw_volume_ratio": float(volume_ratio or 0),
+            "volume_ratio": float(volume_ratio or 0),
             "quote_timestamp": now_et,
         }
 
@@ -1117,7 +1043,7 @@ class SoxlFearStrategyTrader:
             volume_ratio = float(market_snapshot["volume_ratio"])
             raw_volume_ratio = float(market_snapshot.get("raw_volume_ratio") or 0.0)
             quote_timestamp = market_snapshot.get("quote_timestamp") or now_et
-            volume_detail = self._format_volume_projection_message(market_snapshot)
+            volume_detail = self._format_volume_ratio_message(market_snapshot)
             broker_snapshot = await self._build_broker_snapshot(config, current_price)
             preferred_longport_account_id = config.longport_account_id if config.account_type == "longport" else None
             sell_mode = str(getattr(config, "sell_mode", None) or "trailing")
@@ -1364,12 +1290,11 @@ class SoxlFearStrategyTrader:
                     state.take_profit_cycle_sell_count = 0
 
             volume_ratio_detail = f" | volume_ratio={volume_ratio:.4f}"
-            if abs(volume_ratio - raw_volume_ratio) >= 0.00005:
-                volume_ratio_detail += f" | raw_volume_ratio={raw_volume_ratio:.4f}"
             log_message = (
                 f"{trade_message} | cnn_score={cnn_score:.2f} | cnn_timestamp={cnn_timestamp}"
                 f"{volume_ratio_detail}"
-                f" | volume_projection_source={market_snapshot.get('volume_projection_source')}"
+                f" | volume_ratio_time={market_snapshot.get('volume_ratio_time')}"
+                f" | baseline_days={market_snapshot.get('baseline_days')}"
             )
             self._persist_run_result(
                 config_id=config_id,

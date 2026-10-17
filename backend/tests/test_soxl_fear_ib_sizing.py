@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -77,6 +77,67 @@ class SoxlFearIBSnapshotTest(TestCase):
         snapshot = self._build(FakeIBService(total_cash=-3200.0))
 
         self.assertEqual(0.0, snapshot.available_cash)
+
+
+def test_realtime_dataframe_uses_same_minute_cumulative_volume_ratio(monkeypatch):
+    """SOXL 不再把累计量外推为全天量，而是复用守猪逮兔的同刻分钟量比。"""
+    market_date = date(2026, 10, 1)
+    history_start = date(2026, 9, 1)
+    history = [
+        {
+            "timestamp": datetime.combine(history_start + timedelta(days=index), datetime.min.time()),
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.0,
+            "close": 10.0,
+            "volume": 100.0,
+        }
+        for index in range(21)
+    ]
+
+    class FakeMarketData:
+        def get_candlesticks(self, _symbol, _count, period):
+            assert period == "d"
+            return history
+
+        def get_quote(self, _symbol):
+            return {
+                "price": 12.0,
+                "high": 12.5,
+                "timestamp": datetime(2026, 10, 1, 15, 58, tzinfo=SoxlFearStrategyTrader.EASTERN_TZ),
+            }
+
+    captured = {}
+
+    def fake_volume_metrics(account_id, codes, **kwargs):
+        captured.update(account_id=account_id, codes=codes, **kwargs)
+        return {
+            "US.SOXL": {
+                "volume": 200.0,
+                "baseline_volume": 100.0,
+                "volume_ratio": 2.0,
+                "minute_label": "15:58",
+                "baseline_days": 20,
+            }
+        }
+
+    monkeypatch.setattr(SoxlFearStrategyTrader, "_get_market_data_service", lambda *_args: FakeMarketData())
+    monkeypatch.setattr("src.robot.soxl_fear_strategy_trader.get_us_stock_volume_metrics", fake_volume_metrics)
+
+    _df, snapshot = SoxlFearStrategyTrader()._build_realtime_dataframe(
+        "acct", "SOXL.US", market_date, preferred_longport_account_id="lp-acct"
+    )
+
+    assert captured == {
+        "account_id": "acct",
+        "codes": ["US.SOXL"],
+        "now": datetime(2026, 10, 1, 15, 58, tzinfo=SoxlFearStrategyTrader.EASTERN_TZ),
+        "preferred_longport_account_id": "lp-acct",
+    }
+    assert snapshot["volume_ratio"] == 2.0
+    assert snapshot["current_volume"] == 200.0
+    assert snapshot["baseline_volume"] == 100.0
+    assert snapshot["volume_ratio_time"] == "15:58"
 
     def test_available_funds_below_cash_is_respected(self):
         snapshot = self._build(FakeIBService(available_funds=500.0, total_cash=606.92))
