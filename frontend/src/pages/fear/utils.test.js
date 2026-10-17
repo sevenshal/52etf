@@ -39,15 +39,32 @@ test('没有入库记录：hasData 为 false（和看板卡片的“未入库”
   expect(resolveFearSummaryScore(undefined, TODAY).hasData).toBe(false);
 });
 
-test('颜色与状态：沿用原有阈值，缺值有兜底', () => {
+test('颜色与状态：按 20 分一档分五档，缺值有兜底', () => {
   expect(fearColor(80)).toBe('#cf1322');
-  expect(fearStatus(80)).toBe('极度贪婪');
+  expect(fearStatus(80)).toBe('极端贪婪');
   expect(fearStatus(50)).toBe('中性');
   expect(fearColor(null)).toBe('#8c8c8c');
   expect(fearStatus(undefined)).toBe('未入库');
   // 中性色做文字太浅，换成深灰；其余颜色不变
   expect(fearTextColor(50)).toBe('#595959');
   expect(fearTextColor(80)).toBe('#cf1322');
+});
+
+test('档位边界：0-20 极端恐慌 / 20-40 恐慌 / 40-60 中性 / 60-80 贪婪 / 80-100 极端贪婪', () => {
+  expect(fearStatus(0)).toBe('极端恐慌');
+  expect(fearStatus(19.9)).toBe('极端恐慌');
+  expect(fearStatus(20)).toBe('恐慌');
+  expect(fearStatus(39.9)).toBe('恐慌');
+  expect(fearStatus(40)).toBe('中性');
+  expect(fearStatus(59.9)).toBe('中性');
+  expect(fearStatus(60)).toBe('贪婪');
+  expect(fearStatus(79.9)).toBe('贪婪');
+  expect(fearStatus(100)).toBe('极端贪婪');
+  // 越界分数先夹到 0-100 再分档
+  expect(fearStatus(-5)).toBe('极端恐慌');
+  expect(fearStatus(130)).toBe('极端贪婪');
+  expect(fearColor(20)).toBe('#52c41a');
+  expect(fearColor(60)).toBe('#fa8c16');
 });
 
 test('今天按上海时区给出 YYYY-MM-DD', () => {

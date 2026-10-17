@@ -633,7 +633,11 @@ const SOXXFearGreed = () => {
                         {component.included_in_total === false && (
                           <Tag color="default">暂未参与总分</Tag>
                         )}
-                        {component.rating && <Tag color={fearColor(component.score)}>{component.rating}</Tag>}
+                        {isFiniteNumber(component.score) && (
+                          // 分项评级统一用前端的五档（极端恐慌/恐慌/中性/贪婪/极端贪婪），
+                          // 不再展示后端入库的英文 rating，避免同一分数两套口径。
+                          <Tag color={fearColor(component.score)}>{fearStatus(component.score)}</Tag>
+                        )}
                       </span>
                     </div>
                     <div className="soxx-fear-component-values">

@@ -10,23 +10,28 @@ export const TIME_RANGES = [
   { label: '全部', value: -1 }
 ];
 
-// 获取恐贪指数颜色
-export const getFearGreedColor = (value) => {
-  if (value >= 75) return '#cf1322';  // 极度贪婪
-  if (value >= 55) return '#fa8c16';  // 贪婪
-  if (value >= 45) return '#d9d9d9';  // 中性
-  if (value >= 25) return '#52c41a';  // 恐惧
-  return '#237804';  // 极度恐惧
+// 恐贪分档：自算贪恐与 CNN 贪恐共用同一把尺子（按 20 分一档等分 0-100）
+// 0-20 极端恐慌，20-40 恐慌，40-60 中性，60-80 贪婪，80-100 极端贪婪
+export const FEAR_GREED_BANDS = [
+  { min: 80, max: 100, label: '极端贪婪', color: '#cf1322' },
+  { min: 60, max: 80, label: '贪婪', color: '#fa8c16' },
+  { min: 40, max: 60, label: '中性', color: '#d9d9d9' },
+  { min: 20, max: 40, label: '恐慌', color: '#52c41a' },
+  { min: 0, max: 20, label: '极端恐慌', color: '#237804' },
+];
+
+// 取分数所在档位：左闭右开（20 算恐慌、80 算极端贪婪），越界先夹到 0-100
+const getFearGreedBand = (value) => {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  const score = Math.min(100, Math.max(0, Number(value)));
+  return FEAR_GREED_BANDS.find(band => score >= band.min) || FEAR_GREED_BANDS[FEAR_GREED_BANDS.length - 1];
 };
 
+// 获取恐贪指数颜色
+export const getFearGreedColor = (value) => getFearGreedBand(value)?.color || '#8c8c8c';
+
 // 获取恐贪指数状态
-export const getFearGreedStatus = (score) => {
-  if (score >= 75) return '极度贪婪';
-  if (score >= 55) return '贪婪';
-  if (score >= 45) return '中性';
-  if (score >= 25) return '恐惧';
-  return '极度恐惧';
-};
+export const getFearGreedStatus = (score) => getFearGreedBand(score)?.label || '未入库';
 
 // ---- 贪恐值展示：看板卡片与个股详情「所属指数 · 贪恐」共用，保证两处显示同一个数 ----
 
