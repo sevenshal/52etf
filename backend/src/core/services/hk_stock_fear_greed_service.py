@@ -66,23 +66,23 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         source="FRED BAMLH0A0HYM2 and BAMLC0A0CM",
         proxy_note="Broad USD credit-risk proxy; it is not a local Hong Kong corporate spread.",
     ),
-}
-
-# 诊断分项：只展示、不参与总分。
-# - put_call_options 改用**持仓量**口径，方向（顶部 put 持仓偏高）与总分假设相反，
-#   且扣除趋势后区分力不稳定，所以在有结论前先不进总分；
-# - 南向资金 / 沽空比率 / 期权 IV 同样只作观察项。
-HK_DIAGNOSTIC_COMPONENTS: Dict[str, ComponentSpec] = {
     "put_call_options": ComponentSpec(
         key="put_call_options",
         name="HK Index Put/Call Options",
-        raw_label="-5-day index option put/call open-interest ratio",
+        raw_label="5-day index option put/call open-interest ratio",
         source="HKEX index-option daily report (hsio/hhio/htio) or DTOP backfill",
         proxy_note=(
             "持仓量口径（未平仓合约张数）的 P/C，不是单日成交口径。"
-            "CSI 香港创新药指数没有上市期权，标的用恒生科技指数期权代理。仅作诊断，暂未参与总分。"
+            "**方向为正**：恒指指数期权的买方几乎全是机构与结构性产品发行商，"
+            "put 持仓是给多头仓位上的保险，指数涨得越多、仓位越重、保护持仓越高，"
+            "所以高 P/C 偏向局部顶部（与美股 Cboe 个股成交量 P/C 的「高=底」相反）。"
+            "CSI 香港创新药指数没有上市期权，标的用恒生科技指数期权代理。"
         ),
     ),
+}
+
+# 诊断分项：只展示、不参与总分（南向资金、沽空比率、期权 IV）。
+HK_DIAGNOSTIC_COMPONENTS: Dict[str, ComponentSpec] = {
     "implied_volatility": ComponentSpec(
         key="implied_volatility",
         name="HK Index Option Implied Volatility",
@@ -119,7 +119,7 @@ HK_ALL_COMPONENTS: Dict[str, ComponentSpec] = {**HK_COMPONENTS, **HK_DIAGNOSTIC_
 
 # ETFFearGreedCloneHistory 里只有这些分项有独立列；南向资金、沽空比率只写进
 # components JSON，避免为两个观察项再加表字段。
-HK_DB_COMPONENT_KEYS = (*HK_COMPONENTS, "put_call_options", "implied_volatility")
+HK_DB_COMPONENT_KEYS = (*HK_COMPONENTS, "implied_volatility")
 
 
 class HKStockFearGreedCalculator:
@@ -484,11 +484,15 @@ class HKStockFearGreedCalculator:
         return HK_FEAR_TARGET_OPTION_PRODUCT.get(self.target_symbol)
 
     def _option_open_interest_ratio(self, index, start_date, end_date):
-        """港交所指数期权 5 日平均「持仓量」口径 P/C（取负，越高越恐慌）。
+        """港交所指数期权 5 日平均「持仓量」口径 P/C（取正，越高越贪婪）。
 
         数据来自 ``hk_option_daily``（``hk_option_sync`` 每日写入）。
-        持仓量是存量指标：不会被单日大单带走，但会随「涨多了买保护」漂移，
-        因此只作为诊断分项，不进入总分。
+
+        符号与美股相反：Cboe 个股期权成交量 P/C 里散户恐慌买 put 占主导，
+        所以「高 P/C = 恐惧 = 底部」；恒指期权的买方几乎全是机构与结构性产品
+        发行商，put 是给多头仓位上的保险，持仓随指数上涨而堆积，因此
+        「高 P/C = 贪婪 = 顶部」。2021-2026 年三个指数的局部顶底事件里方向一致，
+        故这里取正号，让它和总分同向。
         """
         product = self._option_product()
         if not product:
@@ -499,7 +503,7 @@ class HKStockFearGreedCalculator:
             return pd.Series(np.nan, index=index)
         if ratio.empty:
             return pd.Series(np.nan, index=index)
-        return -ratio.reindex(index).rolling(5, min_periods=3).mean()
+        return ratio.reindex(index).rolling(5, min_periods=3).mean()
 
     def _option_implied_volatility(self, index, start_date, end_date):
         """近月平值 IV 的 5 日均（取负，IV 越高越恐慌），小数表示。"""
@@ -660,7 +664,7 @@ class HKStockFearGreedCalculator:
             "This is an independent Hong Kong index sentiment gauge, not an official index product.",
             "Constituent weights start from verified official weight snapshots and drift with adjusted prices.",
             "Corporate-action adjustment is derived from Tushare pre_close versus prior raw close.",
-            "HKEX index-option put/call is open-interest based and stays out of the total score for now; it only covers dates after the option sync started.",
+            "HKEX index-option put/call is open-interest based and enters the total score with a positive sign: institution and issuer hedging piles up puts as the index rallies, so a high ratio leans toward a local top (the opposite of Cboe equity volume put/call). It only covers dates after the option sync started.",
             "Southbound flow, short-selling ratio and option IV are diagnostic only and do not enter the total score.",
             "USD Treasury and FRED credit spreads are global proxies, not Hong Kong local bond spreads.",
         ]

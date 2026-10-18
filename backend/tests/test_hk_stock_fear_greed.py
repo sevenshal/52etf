@@ -133,9 +133,10 @@ class HKStockFearGreedCalculatorTest(unittest.TestCase):
         self.assertTrue(scored["put_call_options_score"].isna().all())
         self.assertTrue(scored["market_momentum_score"].iloc[-1] > 50)
 
-    def test_diagnostics_stay_out_of_total(self):
-        self.assertNotIn("put_call_options", HK_COMPONENTS)
-        for key in ("put_call_options", "implied_volatility", "southbound_flow", "short_selling_ratio"):
+    def test_put_call_enters_total_and_diagnostics_stay_out(self):
+        self.assertIn("put_call_options", HK_COMPONENTS)
+        self.assertNotIn("put_call_options", HK_DIAGNOSTIC_COMPONENTS)
+        for key in ("implied_volatility", "southbound_flow", "short_selling_ratio"):
             self.assertIn(key, HK_DIAGNOSTIC_COMPONENTS)
 
         index = pd.DatetimeIndex([pd.Timestamp("2026-10-16")])
@@ -145,8 +146,8 @@ class HKStockFearGreedCalculatorTest(unittest.TestCase):
         )
         payload = HKStockFearGreedCalculator._component_payload(raw, scores, index[0])
 
-        self.assertFalse(payload["put_call_options"]["included_in_total"])
-        self.assertFalse(payload["put_call_options"]["used_in_score"])
+        self.assertTrue(payload["put_call_options"]["included_in_total"])
+        self.assertTrue(payload["put_call_options"]["used_in_score"])
         self.assertFalse(payload["southbound_flow"]["used_in_score"])
         self.assertTrue(payload["market_momentum"]["included_in_total"])
         self.assertTrue(payload["market_momentum"]["used_in_score"])
@@ -164,7 +165,8 @@ class HKStockFearGreedCalculatorTest(unittest.TestCase):
                 index, index[0].date(), index[-1].date()
             )
         mocked.assert_called_once_with("htio", index[0].date(), index[-1].date())
-        self.assertAlmostEqual(-1.5, float(values.iloc[-1]))
+        # 持仓量口径取正号：恒指 put 持仓随多头仓位堆积，高 P/C 偏顶部（贪婪）。
+        self.assertAlmostEqual(1.5, float(values.iloc[-1]))
 
     def test_southbound_flow_keeps_sign(self):
         calculator = object.__new__(HKStockFearGreedCalculator)

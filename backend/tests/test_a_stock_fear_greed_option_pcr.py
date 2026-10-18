@@ -194,3 +194,84 @@ class OptionDailyCoverageTest(TestCase):
             service._option_daily_dates_needing_refresh(self.DATES),
             self.DATES,
         )
+
+
+class OpenInterestPcrComponentTest(TestCase):
+    """持仓量口径 P/C：只作诊断，且方向与成交量口径相反。"""
+
+    def test_component_is_registered_as_display_only(self):
+        from src.core.services.a_stock_fear_greed_clone_service import (
+            A_STOCK_ALL_COMPONENTS,
+            A_STOCK_COMPONENTS,
+            A_STOCK_DISPLAY_ONLY_COMPONENTS,
+        )
+
+        self.assertIn("put_call_oi_options", A_STOCK_ALL_COMPONENTS)
+        self.assertIn("put_call_oi_options", A_STOCK_DISPLAY_ONLY_COMPONENTS)
+        self.assertNotIn("put_call_oi_options", A_STOCK_COMPONENTS)
+        # 原来的成交量口径仍在总分里，两者的 key 不能混用。
+        self.assertIn("put_call_options", A_STOCK_COMPONENTS)
+
+    def test_loader_requests_open_interest_column(self):
+        from unittest.mock import patch
+
+        calculator = AStockInnovation100FearGreedCloneCalculator("INNO100.CN")
+        expected = pd.Series([1.2], index=pd.DatetimeIndex(["2026-09-01"]))
+        with patch.object(
+            calculator, "_load_option_pcr", return_value=expected
+        ) as mocked:
+            calculator._load_option_open_interest_pcr(
+                date(2026, 8, 1), date(2026, 9, 1)
+            )
+        self.assertEqual("oi", mocked.call_args.kwargs["value_column"])
+
+    def test_raw_signal_keeps_positive_sign(self):
+        """持仓量口径取正号：高 P/C 对应偏贪婪（局部顶部）。"""
+        from unittest.mock import patch
+
+        calculator = AStockInnovation100FearGreedCloneCalculator("INNO100.CN")
+        index = pd.date_range("2026-08-03", periods=6, freq="B")
+        levels = pd.DataFrame(
+            {"level": 100.0 + index.month + index.day, "close": 100.0},
+            index=index,
+        )
+        ratio = pd.Series(1.6, index=index)
+        with patch.object(calculator, "_load_levels", return_value=levels), \
+             patch.object(calculator, "_build_holdings_by_date", return_value=({}, {})), \
+             patch.object(
+                 calculator, "_load_constituent_market_frames", return_value={}
+             ), \
+             patch.object(
+                 calculator, "_load_index_close",
+                 return_value=pd.Series(1.0, index=index),
+             ), \
+             patch.object(
+                 calculator, "_load_option_volume_pcr",
+                 return_value=pd.Series(0.9, index=index),
+             ), \
+             patch.object(
+                 calculator, "_load_option_open_interest_pcr",
+                 return_value=ratio,
+             ), \
+             patch.object(
+                 calculator, "_load_option_implied_volatility",
+                 return_value=pd.Series(0.2, index=index),
+             ), \
+             patch.object(
+                 calculator, "_load_credit_spread",
+                 return_value=pd.Series(0.01, index=index),
+             ), \
+             patch.object(
+                 calculator, "_weighted_range_position",
+                 return_value=pd.Series(0.5, index=index),
+             ), \
+             patch.object(
+                 calculator, "_weighted_advancing_amount_ratio",
+                 return_value=pd.Series(0.5, index=index),
+             ):
+            raw = calculator._build_raw_signals(
+                levels, {}, date(2026, 8, 1), date(2026, 9, 1)
+            )
+
+        self.assertAlmostEqual(1.6, float(raw["put_call_oi_options"].iloc[-1]))
+        self.assertAlmostEqual(-0.9, float(raw["put_call_options"].iloc[-1]))

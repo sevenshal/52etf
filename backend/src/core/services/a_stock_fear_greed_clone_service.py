@@ -176,9 +176,11 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
 }
 
-# 诊断分量：只保留 AA/AAA 信用利差，便于与总分分量对照，但不参与总分
-# （该分量在 A 股阶段顶底样本中的方向不稳定）。实现波动率相对变化已下线：
-# 波动率维度统一由参与总分的期权隐含波动率 implied_volatility 承担。
+# 诊断分量：只保留信用利差与持仓量口径的 put/call，便于与总分分量对照，但不参与总分。
+# - junk_bond_demand：该分量在 A 股阶段顶底样本中的方向不稳定；
+# - put_call_oi_options：持仓量口径 P/C，方向与成交量口径相反（顶部 put 持仓偏高），
+#   2020 年以来方向稳定但精确率低，先只展示、等积累更多样本再决定是否进总分。
+# 实现波动率相对变化已下线：波动率维度统一由参与总分的期权隐含波动率承担。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
     "junk_bond_demand": ComponentSpec(
         key="junk_bond_demand",
@@ -189,6 +191,17 @@ A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
             "ChinaBond AA/AAA credit-spread diagnostic. Retained for reference only; "
             "excluded from the Fear & Greed total because its historical A-share "
             "top/bottom direction is unstable."
+        ),
+    ),
+    "put_call_oi_options": ComponentSpec(
+        key="put_call_oi_options",
+        name="A-share Put/Call Open Interest",
+        raw_label="5-day average related option put/call open-interest ratio",
+        source="Tushare opt_basic + opt_daily(oi) in DuckDB",
+        proxy_note=(
+            "未平仓合约张数口径的 P/C（存量），与参与总分的成交量口径 put_call_options 是两条"
+            "不同的信息（日频相关为负）。方向为正：指数涨得越多、机构多头仓位越重，"
+            "需要持有的 put 保护越多，所以高 P/C 偏向局部顶部。仅作诊断，暂未参与总分。"
         ),
     ),
 }
@@ -286,7 +299,8 @@ class AStockInnovation100FearGreedCloneCalculator:
                     "rating": FearGreedCloneCalculator.rating(score),
                     "method": (
                         "available-component equal-weighted rolling z-score normal CDF; "
-                        "IV replaces realized-volatility change; AA/AAA credit spread is display-only"
+                        "IV replaces realized-volatility change; AA/AAA credit spread and "
+                        "open-interest P/C are display-only"
                     ),
                     "history_days": history_days,
                     "score_window": score_window,
@@ -534,7 +548,8 @@ class AStockInnovation100FearGreedCloneCalculator:
             "rating": FearGreedCloneCalculator.rating(score),
             "method": (
                 "available-component equal-weighted rolling z-score normal CDF; "
-                "IV replaces realized-volatility change; AA/AAA credit spread is display-only (intraday)"
+                "IV replaces realized-volatility change; AA/AAA credit spread and "
+                "open-interest P/C are display-only (intraday)"
             ),
             "history_days": history_days,
             "score_window": score_window,
@@ -998,6 +1013,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         option_pcr = self._load_option_volume_pcr(
             start_date, end_date, holdings_by_date, holdings_as_of_by_date,
         ).reindex(index).ffill(limit=3)
+        option_oi_pcr = self._load_option_open_interest_pcr(
+            start_date, end_date, holdings_by_date, holdings_as_of_by_date,
+        ).reindex(index).ffill(limit=3)
         implied_volatility = self._load_option_implied_volatility(
             start_date, end_date, holdings_by_date, holdings_as_of_by_date,
         ).reindex(index).ffill(limit=3)
@@ -1008,6 +1026,9 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["stock_price_strength"] = self._weighted_range_position(market_frames, holdings_by_date, index)
         df["stock_price_breadth"] = self._weighted_advancing_amount_ratio(market_frames, holdings_by_date, index)
         df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
+        # 持仓量口径：正号。put 未平仓随多头仓位堆积，顶部 put 持仓偏高，
+        # 与成交量口径（散户恐慌买 put，高 P/C 偏底部）方向相反。仅诊断，不进总分。
+        df["put_call_oi_options"] = option_oi_pcr.rolling(5, min_periods=3).mean()
         # 负号让 IV 越高（预期风险越高）时分数越低，并作为总分的波动率分量。
         df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
@@ -1104,12 +1125,22 @@ class AStockInnovation100FearGreedCloneCalculator:
         frame["date"] = pd.to_datetime(frame["date"])
         return pd.to_numeric(frame.set_index("date")["close"], errors="coerce").sort_index()
 
-    def _load_option_pcr_by_tracked_index(self, start_date: date, end_date: date) -> pd.DataFrame:
-        """按「期权标的跟踪的指数」分组，返回每组各自的 put/call 成交量比。
+    def _load_option_pcr_by_tracked_index(
+        self, start_date: date, end_date: date, value_column: str = "vol"
+    ) -> pd.DataFrame:
+        """按「期权标的跟踪的指数」分组，返回每组各自的 put/call 比率。
 
         同一条指数的多只期权（例如沪深300 的中金所 IO 和沪深两市的两只 300ETF 期权）
-        成交量直接加总再算比值；不同指数之间不在这里合并，由调用方按成分重叠度加权。
+        同一口径直接加总再算比值；不同指数之间不在这里合并，由调用方按成分重叠度加权。
+
+        ``value_column`` 决定口径：
+        - ``vol``：单日成交量（日流量）。散户恐慌买 put 是逆势的，所以高 P/C 偏底部；
+        - ``oi``：未平仓合约张数（存量）。它镜像多头仓位的规模，涨得越多、
+          机构要买的保护越多，所以高 P/C 偏顶部。
+        两者在 A 股 2020 年以来的样本里日频相关为负（约 -0.14），不是同一条信息。
         """
+        if value_column not in ("vol", "oi"):
+            raise ValueError(f"unsupported option pcr value column {value_column!r}")
         use_all_options = ALL_A_STOCK_OPTIONS in self.option_underlyings
         params: Dict[str, Any] = {
             "start_date": start_date.isoformat(),
@@ -1133,7 +1164,7 @@ class AStockInnovation100FearGreedCloneCalculator:
                         d.trade_date,
                         b.opt_code,
                         b.call_put,
-                        SUM(COALESCE(d.vol, 0)) AS volume
+                        SUM(COALESCE(d.{value_column}, 0)) AS volume
                     FROM a_stock_option_daily d
                     JOIN a_stock_option_basic b ON b.ts_code = d.ts_code
                     WHERE d.trade_date >= :start_date
@@ -1308,17 +1339,18 @@ class AStockInnovation100FearGreedCloneCalculator:
         self._proxy_membership_cache[cache_key] = membership
         return membership
 
-    def _load_option_volume_pcr(
+    def _load_option_pcr(
         self,
         start_date: date,
         end_date: date,
         holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]] = None,
         holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
+        value_column: str = "vol",
     ) -> pd.Series:
         if not self.option_underlyings:
             return pd.Series(dtype=float)
 
-        pcr = self._load_option_pcr_by_tracked_index(start_date, end_date)
+        pcr = self._load_option_pcr_by_tracked_index(start_date, end_date, value_column)
         if pcr.empty:
             return pd.Series(dtype=float)
         if len(pcr.columns) == 1:
@@ -1339,6 +1371,30 @@ class AStockInnovation100FearGreedCloneCalculator:
         total = aligned.sum(axis=1)
         blended = (pcr.fillna(0.0) * aligned).sum(axis=1) / total.replace(0, np.nan)
         return blended.dropna().sort_index()
+
+    def _load_option_volume_pcr(
+        self,
+        start_date: date,
+        end_date: date,
+        holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]] = None,
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
+    ) -> pd.Series:
+        """成交量（日流量）口径的 put/call，参与总分。"""
+        return self._load_option_pcr(
+            start_date, end_date, holdings_by_date, holdings_as_of_by_date, value_column="vol"
+        )
+
+    def _load_option_open_interest_pcr(
+        self,
+        start_date: date,
+        end_date: date,
+        holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]] = None,
+        holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
+    ) -> pd.Series:
+        """持仓量（存量）口径的 put/call，只作诊断，不参与总分。"""
+        return self._load_option_pcr(
+            start_date, end_date, holdings_by_date, holdings_as_of_by_date, value_column="oi"
+        )
 
     @staticmethod
     def _normal_cdf(value: float) -> float:

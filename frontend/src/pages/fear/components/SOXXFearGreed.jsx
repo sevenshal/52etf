@@ -46,6 +46,7 @@ const COMPONENT_LABELS = {
   stock_price_strength: '成分股强度',
   stock_price_breadth: '成分股广度',
   put_call_options: '期权 Put/Call',
+  put_call_oi_options: '期权 P/C（持仓量）',
   market_volatility: '市场波动率',
   implied_volatility: '期权隐含波动率（IV）',
   gold_implied_volatility: '黄金隐含波动率（GVZ）',
@@ -63,6 +64,10 @@ const COMPONENT_VALUE_META = {
     // 后端为使“低 P/C = 高分”而存入 -P/C；展示时还原为通常的正数 P/C。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
     description: 'Put/Call 比例越低，得分越高',
+  },
+  put_call_oi_options: {
+    label: '持仓量 P/C（5日均值）',
+    description: '按未平仓合约张数计算的 Put/Call；指数涨得越多、机构多头仓位越重，put 保护持仓越高，得分越高（与成交量口径方向相反）。仅作诊断，暂未参与总分',
   },
   southbound_flow: {
     label: '南向净买入（亿元，3日均）',
@@ -115,11 +120,11 @@ const JUNK_BOND_META_BY_MARKET = {
 };
 
 // P/C 的口径按市场区分：A股/美股用单日成交量，港股用未平仓合约张数。
+// 港股后端存的是 +持仓量P/C（顶部 put 持仓偏高 = 贪婪），展示时不要再取负。
 const PUT_CALL_META_BY_MARKET = {
   HK: {
     label: 'P/C（持仓量口径，5日均值）',
-    displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
-    description: '按未平仓合约张数计算的 Put/Call；局部顶部往往 put 持仓偏高，与「高 P/C = 恐慌」方向相反，仅作诊断、暂未参与总分',
+    description: '按未平仓合约张数计算的 Put/Call。恒指期权的买方以机构和结构性产品发行商为主，put 是给多头上的保险，指数越涨持仓越高，所以高 P/C 偏向局部顶部、得分更高；与美股 Cboe 个股成交量口径的「高 P/C = 恐慌」相反',
   },
 };
 

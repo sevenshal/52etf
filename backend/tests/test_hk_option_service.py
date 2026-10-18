@@ -142,7 +142,7 @@ class FearComponentTest(unittest.TestCase):
             product = HK_FEAR_TARGET_OPTION_PRODUCT.get(target["symbol"])
             self.assertIn(product, HK_OPTION_PRODUCTS, target["symbol"])
 
-    def test_put_call_component_is_negative_five_day_mean(self):
+    def test_put_call_component_is_positive_five_day_mean(self):
         index = pd.date_range("2026-09-01", periods=10, freq="B")
         ratio = pd.Series(
             [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7],
@@ -159,7 +159,8 @@ class FearComponentTest(unittest.TestCase):
         ):
             raw = calculator._option_open_interest_ratio(index, index[0].date(), index[-1].date())
 
-        self.assertAlmostEqual(-1.5, raw.iloc[-1], places=6)
+        # 持仓量口径取正号：恒指 put 持仓随多头仓位堆积，高 P/C 对应偏贪婪（局部顶部）。
+        self.assertAlmostEqual(1.5, raw.iloc[-1], places=6)
         self.assertTrue(raw.iloc[0] != raw.iloc[0])  # 前三天不足 min_periods，应为空
 
     def test_missing_option_history_keeps_component_empty(self):
