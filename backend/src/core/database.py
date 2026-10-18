@@ -627,6 +627,40 @@ class HKOptionDaily(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class HKSouthboundDaily(Base):
+    """港股通（南向）每日净买入，供港股指数贪恐的南向资金诊断分项使用。
+
+    ``south_net`` 统一成亿元、正数代表净买入。tushare ``moneyflow_hsgt`` 在
+    2023-11-24 之前给的是当日净额（百万元），之后改为累计净买入（亿元），
+    入库前由 ``hk_sentiment_data_service`` 归一化。
+    """
+
+    __tablename__ = 'hk_southbound_daily'
+
+    date = Column(Date, primary_key=True)
+    south_net = Column(Float)
+    ggt_ss = Column(Float)
+    ggt_sz = Column(Float)
+    source = Column(String(32))
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+class HKShortSellingDaily(Base):
+    """港交所市场层面沽空成交占比（指定证券，剔除 ETP）。
+
+    数据来自每日行情页 ``dayquot/d{YYMMDD}e.htm`` 尾部汇总，官方只保留约两个月，
+    因此库里靠每日增量累积；早期日期缺失时该分项留空、不参与打分。
+    """
+
+    __tablename__ = 'hk_short_selling_daily'
+
+    date = Column(Date, primary_key=True)
+    short_turnover = Column(Float)
+    market_turnover = Column(Float)
+    short_ratio = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class GoldFearGreedInput(Base):
     """黄金五因子使用的外部基础数据，按实际可用日保存以避免回测未来函数。"""
     __tablename__ = 'gold_fear_greed_inputs'

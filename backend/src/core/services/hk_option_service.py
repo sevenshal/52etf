@@ -739,12 +739,13 @@ def _round(value: Optional[float], digits: int) -> Optional[float]:
     return round(float(value), digits)
 
 
-def load_option_pcr_series(product: str, start_date: date, end_date: date) -> pd.Series:
-    """读某产品在区间内的成交量口径 PUT/CALL 比率（缺失日为空）。"""
+def _load_option_column(
+    product: str, column, start_date: date, end_date: date
+) -> pd.Series:
     db = Session()
     try:
         rows = (
-            db.query(HKOptionDaily.date, HKOptionDaily.put_call_volume_ratio)
+            db.query(HKOptionDaily.date, column)
             .filter(
                 HKOptionDaily.product == product,
                 HKOptionDaily.date >= start_date,
@@ -759,3 +760,26 @@ def load_option_pcr_series(product: str, start_date: date, end_date: date) -> pd
         return pd.Series(dtype=float)
     index = pd.DatetimeIndex([row[0] for row in rows], name="date")
     return pd.Series([row[1] for row in rows], index=index, dtype=float)
+
+
+def load_option_pcr_series(product: str, start_date: date, end_date: date) -> pd.Series:
+    """读某产品在区间内的成交量口径 PUT/CALL 比率（缺失日为空）。"""
+    return _load_option_column(
+        product, HKOptionDaily.put_call_volume_ratio, start_date, end_date
+    )
+
+
+def load_option_oi_pcr_series(product: str, start_date: date, end_date: date) -> pd.Series:
+    """读某产品在区间内的持仓量口径 PUT/CALL 比率（缺失日为空）。"""
+    return _load_option_column(
+        product, HKOptionDaily.put_call_open_interest_ratio, start_date, end_date
+    )
+
+
+def load_option_iv_series(product: str, start_date: date, end_date: date) -> pd.Series:
+    """读某产品在区间内的平值 IV，换算成小数（0.17 表示 17%）。"""
+    series = _load_option_column(product, HKOptionDaily.atm_iv, start_date, end_date)
+    if series.empty:
+        return series
+    return series / 100.0
+

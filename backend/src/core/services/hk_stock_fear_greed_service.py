@@ -9,7 +9,12 @@ import pandas as pd
 from sqlalchemy import text
 
 from .fear_greed_clone_service import ComponentSpec, FearGreedCloneCalculator, FearGreedCloneError
-from .hk_option_service import HK_FEAR_TARGET_OPTION_PRODUCT, load_option_pcr_series
+from .hk_option_service import (
+    HK_FEAR_TARGET_OPTION_PRODUCT,
+    load_option_iv_series,
+    load_option_oi_pcr_series,
+)
+from .hk_sentiment_data_service import load_short_selling_ratio, load_southbound_net
 from ..analytics_database import AnalyticsSession
 from ..database import ETFFearGreedCloneHistory, Session
 from ...robot.hk_stock_base_data_config import (
@@ -40,16 +45,6 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         source="official index weights + Tushare hk_daily",
         proxy_note="Uses turnover, so no volume adjustment is required for corporate actions.",
     ),
-    "put_call_options": ComponentSpec(
-        key="put_call_options",
-        name="HK Index Put/Call Options",
-        raw_label="-5-day index option put/call volume ratio",
-        source="HKEX index-option daily report (hsio/hhio/htio) or DTOP backfill",
-        proxy_note=(
-            "Uses HKEX index options. The CSI Hong Kong innovative-drug index has no listed "
-            "options, so the Hang Seng TECH index option is used as its proxy."
-        ),
-    ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
         name="HK Index Volatility",
@@ -72,6 +67,59 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         proxy_note="Broad USD credit-risk proxy; it is not a local Hong Kong corporate spread.",
     ),
 }
+
+# 诊断分项：只展示、不参与总分。
+# - put_call_options 改用**持仓量**口径，方向（顶部 put 持仓偏高）与总分假设相反，
+#   且扣除趋势后区分力不稳定，所以在有结论前先不进总分；
+# - 南向资金 / 沽空比率 / 期权 IV 同样只作观察项。
+HK_DIAGNOSTIC_COMPONENTS: Dict[str, ComponentSpec] = {
+    "put_call_options": ComponentSpec(
+        key="put_call_options",
+        name="HK Index Put/Call Options",
+        raw_label="-5-day index option put/call open-interest ratio",
+        source="HKEX index-option daily report (hsio/hhio/htio) or DTOP backfill",
+        proxy_note=(
+            "持仓量口径（未平仓合约张数）的 P/C，不是单日成交口径。"
+            "CSI 香港创新药指数没有上市期权，标的用恒生科技指数期权代理。仅作诊断，暂未参与总分。"
+        ),
+    ),
+    "implied_volatility": ComponentSpec(
+        key="implied_volatility",
+        name="HK Index Option Implied Volatility",
+        raw_label="-5-day at-the-money implied volatility",
+        source="HKEX index-option daily report (ATM IV) or DTOP settlement inversion",
+        proxy_note=(
+            "近月平值期权的隐含波动率；日报直接给 IV% 的日期用官方值，"
+            "只拿到结算价的日期用 Black-76 反解。仅作诊断，暂未参与总分。"
+        ),
+    ),
+    "southbound_flow": ComponentSpec(
+        key="southbound_flow",
+        name="Southbound Net Buy",
+        raw_label="3-day average southbound net buy (CNY 100mn)",
+        source="Tushare moneyflow_hsgt",
+        proxy_note=(
+            "港股通（沪+深）每日净买入，正数=净买入。历史口径在 2023-11-24 由"
+            "「当日净额（百万元）」改为「累计净买入（亿元）」，入库时已归一化。仅作诊断，暂未参与总分。"
+        ),
+    ),
+    "short_selling_ratio": ComponentSpec(
+        key="short_selling_ratio",
+        name="HK Market Short Selling Ratio",
+        raw_label="-5-day average short-selling turnover ratio",
+        source="HKEX daily quotation page (dayquot)",
+        proxy_note=(
+            "全市场指定证券（剔除 ETP）沽空成交额占成交额比例；港交所只保留约两个月，"
+            "库内由每日增量累积，早期为空。仅作诊断，暂未参与总分。"
+        ),
+    ),
+}
+
+HK_ALL_COMPONENTS: Dict[str, ComponentSpec] = {**HK_COMPONENTS, **HK_DIAGNOSTIC_COMPONENTS}
+
+# ETFFearGreedCloneHistory 里只有这些分项有独立列；南向资金、沽空比率只写进
+# components JSON，避免为两个观察项再加表字段。
+HK_DB_COMPONENT_KEYS = (*HK_COMPONENTS, "put_call_options", "implied_volatility")
 
 
 class HKStockFearGreedCalculator:
@@ -192,7 +240,7 @@ class HKStockFearGreedCalculator:
                     "warnings": record["warnings"],
                     "updated_at": datetime.now(),
                 }
-                for key in HK_COMPONENTS:
+                for key in HK_DB_COMPONENT_KEYS:
                     values[f"{key}_score"] = components[key]["score"]
                     values[f"{key}_raw"] = components[key]["raw_value"]
                 row = (
@@ -423,24 +471,64 @@ class HKStockFearGreedCalculator:
         raw["market_momentum"] = close / close.rolling(125).mean() - 1
         raw["stock_price_strength"] = self._strength(frames, holdings, index)
         raw["stock_price_breadth"] = self._breadth(frames, holdings, index)
-        raw["put_call_options"] = self._option_put_call_ratio(index, start_date, end_date)
+        raw["put_call_options"] = self._option_open_interest_ratio(index, start_date, end_date)
         raw["market_volatility"] = -(realized / realized.rolling(50).mean() - 1)
         raw["safe_haven_demand"] = close.pct_change(20) - tlt.pct_change(20)
         raw["junk_bond_demand"] = credit
+        raw["implied_volatility"] = self._option_implied_volatility(index, start_date, end_date)
+        raw["southbound_flow"] = self._southbound_flow(index, start_date, end_date)
+        raw["short_selling_ratio"] = self._short_selling_ratio(index, start_date, end_date)
         return raw.replace([np.inf, -np.inf], np.nan)
 
-    def _option_put_call_ratio(self, index, start_date, end_date):
-        """港交所指数期权 5 日平均看跌/看涨成交量比（取负，越高越恐慌）。
+    def _option_product(self) -> Optional[str]:
+        return HK_FEAR_TARGET_OPTION_PRODUCT.get(self.target_symbol)
 
-        数据来自 ``hk_option_daily``（``hk_option_sync`` 每日写入）；
-        没有期权历史的早期日期留空，该分量自动不参与当日总分。
+    def _option_open_interest_ratio(self, index, start_date, end_date):
+        """港交所指数期权 5 日平均「持仓量」口径 P/C（取负，越高越恐慌）。
+
+        数据来自 ``hk_option_daily``（``hk_option_sync`` 每日写入）。
+        持仓量是存量指标：不会被单日大单带走，但会随「涨多了买保护」漂移，
+        因此只作为诊断分项，不进入总分。
         """
-        product = HK_FEAR_TARGET_OPTION_PRODUCT.get(self.target_symbol)
+        product = self._option_product()
         if not product:
             return pd.Series(np.nan, index=index)
         try:
-            ratio = load_option_pcr_series(product, start_date, end_date)
+            ratio = load_option_oi_pcr_series(product, start_date, end_date)
         except Exception:  # noqa: BLE001 - 期权表缺失时退化为不参与
+            return pd.Series(np.nan, index=index)
+        if ratio.empty:
+            return pd.Series(np.nan, index=index)
+        return -ratio.reindex(index).rolling(5, min_periods=3).mean()
+
+    def _option_implied_volatility(self, index, start_date, end_date):
+        """近月平值 IV 的 5 日均（取负，IV 越高越恐慌），小数表示。"""
+        product = self._option_product()
+        if not product:
+            return pd.Series(np.nan, index=index)
+        try:
+            series = load_option_iv_series(product, start_date, end_date)
+        except Exception:  # noqa: BLE001
+            return pd.Series(np.nan, index=index)
+        if series.empty:
+            return pd.Series(np.nan, index=index)
+        return -series.reindex(index).rolling(5, min_periods=3).mean()
+
+    def _southbound_flow(self, index, start_date, end_date):
+        """南向资金 3 日平均净买入（亿元），正数=净买入，越高越贪婪。"""
+        try:
+            net = load_southbound_net(start_date, end_date)
+        except Exception:  # noqa: BLE001 - 表不存在时退化为不参与
+            return pd.Series(np.nan, index=index)
+        if net.empty:
+            return pd.Series(np.nan, index=index)
+        return net.reindex(index).rolling(3, min_periods=2).mean()
+
+    def _short_selling_ratio(self, index, start_date, end_date):
+        """全市场沽空成交占比的 5 日均（取负，沽空越重越恐慌）。"""
+        try:
+            ratio = load_short_selling_ratio(start_date, end_date)
+        except Exception:  # noqa: BLE001
             return pd.Series(np.nan, index=index)
         if ratio.empty:
             return pd.Series(np.nan, index=index)
@@ -510,7 +598,8 @@ class HKStockFearGreedCalculator:
     @staticmethod
     def _score(raw, score_window, min_periods):
         result = raw.copy()
-        for key in HK_COMPONENTS:
+        # 诊断分项也要算分（前端要展示 0-100 与五档标签），只是不进总分。
+        for key in HK_ALL_COMPONENTS:
             series = raw[key]
             mean = series.rolling(score_window, min_periods=min_periods).mean()
             std = series.rolling(score_window, min_periods=min_periods).std(ddof=0)
@@ -547,16 +636,18 @@ class HKStockFearGreedCalculator:
     @staticmethod
     def _component_payload(raw, scores, timestamp):
         result = {}
-        for key, spec in HK_COMPONENTS.items():
+        for key, spec in HK_ALL_COMPONENTS.items():
             score = scores.at[timestamp, f"{key}_score"]
             raw_value = raw.at[timestamp, key]
             score_value = None if pd.isna(score) else float(score)
+            included_in_total = key in HK_COMPONENTS
             result[key] = {
                 "name": spec.name,
                 "score": None if score_value is None else round(score_value, 2),
                 "rating": None if score_value is None else FearGreedCloneCalculator.rating(score_value),
                 "raw_value": None if pd.isna(raw_value) else round(float(raw_value), 6),
-                "used_in_score": score_value is not None,
+                "used_in_score": score_value is not None and included_in_total,
+                "included_in_total": included_in_total,
                 "raw_label": spec.raw_label,
                 "source": spec.source,
                 "proxy_note": spec.proxy_note,
@@ -569,6 +660,7 @@ class HKStockFearGreedCalculator:
             "This is an independent Hong Kong index sentiment gauge, not an official index product.",
             "Constituent weights start from verified official weight snapshots and drift with adjusted prices.",
             "Corporate-action adjustment is derived from Tushare pre_close versus prior raw close.",
-            "HKEX index-option put/call is volume based; it only covers dates after the option sync started.",
+            "HKEX index-option put/call is open-interest based and stays out of the total score for now; it only covers dates after the option sync started.",
+            "Southbound flow, short-selling ratio and option IV are diagnostic only and do not enter the total score.",
             "USD Treasury and FRED credit spreads are global proxies, not Hong Kong local bond spreads.",
         ]

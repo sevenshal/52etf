@@ -51,6 +51,8 @@ const COMPONENT_LABELS = {
   gold_implied_volatility: '黄金隐含波动率（GVZ）',
   safe_haven_demand: '避险需求',
   junk_bond_demand: 'AA/AAA 信用利差',
+  southbound_flow: '南向资金',
+  short_selling_ratio: '沽空比率',
   cnn_fear_greed: 'CNN 贪恐',
   szdt_fear_greed: '外部来源贪恐',
 };
@@ -61,6 +63,16 @@ const COMPONENT_VALUE_META = {
     // 后端为使“低 P/C = 高分”而存入 -P/C；展示时还原为通常的正数 P/C。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
     description: 'Put/Call 比例越低，得分越高',
+  },
+  southbound_flow: {
+    label: '南向净买入（亿元，3日均）',
+    description: '港股通（沪+深）每日净买入，正数=净买入；净买入越多，得分越高。仅作诊断，暂未参与总分',
+  },
+  short_selling_ratio: {
+    label: '沽空占成交额（%）',
+    // 后端存 -占比；展示时还原成正的百分比。
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) * 100 : value),
+    description: '全市场指定证券（剔除 ETP）沽空成交额占比，5 日均；沽空越重，得分越低。仅作诊断，暂未参与总分',
   },
   market_volatility: {
     label: '相对波动变化',
@@ -102,16 +114,32 @@ const JUNK_BOND_META_BY_MARKET = {
   },
 };
 
+// P/C 的口径按市场区分：A股/美股用单日成交量，港股用未平仓合约张数。
+const PUT_CALL_META_BY_MARKET = {
+  HK: {
+    label: 'P/C（持仓量口径，5日均值）',
+    displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
+    description: '按未平仓合约张数计算的 Put/Call；局部顶部往往 put 持仓偏高，与「高 P/C = 恐慌」方向相反，仅作诊断、暂未参与总分',
+  },
+};
+
 // 分项的展示元信息按市场取：junk_bond_demand 美股/A股数据源完全不同
-const getComponentValueMeta = (key, market) => (
-  key === 'junk_bond_demand'
-    ? (JUNK_BOND_META_BY_MARKET[market] || JUNK_BOND_META_BY_MARKET.DEFAULT)
-    : COMPONENT_VALUE_META[key]
-);
+const getComponentValueMeta = (key, market) => {
+  if (key === 'junk_bond_demand') {
+    return JUNK_BOND_META_BY_MARKET[market] || JUNK_BOND_META_BY_MARKET.DEFAULT;
+  }
+  if (key === 'put_call_options') {
+    return PUT_CALL_META_BY_MARKET[market] || COMPONENT_VALUE_META.put_call_options;
+  }
+  return COMPONENT_VALUE_META[key];
+};
 
 const getComponentLabel = (key, market) => {
   if (key === 'junk_bond_demand') {
     return market === 'CN' ? 'AA/AAA 信用利差' : '信用利差（高收益−投资级）';
+  }
+  if (key === 'put_call_options' && market === 'HK') {
+    return '期权 P/C（持仓量）';
   }
   return COMPONENT_LABELS[key];
 };

@@ -9,7 +9,9 @@ from sqlalchemy import text
 
 from src.core.analytics_database import AnalyticsSession
 from src.core.services.hk_stock_fear_greed_service import (
+    HK_ALL_COMPONENTS,
     HK_COMPONENTS,
+    HK_DIAGNOSTIC_COMPONENTS,
     HKStockFearGreedCalculator,
 )
 from src.robot.hk_stock_base_data_sync import (
@@ -118,7 +120,7 @@ class HKStockFearGreedCalculatorTest(unittest.TestCase):
     def test_score_leaves_missing_option_component_unused(self):
         index = pd.date_range("2024-01-01", periods=160, freq="B")
         raw = pd.DataFrame(index=index)
-        for offset, key in enumerate(HK_COMPONENTS):
+        for offset, key in enumerate(HK_ALL_COMPONENTS):
             raw[key] = pd.Series(range(len(index)), index=index, dtype=float) + offset
         raw["put_call_options"] = float("nan")
 
@@ -130,6 +132,64 @@ class HKStockFearGreedCalculatorTest(unittest.TestCase):
 
         self.assertTrue(scored["put_call_options_score"].isna().all())
         self.assertTrue(scored["market_momentum_score"].iloc[-1] > 50)
+
+    def test_diagnostics_stay_out_of_total(self):
+        self.assertNotIn("put_call_options", HK_COMPONENTS)
+        for key in ("put_call_options", "implied_volatility", "southbound_flow", "short_selling_ratio"):
+            self.assertIn(key, HK_DIAGNOSTIC_COMPONENTS)
+
+        index = pd.DatetimeIndex([pd.Timestamp("2026-10-16")])
+        raw = pd.DataFrame({key: [0.5] for key in HK_ALL_COMPONENTS}, index=index)
+        scores = pd.DataFrame(
+            {f"{key}_score": [55.0] for key in HK_ALL_COMPONENTS}, index=index
+        )
+        payload = HKStockFearGreedCalculator._component_payload(raw, scores, index[0])
+
+        self.assertFalse(payload["put_call_options"]["included_in_total"])
+        self.assertFalse(payload["put_call_options"]["used_in_score"])
+        self.assertFalse(payload["southbound_flow"]["used_in_score"])
+        self.assertTrue(payload["market_momentum"]["included_in_total"])
+        self.assertTrue(payload["market_momentum"]["used_in_score"])
+
+    def test_put_call_reads_open_interest_ratio(self):
+        calculator = object.__new__(HKStockFearGreedCalculator)
+        calculator.target_symbol = "HSTECH.HK"
+        index = pd.date_range("2026-09-01", periods=10, freq="B")
+        series = pd.Series(1.5, index=index)
+        with patch(
+            "src.core.services.hk_stock_fear_greed_service.load_option_oi_pcr_series",
+            return_value=series,
+        ) as mocked:
+            values = calculator._option_open_interest_ratio(
+                index, index[0].date(), index[-1].date()
+            )
+        mocked.assert_called_once_with("htio", index[0].date(), index[-1].date())
+        self.assertAlmostEqual(-1.5, float(values.iloc[-1]))
+
+    def test_southbound_flow_keeps_sign(self):
+        calculator = object.__new__(HKStockFearGreedCalculator)
+        calculator.target_symbol = "HSTECH.HK"
+        index = pd.date_range("2026-09-01", periods=5, freq="B")
+        net = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0], index=index)
+        with patch(
+            "src.core.services.hk_stock_fear_greed_service.load_southbound_net",
+            return_value=net,
+        ):
+            values = calculator._southbound_flow(index, index[0].date(), index[-1].date())
+        # 净买入为正 → 原始值也为正（越高越贪婪），不做取负。
+        self.assertGreater(float(values.iloc[-1]), 0)
+
+    def test_short_selling_ratio_is_negated(self):
+        calculator = object.__new__(HKStockFearGreedCalculator)
+        calculator.target_symbol = "HSTECH.HK"
+        index = pd.date_range("2026-09-01", periods=5, freq="B")
+        ratio = pd.Series(0.2, index=index)
+        with patch(
+            "src.core.services.hk_stock_fear_greed_service.load_short_selling_ratio",
+            return_value=ratio,
+        ):
+            values = calculator._short_selling_ratio(index, index[0].date(), index[-1].date())
+        self.assertAlmostEqual(-0.2, float(values.iloc[-1]))
 
     def test_price_drift_normalizes_weights(self):
         snapshots = {

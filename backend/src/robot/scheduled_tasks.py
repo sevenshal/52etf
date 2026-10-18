@@ -69,6 +69,8 @@ HK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
 HK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
 # 港交所期权日报：增量窗口（自然日）。htm 报告约保留一年，更早的日期走 DTOP 回补。
 HK_OPTION_DEFAULT_RECENT_DAYS = 7
+# 港股情绪数据（南向资金 / 沽空比率）：默认回看自然日。
+HK_SENTIMENT_DEFAULT_RECENT_DAYS = 10
 XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS = 24
 EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -124,6 +126,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "hk_stock_base_data_sync",
     "hk_index_fear_greed_backfill",
     "hk_option_sync",
+    "hk_sentiment_sync",
     "a_stock_innovation100_rebuild",
     "a_stock_micro400_rebuild",
 })
@@ -1200,6 +1203,50 @@ def _run_hk_option_sync(
         f"weekdays={result.get('weekday_count')} "
         f"non_trading={result.get('non_trading_days')} "
         f"errors={(result.get('errors') or [])[:3]}"
+    )
+
+
+def _run_hk_sentiment_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    recent_days: int = HK_SENTIMENT_DEFAULT_RECENT_DAYS,
+    include_southbound: bool = True,
+    include_short_selling: bool = True,
+):
+    """同步港股情绪诊断分项的两个外部序列（南向资金、市场沽空比率）。"""
+    from ..core.services.hk_sentiment_data_service import (
+        sync_short_selling,
+        sync_southbound,
+    )
+
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    start_value = (
+        _parse_optional_task_date(start_date, "开始日期")
+        or end_value - timedelta(days=max(int(recent_days), 1))
+    )
+    if start_value > end_value:
+        return f"HK sentiment sync skipped: start {start_value} > end {end_value}"
+
+    parts = []
+    errors = []
+    if include_southbound:
+        try:
+            result = sync_southbound(start_value, end_value)
+            parts.append(f"southbound_saved={result.get('saved')}")
+        except Exception as exc:  # noqa: BLE001 - 单个数据源失败不该拖垮另一个
+            errors.append(f"southbound failed={type(exc).__name__}: {exc}")
+    if include_short_selling:
+        try:
+            result = sync_short_selling(start_value, end_value)
+            parts.append(
+                f"short_saved={result.get('saved')} short_missing={result.get('missing')}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"short_selling failed={type(exc).__name__}: {exc}")
+    return (
+        f"HK sentiment sync {start_value}~{end_value} "
+        + " ".join(parts)
+        + (f" errors={errors[:3]}" if errors else "")
     )
 
 
@@ -2491,6 +2538,40 @@ class ScheduledTaskManager:
                         key="include_etf", label="同步ETF期权", value_type="boolean",
                         default=True,
                         description="同时抓 DTOP_O 里 2800 盈富等 ETF 期权，仅入库备查，不参与贪恐打分。",
+                    ),
+                ),
+            ),
+            "hk_sentiment_sync": TaskDefinition(
+                task_key="hk_sentiment_sync",
+                name="港股情绪数据同步",
+                description="抓南向资金净买入（tushare moneyflow_hsgt）与全市场沽空比率（港交所每日行情页尾部的沽空汇总），写入 hk_southbound_daily / hk_short_selling_daily，供港股指数贪恐的南向资金、沽空比率诊断分项使用。两个分项目前都不参与总分；沽空页官方只保留约两个月，库内靠每日增量累积，早期日期为空。",
+                default_time="19:10",
+                default_enabled=True,
+                sort_order=80,
+                runner=_run_hk_sentiment_sync,
+                depends_on=("hk_stock_base_data_sync",),
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date", label="开始日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；填了从该日开始补（南向资金可回补多年）。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date", label="结束日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时用今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_days", label="增量回看天数", value_type="integer",
+                        default=HK_SENTIMENT_DEFAULT_RECENT_DAYS,
+                        min_value=1, max_value=90, step=1, suffix="天",
+                        description="不填开始日期时，从今天往前覆盖多少个自然日（幂等重跑）。",
+                    ),
+                    TaskParameterDefinition(
+                        key="include_southbound", label="同步南向资金", value_type="boolean",
+                        default=True, description="关闭后只同步沽空比率。",
+                    ),
+                    TaskParameterDefinition(
+                        key="include_short_selling", label="同步沽空比率", value_type="boolean",
+                        default=True, description="关闭后只同步南向资金。",
                     ),
                 ),
             ),

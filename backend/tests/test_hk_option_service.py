@@ -152,12 +152,12 @@ class FearComponentTest(unittest.TestCase):
         calculator = object.__new__(HKStockFearGreedCalculator)
         calculator.target_symbol = "HSI.HK"
         with patch.object(
-            service, "load_option_pcr_series", return_value=ratio
+            service, "load_option_oi_pcr_series", return_value=ratio
         ), patch(
-            "src.core.services.hk_stock_fear_greed_service.load_option_pcr_series",
+            "src.core.services.hk_stock_fear_greed_service.load_option_oi_pcr_series",
             return_value=ratio,
         ):
-            raw = calculator._option_put_call_ratio(index, index[0].date(), index[-1].date())
+            raw = calculator._option_open_interest_ratio(index, index[0].date(), index[-1].date())
 
         self.assertAlmostEqual(-1.5, raw.iloc[-1], places=6)
         self.assertTrue(raw.iloc[0] != raw.iloc[0])  # 前三天不足 min_periods，应为空
@@ -167,10 +167,10 @@ class FearComponentTest(unittest.TestCase):
         calculator = object.__new__(HKStockFearGreedCalculator)
         calculator.target_symbol = "HSI.HK"
         with patch(
-            "src.core.services.hk_stock_fear_greed_service.load_option_pcr_series",
+            "src.core.services.hk_stock_fear_greed_service.load_option_oi_pcr_series",
             return_value=pd.Series(dtype=float),
         ):
-            raw = calculator._option_put_call_ratio(index, index[0].date(), index[-1].date())
+            raw = calculator._option_open_interest_ratio(index, index[0].date(), index[-1].date())
 
         self.assertTrue(raw.isna().all())
 
