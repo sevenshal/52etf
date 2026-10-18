@@ -1,3 +1,4 @@
+import logging
 import unittest
 from datetime import date
 from unittest.mock import patch
@@ -241,3 +242,116 @@ class SyncWriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncRangeResumeAndConcurrencyTest(unittest.TestCase):
+    """sync_range 的断点续传与多线程分片。"""
+
+    def _make_sync(self):
+        sync = object.__new__(HKOptionDailySync)
+        sync.logger = logging.getLogger("test.hk_option_sync")
+        sync.timeout = 1.0
+        sync.include_etf = True
+        sync.allow_dtop_backfill = True
+        sync._external_session = True
+        return sync
+
+    def test_resume_skips_covered_dates_but_keeps_recent(self):
+        sync = self._make_sync()
+        covered = {
+            date(2026, 9, 1),
+            date(2026, 9, 2),
+            date(2026, 9, 14),
+            date(2026, 9, 15),
+        }
+        synced_dates = []
+
+        def fake_sync_day(trade_date):
+            synced_dates.append(trade_date)
+            return {"saved": 1, "trading_day": True}
+
+        with patch.object(sync, "_covered_dates", return_value=covered), patch.object(
+            sync, "sync_date", side_effect=fake_sync_day
+        ):
+            result = sync.sync_range(
+                date(2026, 9, 1), date(2026, 9, 16), max_workers=1, keep_recent_days=3
+            )
+
+        # keep_until = 9/16 - 3 = 9/13：9/1、9/2 被跳过；9/14、9/15 虽在 covered
+        # 里但属于近 3 天的幂等窗口，仍照常重抓。
+        self.assertEqual(
+            synced_dates,
+            [
+                date(2026, 9, 3),
+                date(2026, 9, 4),
+                date(2026, 9, 7),
+                date(2026, 9, 8),
+                date(2026, 9, 9),
+                date(2026, 9, 10),
+                date(2026, 9, 11),
+                date(2026, 9, 14),
+                date(2026, 9, 15),
+                date(2026, 9, 16),
+            ],
+        )
+        self.assertEqual(result["skipped_synced_days"], 2)
+        self.assertEqual(result["weekday_count"], 10)
+        self.assertEqual(result["workers"], 1)
+        self.assertEqual(result["errors"], [])
+
+    def test_parallel_chunks_cover_all_dates_in_worker_threads(self):
+        import threading
+
+        sync = self._make_sync()
+        seen = []
+        threads = set()
+
+        def fake_sync_day(trade_date):
+            threads.add(threading.current_thread().name)
+            seen.append(trade_date)
+            return {"saved": 1, "trading_day": True}
+
+        # 2026-08-03 是周一：8/3~8/7、8/10~8/13 共 9 个工作日（8/8、8/9 为周末）。
+        dates = [
+            date(2026, 8, 3),
+            date(2026, 8, 4),
+            date(2026, 8, 5),
+            date(2026, 8, 6),
+            date(2026, 8, 7),
+            date(2026, 8, 10),
+            date(2026, 8, 11),
+            date(2026, 8, 12),
+            date(2026, 8, 13),
+        ]
+        # 线程内会新建实例，必须 patch 类级别的方法才能覆盖到 worker。
+        with patch.object(sync, "_covered_dates", return_value=set()), patch.object(
+            HKOptionDailySync, "sync_date", side_effect=fake_sync_day
+        ):
+            result = sync.sync_range(dates[0], dates[-1], max_workers=3)
+
+        self.assertEqual(sorted(seen), dates)
+        # 分片任务极快时线程池可能来不及起满 max_workers 个线程，只断言上限。
+        self.assertLessEqual(len(threads), 3)
+        self.assertEqual(result["workers"], 3)
+        self.assertEqual(result["weekday_count"], len(dates))
+        self.assertTrue(all(name.startswith("hkopt") for name in threads))
+
+    def test_thread_workers_use_independent_sessions(self):
+        sync = self._make_sync()
+
+        def fake_sync_day(trade_date):
+            return {"saved": 1, "trading_day": True}
+
+        dates = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        # 线程内会新建实例并各自 close；用类级 mock 统计创建数量。
+        with patch.object(sync, "_covered_dates", return_value=set()), patch.object(
+            HKOptionDailySync, "sync_date", side_effect=fake_sync_day
+        ), patch.object(HKOptionDailySync, "__init__", return_value=None) as mock_init, patch.object(
+            HKOptionDailySync, "close", return_value=None
+        ) as mock_close:
+            result = sync.sync_range(dates[0], dates[-1], max_workers=2)
+
+        self.assertEqual(result["weekday_count"], 3)
+        # max_workers=2 → 除主实例外再建 2 个线程实例（每个线程一个会话）。
+        self.assertEqual(mock_init.call_count, 2)
+        self.assertEqual(mock_close.call_count, 2)

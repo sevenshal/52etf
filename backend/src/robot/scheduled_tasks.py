@@ -1185,6 +1185,7 @@ def _run_hk_option_sync(
     end_date: Optional[str] = None,
     recent_days: int = HK_OPTION_DEFAULT_RECENT_DAYS,
     include_etf: bool = True,
+    max_workers: int = 4,
 ):
     from .hk_option_sync import sync_hk_option_daily
 
@@ -1193,6 +1194,7 @@ def _run_hk_option_sync(
         end_date=_parse_optional_task_date(end_date, "结束日期"),
         recent_days=recent_days,
         include_etf=include_etf,
+        max_workers=max_workers,
     )
     if result.get("skipped"):
         return f"HK option sync skipped: {result['skipped']}"
@@ -1201,6 +1203,7 @@ def _run_hk_option_sync(
         f"{result.get('start_date')}~{result.get('end_date')} "
         f"saved={result.get('saved')} "
         f"weekdays={result.get('weekday_count')} "
+        f"skipped_synced={result.get('skipped_synced_days', 0)} "
         f"non_trading={result.get('non_trading_days')} "
         f"errors={(result.get('errors') or [])[:3]}"
     )

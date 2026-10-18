@@ -29,6 +29,7 @@ def sync_hk_option_daily(
     recent_days: int = DEFAULT_RECENT_DAYS,
     include_etf: bool = True,
     allow_dtop_backfill: bool = True,
+    max_workers: int = 4,
 ) -> Dict[str, object]:
     end_value = end_date or date.today()
     if start_date is not None:
@@ -47,6 +48,6 @@ def sync_hk_option_daily(
         }
     sync = HKOptionDailySync(include_etf=include_etf, allow_dtop_backfill=allow_dtop_backfill)
     try:
-        return sync.sync_range(start_value, end_value)
+        return sync.sync_range(start_value, end_value, max_workers=max_workers)
     finally:
         sync.close()

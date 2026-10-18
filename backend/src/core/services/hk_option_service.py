@@ -26,13 +26,14 @@ import logging
 import math
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
-from sqlalchemy import text
+from sqlalchemy import func, text
 
 from ..analytics_database import AnalyticsSession
 from ..database import HKOptionDaily, Session
@@ -547,36 +548,137 @@ class HKOptionDailySync:
 
     # ---------------------------------------------------------------- 同步
 
-    def sync_range(self, start_date: date, end_date: date) -> Dict[str, object]:
-        days = 0
-        saved = 0
-        skipped = 0
-        errors: List[Dict[str, str]] = []
+    def sync_range(
+        self,
+        start_date: date,
+        end_date: date,
+        max_workers: int = 4,
+        skip_synced: bool = True,
+        keep_recent_days: int = 14,
+    ) -> Dict[str, object]:
+        """同步 ``[start_date, end_date]`` 的期权日报。
+
+        - ``skip_synced=True``：库里已同步完整的日期直接跳过（断点续传），
+          但 ``end_date`` 往前 ``keep_recent_days`` 天之内的照常重抓——
+          港交所会事后修正近几天的数据，保留这段幂等。
+        - ``max_workers>1``：把日期轮转分片，多个线程并行下载（每个线程
+          独立的数据库会话，逐日独立 commit，任一线程失败不影响其他日期）。
+          注意 HSTECH 上市前的老日期因 ``htio`` 永远缺行，不会被判为
+          「已同步完整」，每次续传都会重抓那几天，量小可接受。
+        """
+        weekday_dates: List[date] = []
         cursor = start_date
         while cursor <= end_date:
-            if cursor.weekday() >= 5:
-                cursor += timedelta(days=1)
-                continue
-            days += 1
-            try:
-                result = self.sync_date(cursor)
-                saved += result["saved"]
-                if not result["trading_day"]:
-                    skipped += 1
-            except Exception as exc:  # noqa: BLE001 - 网络/解析异常按天隔离
-                self.db.rollback()
-                errors.append({"date": cursor.isoformat(), "error": str(exc)})
-                self.logger.warning("HK option sync failed for %s: %s", cursor, exc, exc_info=True)
+            if cursor.weekday() < 5:
+                weekday_dates.append(cursor)
             cursor += timedelta(days=1)
-        self.db.commit()
+
+        skipped_synced = 0
+        if skip_synced and weekday_dates:
+            keep_until = end_date - timedelta(days=max(int(keep_recent_days), 0))
+            # 库里已有全部产品行的日期跳过，但 end_date 往前 keep_recent_days
+            # 天之内的照常重抓——港交所会事后修正近几天的数据，保留这段幂等。
+            covered = {
+                d for d in self._covered_dates(start_date, end_date) if d <= keep_until
+            }
+            if covered:
+                before = len(weekday_dates)
+                weekday_dates = [d for d in weekday_dates if d not in covered]
+                skipped_synced = before - len(weekday_dates)
+
+        workers = max(1, min(int(max_workers), len(weekday_dates) or 1))
+        if len(weekday_dates) <= 1:
+            chunks = [weekday_dates]
+        else:
+            # 轮转分片而不是连续分片：早期日期全走 DTOP 回补（慢），
+            # 近期走 htm（快），轮转能让各线程负载更均匀。
+            chunks = [weekday_dates[i::workers] for i in range(workers)]
+
+        days = saved = skipped = 0
+        errors: List[Dict[str, str]] = []
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hkopt") as pool:
+                futures = [pool.submit(self._sync_dates, chunk, True) for chunk in chunks]
+                outcomes = [future.result() for future in futures]
+        else:
+            outcomes = [self._sync_dates(chunks[0], False)]
+        for chunk_days, chunk_saved, chunk_skipped, chunk_errors in outcomes:
+            days += chunk_days
+            saved += chunk_saved
+            skipped += chunk_skipped
+            errors.extend(chunk_errors)
+
         return {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "weekday_count": days,
             "saved": saved,
             "non_trading_days": skipped,
+            "skipped_synced_days": skipped_synced,
+            "workers": workers,
             "errors": errors,
         }
+
+    def _covered_dates(self, start_date: date, end_date: date) -> set:
+        """``[start_date, end_date]`` 内库里已「同步完整」的日期集合。
+
+        「完整」指该日 ``hk_option_daily`` 中全部期望产品（三个指数期权，
+        勾了 ETF 再加 ETF 期权）都有行。HSTECH 上市前的日期因 ``htio``
+        永远缺行不会被判为完整，续传时会重抓那几天，量小可接受。
+        """
+        wanted = set(HK_OPTION_PRODUCTS)
+        if self.include_etf:
+            wanted |= set(HK_OPTION_ETF_PRODUCTS)
+        rows = (
+            self.db.query(HKOptionDaily.date, func.count(HKOptionDaily.product))
+            .filter(
+                HKOptionDaily.date >= start_date,
+                HKOptionDaily.date <= end_date,
+                HKOptionDaily.product.in_(sorted(wanted)),
+            )
+            .group_by(HKOptionDaily.date)
+            .all()
+        )
+        return {d for d, count in rows if count >= len(wanted)}
+
+    def _sync_dates(
+        self, dates: Sequence[date], own_session: bool
+    ) -> Tuple[int, int, int, List[Dict[str, str]]]:
+        """同步一批日期（在调用线程内执行）。
+
+        ``own_session=True`` 时为本线程新建独立的同步实例与数据库会话，
+        避免多线程共用一个 SQLAlchemy session；逐日独立 commit，任一天
+        失败不影响其他日期。
+        """
+        if not dates:
+            return 0, 0, 0, []
+        worker: HKOptionDailySync = self
+        if own_session and dates:
+            worker = HKOptionDailySync(
+                timeout=self.timeout,
+                include_etf=self.include_etf,
+                allow_dtop_backfill=self.allow_dtop_backfill,
+            )
+        days = saved = skipped = 0
+        errors: List[Dict[str, str]] = []
+        try:
+            for trade_date in dates:
+                days += 1
+                try:
+                    result = worker.sync_date(trade_date)
+                    saved += result["saved"]
+                    if not result["trading_day"]:
+                        skipped += 1
+                except Exception as exc:  # noqa: BLE001 - 网络/解析异常按天隔离
+                    worker.db.rollback()
+                    errors.append({"date": trade_date.isoformat(), "error": str(exc)})
+                    self.logger.warning(
+                        "HK option sync failed for %s: %s", trade_date, exc, exc_info=True
+                    )
+        finally:
+            if worker is not self:
+                worker.close()
+        return days, saved, skipped, errors
 
     def sync_date(self, trade_date: date) -> Dict[str, object]:
         saved = 0
