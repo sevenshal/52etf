@@ -224,6 +224,12 @@ const SOXXFearGreed = () => {
   const [realtimeLoadingSymbol, setRealtimeLoadingSymbol] = useState(null);
   const [realtimeErrorBySymbol, setRealtimeErrorBySymbol] = useState({});
   const [timeRange, setTimeRange] = useState(3);
+  // 点击子分项卡片：把该分项的得分曲线叠加到历史曲线上（再点一次取消）
+  const [activeComponentKey, setActiveComponentKey] = useState(null);
+
+  useEffect(() => {
+    setActiveComponentKey(null);
+  }, [expandedSymbol]);
 
   const summaryBySymbol = useMemo(() => {
     const result = {};
@@ -379,12 +385,34 @@ const SOXXFearGreed = () => {
     const priceAxisRange = getFocusedAxisRange(prices);
     const valuationAxisRange = getFocusedAxisRange(valuationRatios);
 
+    // 选中的子分项：得分曲线画在同一个 0-100 轴上，便于和总分对照
+    const activeComponentSample = activeComponentKey
+      ? filteredData.reduce(
+        (found, item) => found || item.components?.[activeComponentKey],
+        null,
+      )
+      : null;
+    const activeComponentName = activeComponentKey
+      ? (activeComponentKey === 'market_volatility' && activeComponentSample?.raw_label === '-VIXCLS'
+        ? '市场隐含波动率（VIX）'
+        : getComponentLabel(activeComponentKey, expandedETF?.market)
+          || activeComponentSample?.name
+          || activeComponentKey)
+      : null;
+    const activeComponentScores = activeComponentKey
+      ? filteredData.map((item) => {
+        const value = item.components?.[activeComponentKey]?.score;
+        return isFiniteNumber(value) ? Number(value) : null;
+      })
+      : [];
+
     return {
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
       legend: {
         data: [
           `${ticker}贪恐`,
           '贪恐5日均线',
+          ...(activeComponentName ? [activeComponentName] : []),
           priceSeriesName,
           ...(showValuationRatio ? ['估值系数'] : []),
           '成交量',
@@ -501,6 +529,17 @@ const SOXXFearGreed = () => {
             data: ma5ReversalSignals,
           },
         },
+        ...(activeComponentKey ? [{
+          name: activeComponentName,
+          type: 'line',
+          yAxisIndex: 0,
+          smooth: true,
+          showSymbol: false,
+          connectNulls: false,
+          data: activeComponentScores,
+          lineStyle: { width: 1.5, type: 'dashed', color: '#722ed1' },
+          itemStyle: { color: '#722ed1' },
+        }] : []),
         {
           name: priceSeriesName,
           type: 'line',
@@ -534,7 +573,7 @@ const SOXXFearGreed = () => {
         },
       ],
     };
-  }, [expandedDetail, expandedETF, filteredData]);
+  }, [activeComponentKey, expandedDetail, expandedETF, filteredData]);
 
   const toggleExpanded = (symbol) => {
     setExpandedSymbol(current => (current === symbol ? null : symbol));
@@ -656,12 +695,23 @@ const SOXXFearGreed = () => {
             <Card
               size="small"
               className="soxx-fear-components-detail"
-              title={displayedRealtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
+              title={(
+                <span>
+                  {displayedRealtime?.components ? '子指标（实时）' : '子指标（最新日线）'}
+                  <Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
+                    点击分项可叠加到历史曲线
+                  </Text>
+                </span>
+              )}
             >
               <div className="soxx-fear-components-grid">
                 {componentEntries.map(([key, component]) => {
                   const meta = getComponentValueMeta(key, expandedETF?.market);
                   const isVixRaw = key === 'market_volatility' && component.raw_label === '-VIXCLS';
+                  const isActiveComponent = activeComponentKey === key;
+                  const toggleComponent = () => {
+                    setActiveComponentKey(current => (current === key ? null : key));
+                  };
                   const displayLabel = isVixRaw ? 'VIX（点）' : meta?.label || '模型原始值';
                   const displayRaw = isVixRaw
                     ? (isFiniteNumber(component.raw_value) ? -Number(component.raw_value) : component.raw_value)
@@ -670,7 +720,20 @@ const SOXXFearGreed = () => {
                     ? 'VIX（市场隐含波动率）越高，得分越低'
                     : meta?.description || component.raw_label;
                   return (
-                    <div className="soxx-fear-component" key={key}>
+                    <div
+                      className={`soxx-fear-component${isActiveComponent ? ' is-active' : ''}`}
+                      key={key}
+                      role="button"
+                      tabIndex={0}
+                      title={isActiveComponent ? '点击取消曲线叠加' : '点击在历史曲线上叠加该分项得分'}
+                      onClick={toggleComponent}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          toggleComponent();
+                        }
+                      }}
+                    >
                       <div className="soxx-fear-component-header">
                         <Text strong>{isVixRaw
                           ? '市场隐含波动率（VIX）'

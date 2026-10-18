@@ -398,6 +398,25 @@
   background: #fafafa;
   border: 1px solid #f0f0f0;
   border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+/* 点击分项 = 在历史曲线上叠加该分项得分；选中态用紫色描边与曲线颜色呼应 */
+.soxx-fear-component:hover {
+  background: #faf7ff;
+  border-color: #d3adf7;
+}
+
+.soxx-fear-component.is-active {
+  background: #f9f0ff;
+  border-color: #722ed1;
+  box-shadow: 0 0 0 1px rgba(114, 46, 209, 0.3);
+}
+
+.soxx-fear-component:focus-visible {
+  outline: 2px solid #722ed1;
+  outline-offset: 1px;
 }
 
 .soxx-fear-component-header {
