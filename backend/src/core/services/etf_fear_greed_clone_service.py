@@ -2715,7 +2715,13 @@ class ETFFearGreedCloneCalculator(FearGreedCloneCalculator):
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
         if include_components:
-            payload["components"] = row.components
+            components = dict(row.components or {})
+            # A 股已下线「实现波动率相对变化」诊断项（波动率维度统一用期权 IV 进总分）。
+            # 旧入库行的 components JSON 里仍带 market_volatility，读历史时过滤掉，
+            # 避免前端详情继续展示这个已停止计算的分项。
+            if str(row.symbol or "").upper() in A_STOCK_FEAR_GREED_TARGET_BY_SYMBOL:
+                components.pop("market_volatility", None)
+            payload["components"] = components
         else:
             payload["component_scores"] = {
                 "market_momentum": row.market_momentum_score,

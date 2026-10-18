@@ -176,7 +176,11 @@ raw_t = -mean(blended_PCR[t-4:t], min_periods=3)
 只有在完全拿不到目标成分快照、无法计算覆盖率时，多代理 PCR 才退回“代理组等权”，不是按期权
 成交量加权。日 PCR 对齐到指数交易日后最多向前填 3 天。
 
-### 3.5 市场波动 `market_volatility`
+### 3.5 市场波动 `market_volatility`（已下线，2026-10）
+
+A 股不再计算该诊断项：波动率维度统一由参与总分的期权隐含波动率 `implied_volatility`
+承担，实现波动率相对变化已从计算、入库和前端分项展示中移除。旧入库行的 `components`
+JSON 里仍带这个键，读取历史时会被过滤。以下为下线前的口径，仅作留档。
 
 ```text
 r_t = pct_change(L_t)

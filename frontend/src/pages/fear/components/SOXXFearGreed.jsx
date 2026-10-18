@@ -64,7 +64,7 @@ const COMPONENT_VALUE_META = {
   },
   market_volatility: {
     label: '相对波动变化',
-    description: 'A股：20日实现波动率相对50日均值，仅作诊断，不参与总分',
+    description: '20 日实现波动率相对 50 日均值的变化；波动率越高，得分越低',
   },
   implied_volatility: {
     label: '年化 IV（%）',
@@ -569,6 +569,11 @@ const SOXXFearGreed = () => {
     ...(latest?.components || {}),
     ...(displayedRealtime?.components || {}),
   };
+  // A 股已下线「实现波动率」诊断项（波动率维度统一用期权 IV 进总分），后端不再计算。
+  // 旧入库行的 components 里仍带着这个键，这里再兜一层，避免详情继续显示。
+  if (expandedETF?.market === 'CN') {
+    delete componentValues.market_volatility;
+  }
   const componentEntries = Object.entries(componentValues);
 
   const detailRef = useRef(null);

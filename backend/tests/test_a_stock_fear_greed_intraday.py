@@ -115,7 +115,8 @@ def _build_synthetic_context(calculator, n_days: int = 600):
 def test_iv_replaces_relative_realized_volatility_in_a_share_total():
     assert "implied_volatility" in A_STOCK_COMPONENTS
     assert "market_volatility" not in A_STOCK_COMPONENTS
-    assert "market_volatility" in A_STOCK_DISPLAY_ONLY_COMPONENTS
+    # 实现波动率诊断项已下线，不再出现在任何 A 股分量清单里
+    assert "market_volatility" not in A_STOCK_DISPLAY_ONLY_COMPONENTS
     assert "junk_bond_demand" not in A_STOCK_COMPONENTS
     assert "junk_bond_demand" in A_STOCK_DISPLAY_ONLY_COMPONENTS
 
@@ -138,7 +139,7 @@ def test_calculate_intraday_excludes_display_only_components_from_total():
     assert result["component_count"] == 6
     assert len(result["components_used"]) == 6
     assert result["components"]["implied_volatility"]["included_in_total"] is True
-    assert result["components"]["market_volatility"]["included_in_total"] is False
+    assert "market_volatility" not in result["components"]
     assert result["components"]["junk_bond_demand"]["included_in_total"] is False
     assert result["components"]["junk_bond_demand"]["used_in_score"] is False
     assert 0.0 <= result["score"] <= 100.0

@@ -176,19 +176,10 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
 }
 
-# 诊断分量：保留实现波动率相对变化与 AA/AAA 信用利差，便于与总分分量对照，
-# 但均不参与总分。后者在 A 股阶段顶底样本中的方向不稳定，因此只作展示。
+# 诊断分量：只保留 AA/AAA 信用利差，便于与总分分量对照，但不参与总分
+# （该分量在 A 股阶段顶底样本中的方向不稳定）。实现波动率相对变化已下线：
+# 波动率维度统一由参与总分的期权隐含波动率 implied_volatility 承担。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
-    "market_volatility": ComponentSpec(
-        key="market_volatility",
-        name="A-share Realized Volatility",
-        raw_label="-(20-day realized volatility / 50-day average - 1)",
-        source="A-share index level daily data",
-        proxy_note=(
-            "Retained as a diagnostic comparison against option IV; excluded from "
-            "the Fear & Greed total."
-        ),
-    ),
     "junk_bond_demand": ComponentSpec(
         key="junk_bond_demand",
         name="AA/AAA Credit Spread",
@@ -404,8 +395,6 @@ class AStockInnovation100FearGreedCloneCalculator:
                         stock_price_breadth_raw=components["stock_price_breadth"]["raw_value"],
                         put_call_options_score=components["put_call_options"]["score"],
                         put_call_options_raw=components["put_call_options"]["raw_value"],
-                        market_volatility_score=components["market_volatility"]["score"],
-                        market_volatility_raw=components["market_volatility"]["raw_value"],
                         implied_volatility_score=components["implied_volatility"]["score"],
                         implied_volatility_raw=components["implied_volatility"]["raw_value"],
                         safe_haven_demand_score=components["safe_haven_demand"]["score"],
@@ -1002,8 +991,6 @@ class AStockInnovation100FearGreedCloneCalculator:
     ) -> pd.DataFrame:
         index = pd.DatetimeIndex(levels.index, name="date")
         level = levels["level"].astype(float).reindex(index).ffill()
-        level_returns = level.pct_change()
-        realized_vol = level_returns.rolling(20).std() * np.sqrt(252)
 
         if market_frames is None:
             market_frames = self._load_constituent_market_frames(holdings_by_date, index, start_date, end_date)
@@ -1021,7 +1008,6 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["stock_price_strength"] = self._weighted_range_position(market_frames, holdings_by_date, index)
         df["stock_price_breadth"] = self._weighted_advancing_amount_ratio(market_frames, holdings_by_date, index)
         df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
-        df["market_volatility"] = -(realized_vol / realized_vol.rolling(50).mean() - 1.0)
         # 负号让 IV 越高（预期风险越高）时分数越低，并作为总分的波动率分量。
         df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
