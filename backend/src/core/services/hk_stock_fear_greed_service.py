@@ -9,6 +9,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from .fear_greed_clone_service import ComponentSpec, FearGreedCloneCalculator, FearGreedCloneError
+from .hk_option_service import HK_FEAR_TARGET_OPTION_PRODUCT, load_option_pcr_series
 from ..analytics_database import AnalyticsSession
 from ..database import ETFFearGreedCloneHistory, Session
 from ...robot.hk_stock_base_data_config import (
@@ -43,8 +44,11 @@ HK_COMPONENTS: Dict[str, ComponentSpec] = {
         key="put_call_options",
         name="HK Index Put/Call Options",
         raw_label="-5-day index option put/call volume ratio",
-        source="HKEX index-option daily data",
-        proxy_note="Reserved until the HKEX option history synchronizer has sufficient coverage.",
+        source="HKEX index-option daily report (hsio/hhio/htio) or DTOP backfill",
+        proxy_note=(
+            "Uses HKEX index options. The CSI Hong Kong innovative-drug index has no listed "
+            "options, so the Hang Seng TECH index option is used as its proxy."
+        ),
     ),
     "market_volatility": ComponentSpec(
         key="market_volatility",
@@ -419,11 +423,28 @@ class HKStockFearGreedCalculator:
         raw["market_momentum"] = close / close.rolling(125).mean() - 1
         raw["stock_price_strength"] = self._strength(frames, holdings, index)
         raw["stock_price_breadth"] = self._breadth(frames, holdings, index)
-        raw["put_call_options"] = np.nan
+        raw["put_call_options"] = self._option_put_call_ratio(index, start_date, end_date)
         raw["market_volatility"] = -(realized / realized.rolling(50).mean() - 1)
         raw["safe_haven_demand"] = close.pct_change(20) - tlt.pct_change(20)
         raw["junk_bond_demand"] = credit
         return raw.replace([np.inf, -np.inf], np.nan)
+
+    def _option_put_call_ratio(self, index, start_date, end_date):
+        """港交所指数期权 5 日平均看跌/看涨成交量比（取负，越高越恐慌）。
+
+        数据来自 ``hk_option_daily``（``hk_option_sync`` 每日写入）；
+        没有期权历史的早期日期留空，该分量自动不参与当日总分。
+        """
+        product = HK_FEAR_TARGET_OPTION_PRODUCT.get(self.target_symbol)
+        if not product:
+            return pd.Series(np.nan, index=index)
+        try:
+            ratio = load_option_pcr_series(product, start_date, end_date)
+        except Exception:  # noqa: BLE001 - 期权表缺失时退化为不参与
+            return pd.Series(np.nan, index=index)
+        if ratio.empty:
+            return pd.Series(np.nan, index=index)
+        return -ratio.reindex(index).rolling(5, min_periods=3).mean()
 
     def _load_us_close(self, symbol, start_date, end_date):
         db = AnalyticsSession()
@@ -548,6 +569,6 @@ class HKStockFearGreedCalculator:
             "This is an independent Hong Kong index sentiment gauge, not an official index product.",
             "Constituent weights start from verified official weight snapshots and drift with adjusted prices.",
             "Corporate-action adjustment is derived from Tushare pre_close versus prior raw close.",
-            "HKEX put/call is omitted until sufficient local option history is available.",
+            "HKEX index-option put/call is volume based; it only covers dates after the option sync started.",
             "USD Treasury and FRED credit spreads are global proxies, not Hong Kong local bond spreads.",
         ]

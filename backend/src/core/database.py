@@ -597,6 +597,36 @@ class ETFOptionExpiration(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
 
+class HKOptionDaily(Base):
+    """港交所期权每日汇总：指数期权（HSI/HSCEI/HSTECH）与 ETF 期权（2800 盈富）。
+
+    product 用港交所产品代号（hsio/hhio/htio）或 ETF 的 HKATS code（trf），
+    与 ``core.services.hk_option_service`` 里的定义一致。
+    """
+
+    __tablename__ = 'hk_option_daily'
+
+    product = Column(String(16), primary_key=True)
+    date = Column(Date, primary_key=True)
+    call_volume = Column(Integer)
+    put_volume = Column(Integer)
+    total_volume = Column(Integer)
+    put_call_volume_ratio = Column(Float)
+    call_open_interest = Column(Integer)
+    put_open_interest = Column(Integer)
+    total_open_interest = Column(Integer)
+    put_call_open_interest_ratio = Column(Float)
+    # 平值隐含波动率（百分数）与来源：report=港交所日报直接给，inverted=结算价反解
+    atm_iv = Column(Float)
+    atm_iv_source = Column(String(16))
+    atm_strike = Column(Float)
+    active_month = Column(String(16))
+    underlying_close = Column(Float)
+    # 港交所日报页脚自带的 PCR，用于交叉校验本地按档汇总的结果
+    reported_put_call_ratio = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
 class GoldFearGreedInput(Base):
     """黄金五因子使用的外部基础数据，按实际可用日保存以避免回测未来函数。"""
     __tablename__ = 'gold_fear_greed_inputs'

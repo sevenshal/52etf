@@ -67,6 +67,8 @@ HK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 HK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 900
 HK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
 HK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
+# 港交所期权日报：增量窗口（自然日）。htm 报告约保留一年，更早的日期走 DTOP 回补。
+HK_OPTION_DEFAULT_RECENT_DAYS = 7
 XUEQIU_TOKEN_DEFAULT_MAX_AGE_HOURS = 24
 EXTERNAL_TRADING_NAV_DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -121,6 +123,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "a_stock_etf_fear_greed_backfill",
     "hk_stock_base_data_sync",
     "hk_index_fear_greed_backfill",
+    "hk_option_sync",
     "a_stock_innovation100_rebuild",
     "a_stock_micro400_rebuild",
 })
@@ -1171,6 +1174,32 @@ def _run_hk_index_fear_greed_backfill(
         "HK index fear greed backfill "
         f"saved={saved} completed={len(results)} errors={len(errors)} "
         f"error_detail={errors[:5]}"
+    )
+
+
+def _run_hk_option_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    recent_days: int = HK_OPTION_DEFAULT_RECENT_DAYS,
+    include_etf: bool = True,
+):
+    from .hk_option_sync import sync_hk_option_daily
+
+    result = sync_hk_option_daily(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        recent_days=recent_days,
+        include_etf=include_etf,
+    )
+    if result.get("skipped"):
+        return f"HK option sync skipped: {result['skipped']}"
+    return (
+        "HK option sync "
+        f"{result.get('start_date')}~{result.get('end_date')} "
+        f"saved={result.get('saved')} "
+        f"weekdays={result.get('weekday_count')} "
+        f"non_trading={result.get('non_trading_days')} "
+        f"errors={(result.get('errors') or [])[:3]}"
     )
 
 
@@ -2430,6 +2459,38 @@ class ScheduledTaskManager:
                         default=HK_FEAR_GREED_DEFAULT_RECENT_DAYS,
                         min_value=0, max_value=60, step=1, suffix="天",
                         description="未填写输出开始日期时回写最近多少个自然日。",
+                    ),
+                ),
+            ),
+            "hk_option_sync": TaskDefinition(
+                task_key="hk_option_sync",
+                name="港股期权日报同步",
+                description="收盘后从港交所免费日报抓恒指/国企/恒生科技指数期权的成交量、持仓量与 IV%，写入 hk_option_daily，供港股指数贪恐的 put/call 分项使用；htm 报告只保留约一年，更早的日期自动改用 DTOP 结算统计并按结算价反解平值 IV。顺带把 2800 盈富等 ETF 期权入库备查。晚上跑两次，第一次撞上报告未发布时第二次补上。",
+                default_time="18:30",
+                default_enabled=True,
+                sort_order=79,
+                runner=_run_hk_option_sync,
+                depends_on=("hk_stock_base_data_sync",),
+                default_cron_rule="30 18,22 * * mon-fri",
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date", label="开始日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；填了从该日开始补，htm 过期会自动走 DTOP 回补。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date", label="结束日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时用今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="recent_days", label="增量回看天数", value_type="integer",
+                        default=HK_OPTION_DEFAULT_RECENT_DAYS,
+                        min_value=0, max_value=120, step=1, suffix="天",
+                        description="不填开始日期时，从库里最新一天往前覆盖多少个自然日（幂等重跑）。",
+                    ),
+                    TaskParameterDefinition(
+                        key="include_etf", label="同步ETF期权", value_type="boolean",
+                        default=True,
+                        description="同时抓 DTOP_O 里 2800 盈富等 ETF 期权，仅入库备查，不参与贪恐打分。",
                     ),
                 ),
             ),
