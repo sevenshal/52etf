@@ -38,6 +38,8 @@ from .a_stock_fear_volume_config import (
     A_STOCK_FEAR_SOURCE_OPTIONS,
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
+    HK_INNOVATION_DRUG_FEAR_SOURCE,
+    HK_INNOVATION_DRUG_FEAR_SOURCE_KEY,
 )
 from .account import valid_admin_account
 
@@ -137,6 +139,9 @@ FEAR_SOURCE_OPTIONS = {
         "market": "us",
     },
     **A_STOCK_FEAR_SOURCE_OPTIONS,
+    # 港股主题指数自算贪恐：A 股情绪量能回测（复用本模块的执行引擎与参数模型）
+    # 需要它做恐贪来源；SOXL 自己的前端选项不暴露（见 /options 的白名单）。
+    HK_INNOVATION_DRUG_FEAR_SOURCE_KEY: HK_INNOVATION_DRUG_FEAR_SOURCE,
 }
 
 TARGET_OPTIONS = [*US_TARGET_OPTIONS, *A_STOCK_TARGET_OPTIONS]

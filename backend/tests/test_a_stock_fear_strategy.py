@@ -9,6 +9,10 @@ from src.robot.a_stock_fear_strategy_trader import (
     AStockFearStrategyTrader,
     _fear_source_index_symbol,
     _fear_source_label,
+    _is_cross_market_fear_source,
+    _latest_fear_date,
+    _resolve_fear_score,
+    _signal_day_valuation,
     _strategy_config_id,
 )
 
@@ -21,12 +25,17 @@ class AStockFearStrategyTraderTest(TestCase):
         self.assertEqual("000015.SH", _fear_source_index_symbol("a_stock_000015_sh"))
         self.assertEqual("H30269.CSI", _fear_source_index_symbol("a_stock_h30269_csi"))
         self.assertEqual("INNO100.CN", _fear_source_index_symbol("a_stock_inno100_cn"))
+        # 港股自算贪恐：hk_<symbol 小写、点换下划线>
+        self.assertEqual("931250.CSI", _fear_source_index_symbol("hk_931250_csi"))
+        self.assertEqual("HSI.HK", _fear_source_index_symbol("hk_hsi_hk"))
         self.assertIsNone(_fear_source_index_symbol("cnn"))
         self.assertIsNone(_fear_source_index_symbol(None))
 
     def test_fear_source_label(self):
         self.assertIn("上证红利", _fear_source_label("a_stock_000015_sh"))
         self.assertIn("红利低波", _fear_source_label("a_stock_h30269_csi"))
+        self.assertIn("香港创新药", _fear_source_label("hk_931250_csi"))
+        self.assertIn("自算贪恐", _fear_source_label("hk_931250_csi"))
 
     def test_prev_china_trading_day_skips_weekends(self):
         # 2026-08-15 是周六 → 上一交易日 2026-08-14（周五）
@@ -132,3 +141,64 @@ class AStockFearStrategyTraderTest(TestCase):
         # 非法量比来源仍拒绝
         with self.assertRaises(Exception):
             AStockFearStrategyConfigPayload(volume_signal_symbol="BOGUS.XY")
+
+    def test_config_payload_allows_hk_innovation_drug_etf_and_fear_source(self):
+        """实盘可选港股创新药ETF 513120.SH，恐贪来源可选港股自算贪恐 hk_931250_csi。"""
+        payload = AStockFearStrategyConfigPayload(
+            symbol="513120.SH",
+            fear_source="hk_931250_csi",
+            volume_signal_symbol="513120.SH",
+            sub_symbol="513120.SH",
+            sub_fear_source="hk_931250_csi",
+            sub2_fear_source="hk_931250_csi",
+            sub3_fear_source="hk_931250_csi",
+        )
+        self.assertEqual("513120.SH", payload.symbol)
+        self.assertEqual("hk_931250_csi", payload.fear_source)
+        self.assertEqual("513120.SH", payload.volume_signal_symbol)
+        self.assertEqual("hk_931250_csi", payload.sub_fear_source)
+        self.assertEqual("hk_931250_csi", payload.sub2_fear_source)
+        self.assertEqual("hk_931250_csi", payload.sub3_fear_source)
+
+    def test_hk_fear_source_has_no_valuation_gate(self):
+        """港股指数没有成分一致预期估值：不设估值闸，不能当成“估值未就绪”卡死。"""
+        self.assertEqual(
+            (None, True),
+            _signal_day_valuation("hk_931250_csi", date(2026, 10, 16), 252),
+        )
+
+    def test_strategy_options_expose_hk_innovation_drug_pair(self):
+        """实盘配置下拉里要能看到 513120.SH、港股自算贪恐和一键预设。"""
+        from src.app.api.a_stock_fear_strategy import get_a_stock_fear_strategy_options
+
+        payload = get_a_stock_fear_strategy_options(account_id="test")
+        self.assertIn("513120.SH", {item["value"] for item in payload["target_options"]})
+        self.assertIn(
+            "hk_931250_csi",
+            {item["value"] for item in payload["fear_source_options"]},
+        )
+        self.assertIn(
+            "hk_931250_csi",
+            {item["fear_source"] for item in payload["preset_pairs"]},
+        )
+
+    def test_cross_market_fear_falls_back_to_latest_available_day(self):
+        """港股休市日没有当日恐贪：回退到最近可用值（7 天内），与回测 asof 口径一致。"""
+        self.assertTrue(_is_cross_market_fear_source("hk_931250_csi"))
+        self.assertFalse(_is_cross_market_fear_source("a_stock_000015_sh"))
+        fear_map = {date(2026, 9, 30): 42.0, date(2026, 10, 8): 38.0}
+        self.assertEqual(
+            date(2026, 10, 8),
+            _latest_fear_date(fear_map, date(2026, 10, 9)),
+        )
+        # 超过 7 个自然日不沿用，避免拿过时情绪交易
+        self.assertIsNone(_latest_fear_date(fear_map, date(2026, 10, 20)))
+
+    def test_resolve_fear_score_only_falls_back_for_cross_market_sources(self):
+        fear_map = {date(2026, 10, 8): 38.0}
+        signal_date = date(2026, 10, 9)
+        # 港股来源：当日休市，回退最近可用值
+        self.assertEqual(38.0, _resolve_fear_score(fear_map, signal_date, "hk_931250_csi"))
+        # A 股来源：仍然要求信号日精确匹配
+        self.assertIsNone(_resolve_fear_score(fear_map, signal_date, "a_stock_000015_sh"))
+        self.assertEqual(38.0, _resolve_fear_score(fear_map, date(2026, 10, 8), "a_stock_000015_sh"))

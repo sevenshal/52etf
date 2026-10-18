@@ -426,7 +426,8 @@ const AStockFearStrategy = ({ embedded = false }) => {
       ...defaultValues,
       ...form.getFieldsValue(),
     };
-    // 跳转到「情绪 + 量能 超参数回测」页（SOXL 配置页同一个回测页面，支持 A股标的与 a_stock_* 恐贪来源）
+    // 跳转到「情绪 + 量能 超参数回测」页（SOXL 配置页同一个回测页面，支持 A股标的与
+    // a_stock_* / hk_*（港股主题指数自算贪恐）恐贪来源）
     // 实盘隔天信号语义 → 回测开启 execute_next_open（信号日收盘决策、次日开盘成交）、
     // trailing_stop_pct=0 = 贪恐即卖，与实盘完全对齐
     navigate('/a-stock-fear-volume-backtest', {

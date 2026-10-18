@@ -32,6 +32,8 @@ from .a_stock_fear_volume_config import (
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
     FEAR_SOURCE_OPTIONS,
+    HK_INNOVATION_DRUG_FEAR_SOURCE_KEY,
+    HK_INNOVATION_DRUG_PRESET_PAIR,
     SELL_MA5_CONFIRM_MODES,
     SELL_MA5_CONFIRM_OFF,
     VALUATION_POSITION_WINDOWS,
@@ -41,7 +43,11 @@ router = APIRouter(prefix="/api/a-stock-fear-strategy", tags=["a-stock-fear-stra
 logger = logging.getLogger(__name__)
 
 A_STOCK_SYMBOLS = {str(item["value"]).upper() for item in A_STOCK_TARGET_OPTIONS}
-A_STOCK_FEAR_SOURCE_KEYS = {key for key in A_STOCK_FEAR_SOURCE_OPTIONS}
+# 恐贪来源：A 股指数贪恐 + 港股主题指数的自算贪恐（历史由港股任务入库到同一张表）。
+A_STOCK_FEAR_SOURCE_KEYS = {
+    *A_STOCK_FEAR_SOURCE_OPTIONS,
+    HK_INNOVATION_DRUG_FEAR_SOURCE_KEY,
+}
 
 
 class AStockFearStrategyConfigPayload(BaseModel):
@@ -122,7 +128,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_fear_source(cls, value):
         value = (value or "").strip().lower()
         if value not in A_STOCK_FEAR_SOURCE_KEYS:
-            raise ValueError("恐贪来源必须是 A 股指数恐贪（a_stock_*）")
+            raise ValueError("恐贪来源必须是 A 股指数恐贪（a_stock_*）或港股自算贪恐（hk_*）")
         return value
 
     def _is_valid_volume_source_symbol(value: str) -> bool:
@@ -155,7 +161,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub_fear_source(cls, value):
         value = (value or "").strip().lower()
         if value not in A_STOCK_FEAR_SOURCE_KEYS:
-            raise ValueError("候补恐贪来源必须是 A 股指数恐贪（a_stock_*）")
+            raise ValueError("候补恐贪来源必须是 A 股指数恐贪（a_stock_*）或港股自算贪恐（hk_*）")
         return value
 
     @validator("sub_fear_source", pre=True, always=True)
@@ -196,7 +202,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub2_fear_source(cls, value):
         value = (value or "").strip().lower()
         if value not in A_STOCK_FEAR_SOURCE_KEYS and value not in {"qqq_clone", "cnn", "soxx_clone", "spy_clone", "dia_clone"}:
-            raise ValueError("第二候补恐贪来源必须是 a_stock_* 或美股自算贪恐（qqq_clone 等）")
+            raise ValueError("第二候补恐贪来源必须是 a_stock_*、hk_* 或美股自算贪恐（qqq_clone 等）")
         return value
 
     @validator("sub2_fear_source", pre=True, always=True)
@@ -242,7 +248,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     def validate_sub3_fear_source(cls, value):
         value = (value or "").strip().lower()
         if value not in A_STOCK_FEAR_SOURCE_KEYS and value not in {"qqq_clone", "cnn", "soxx_clone", "spy_clone", "dia_clone"}:
-            raise ValueError("第三候补恐贪来源必须是 a_stock_* 或美股自算贪恐（qqq_clone 等）")
+            raise ValueError("第三候补恐贪来源必须是 a_stock_*、hk_* 或美股自算贪恐（qqq_clone 等）")
         return value
 
     @validator("sub3_volume_signal_symbol")
@@ -715,7 +721,7 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_admin_acco
             }
             for key, config in FEAR_SOURCE_OPTIONS.items()
         ],
-        "preset_pairs": A_STOCK_PRESET_PAIRS,
+        "preset_pairs": [*A_STOCK_PRESET_PAIRS, HK_INNOVATION_DRUG_PRESET_PAIR],
         "default_request": {
             "symbol": "510880.SH",
             "fear_source": "a_stock_000015_sh",

@@ -14,23 +14,15 @@ from .a_stock_fear_volume_config import (
     A_STOCK_PRESET_PAIRS,
     A_STOCK_TARGET_OPTIONS,
     FEAR_SOURCE_OPTIONS,
+    HK_INNOVATION_DRUG_PRESET_PAIR,
 )
 
 
 router = APIRouter(prefix="/api/a-stock-fear-backtest", tags=["A-stock Fear Volume Backtest"])
 
-# 仅回测可选：513120 跟踪港股创新药，交易所在 A 股、历史价格在 A 股基金日线中。
-# 不复用实盘策略的交易池，避免本次研究 UI 扩大线上自动交易标的范围。
-A_STOCK_BACKTEST_EXTRA_TARGET_OPTIONS = (
-    {"label": "港股创新药ETF 513120.SH", "value": "513120.SH", "market": "a_stock"},
-)
-A_STOCK_BACKTEST_TARGET_OPTIONS = [
-    *A_STOCK_TARGET_OPTIONS,
-    *[
-        item for item in A_STOCK_BACKTEST_EXTRA_TARGET_OPTIONS
-        if item["value"] not in {option["value"] for option in A_STOCK_TARGET_OPTIONS}
-    ],
-]
+# 标的池与实盘共用（见 a_stock_fear_volume_config）：港股创新药 513120.SH 跟踪
+# 931250.CSI，交易所在 A 股、历史价格在 A 股基金日线中，实盘与回测都可选。
+A_STOCK_BACKTEST_TARGET_OPTIONS = list(A_STOCK_TARGET_OPTIONS)
 
 
 def _validate_a_stock_symbol(symbol: str) -> None:
@@ -48,7 +40,7 @@ def get_a_stock_fear_backtest_options(account_id: str = Depends(valid_admin_acco
             {"label": config["label"], "value": key, "symbol": config.get("symbol"), "market": config.get("market")}
             for key, config in FEAR_SOURCE_OPTIONS.items()
         ],
-        "a_stock_preset_pairs": A_STOCK_PRESET_PAIRS,
+        "a_stock_preset_pairs": [*A_STOCK_PRESET_PAIRS, HK_INNOVATION_DRUG_PRESET_PAIR],
         "default_request": {
             "symbol": A_STOCK_PRESET_PAIRS[0]["target_symbol"] if A_STOCK_PRESET_PAIRS else None,
             "volume_signal_symbol": None,

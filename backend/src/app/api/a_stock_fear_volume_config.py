@@ -31,9 +31,10 @@ SELL_MA5_CONFIRM_MODES = {
     SELL_MA5_CONFIRM_ALL,
     SELL_MA5_CONFIRM_NON_MAIN,
 }
-A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ")
-# 港股主题指数的自算贪恐已由港股任务计算入库；这里只把既有历史接入回测信号，
-# 不新增计算口径，也不加入实盘 A 股策略的 ``A_STOCK_FEAR_SOURCE_OPTIONS``。
+A_STOCK_FEAR_VOLUME_EXTRA_TARGET_ETFS = ("501225.SH", "159941.SZ", "159509.SZ", "513120.SH")
+# 港股主题指数的自算贪恐已由港股任务计算入库，直接复用既有历史，不新增计算口径。
+# 实盘与回测共用同一份选项：实盘只放宽了恐贪来源与交易标的的选择范围，
+# 不引入新的信号/仓位逻辑。
 HK_INNOVATION_DRUG_FEAR_SOURCE_KEY = "hk_931250_csi"
 _HK_INNOVATION_DRUG_TARGET = HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL["931250.CSI"]
 HK_INNOVATION_DRUG_FEAR_SOURCE = {
@@ -41,6 +42,22 @@ HK_INNOVATION_DRUG_FEAR_SOURCE = {
     "column": "etf_fear_greed",
     "symbol": _HK_INNOVATION_DRUG_TARGET["symbol"],
     "market": "hk",
+}
+# 港股创新药对应的场内 ETF：跟踪 931250.CSI，在 A 股交易，日线来自 A 股基金日线。
+HK_INNOVATION_DRUG_TARGET_ETF = "513120.SH"
+_HK_INNOVATION_DRUG_TARGET_LABEL = (
+    f"{A_STOCK_ETF_DAILY_NAMES.get(HK_INNOVATION_DRUG_TARGET_ETF, HK_INNOVATION_DRUG_TARGET_ETF)} "
+    f"{HK_INNOVATION_DRUG_TARGET_ETF}"
+)
+# 一键预设：港股创新药ETF × 港股自算贪恐（只在 A 股情绪量能实盘/回测里出现）
+HK_INNOVATION_DRUG_PRESET_PAIR = {
+    "key": f"{HK_INNOVATION_DRUG_TARGET_ETF}:{_HK_INNOVATION_DRUG_TARGET['symbol']}",
+    "target_symbol": HK_INNOVATION_DRUG_TARGET_ETF,
+    "target_label": _HK_INNOVATION_DRUG_TARGET_LABEL,
+    "fear_source": HK_INNOVATION_DRUG_FEAR_SOURCE_KEY,
+    "fear_symbol": _HK_INNOVATION_DRUG_TARGET["symbol"],
+    "fear_label": HK_INNOVATION_DRUG_FEAR_SOURCE["label"],
+    "label": f"{_HK_INNOVATION_DRUG_TARGET_LABEL} × {HK_INNOVATION_DRUG_FEAR_SOURCE['label']}",
 }
 
 

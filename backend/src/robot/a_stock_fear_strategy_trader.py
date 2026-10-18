@@ -73,6 +73,7 @@ from ..core.services.external_trading_valuation import (
 )
 from ..core.utils import mask_account_id, send_alert_email, send_configured_email
 from .a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
+from .hk_stock_base_data_config import HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ SELL_MA5_CONFIRM_OFF = "off"
 SELL_MA5_CONFIRM_ALL = "all"
 SELL_MA5_CONFIRM_NON_MAIN = "non_main"
 A_STOCK_INNO100_FEAR_SYMBOL = "INNO100.CN"
+# 跨市场恐贪（港股指数）允许回退到最近可用值的最大自然日跨度：港股休市日没有当日行，
+# 但 HK 贪恐本来也不会变，回退与回测 merge_asof(backward) 口径一致。
+CROSS_MARKET_FEAR_MAX_STALE_DAYS = 7
 MAIN_DB_WRITE_RETRY_ATTEMPTS = 4
 MAIN_DB_WRITE_RETRY_BASE_SECONDS = 1.0
 MAIN_DB_WRITE_RETRY_MAX_SECONDS = 8.0
@@ -101,12 +105,19 @@ def _strategy_config_id(config) -> int:
 
 
 def _fear_source_index_symbol(fear_source: str) -> Optional[str]:
-    """恐贪来源 key → 指数标的。a_stock_000015_sh → 000015.SH；qqq_clone → QQQ.US（美股自算贪恐）。"""
+    """恐贪来源 key → 指数标的。
+
+    a_stock_000015_sh → 000015.SH（A 股指数）；
+    hk_931250_csi → 931250.CSI（港股主题指数，贪恐由港股任务入库）；
+    qqq_clone → QQQ.US（美股自算贪恐）。
+    """
     key = (fear_source or "").strip().lower()
     if not key:
         return None
     if key.startswith("a_stock_"):
         return key.removeprefix("a_stock_").replace("_", ".").upper()
+    if key.startswith("hk_"):
+        return key.removeprefix("hk_").replace("_", ".").upper()
     us_map = {
         "qqq_clone": "QQQ.US",
         "soxx_clone": "SOXX.US",
@@ -129,6 +140,9 @@ def _fear_source_label(fear_source: str) -> str:
     }
     if key in us_labels:
         return us_labels[key]
+    hk_target = HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL.get(symbol)
+    if hk_target:
+        return f"{hk_target.get('ticker') or hk_target.get('label') or symbol} 自算贪恐"
     for target in A_STOCK_INDEX_FEAR_GREED_TARGETS:
         if str(target["symbol"]).upper() == symbol:
             return f"{target.get('ticker') or target.get('label') or symbol} 指数贪恐"
@@ -141,8 +155,45 @@ def _fear_source_label(fear_source: str) -> str:
     return f"{symbol} 贪恐"
 
 
+def _is_cross_market_fear_source(fear_source: str) -> bool:
+    """跨市场恐贪来源（港股指数）：其交易日与 A 股不完全重合。"""
+    return (fear_source or "").strip().lower().startswith("hk_")
+
+
+def _latest_fear_date(
+    fear_map: Dict[date, float],
+    signal_date: date,
+    max_stale_days: int = CROSS_MARKET_FEAR_MAX_STALE_DAYS,
+) -> Optional[date]:
+    """信号日没有恐贪时，取最近一个可用日期（不超过 max_stale_days 个自然日）。"""
+    candidates = [
+        day for day in fear_map
+        if day <= signal_date and (signal_date - day).days <= max_stale_days
+    ]
+    return max(candidates) if candidates else None
+
+
 def _optional_float(value) -> Optional[float]:
     return float(value) if value is not None else None
+
+
+def _resolve_fear_score(
+    fear_map: Dict[date, float],
+    signal_date: date,
+    fear_source: str,
+) -> Optional[float]:
+    """信号日恐贪分数。
+
+    跨市场来源（港股指数）在信号日休市时回退到最近可用值，与回测 merge_asof 口径一致；
+    A 股来源仍要求信号日精确匹配，避免用过期数据交易。
+    """
+    if signal_date in fear_map:
+        return float(fear_map[signal_date])
+    if _is_cross_market_fear_source(fear_source):
+        fallback_date = _latest_fear_date(fear_map, signal_date)
+        if fallback_date is not None:
+            return float(fear_map[fallback_date])
+    return None
 
 
 def _signal_day_valuation(
@@ -160,6 +211,10 @@ def _signal_day_valuation(
     """
     index_symbol = _fear_source_index_symbol(fear_source)
     if not index_symbol:
+        return None, True
+    # 港股主题指数没有成分一致预期估值（valuation feed 不覆盖），与回测一致：
+    # 这类来源不设估值闸，不能当成“估值未就绪”把整条腿卡死。
+    if index_symbol in HK_INDEX_FEAR_GREED_TARGET_BY_SYMBOL:
         return None, True
     # 这条腿没有信号日恐贪时（例如美股休市），无需也不应因估值缺口阻塞其它市场的交易。
     if not has_signal_day_fear:
@@ -742,7 +797,17 @@ class AStockFearStrategyTrader:
             # 已完成数据：恐贪 + ETF 日线（含量比）
             lookback_start = signal_date - timedelta(days=60)
             fear_map = self._fetch_fear_map(index_symbol, lookback_start, signal_date)
-            if signal_date not in fear_map:
+            # 港股恐贪：港股休市日没有当日行（A 股仍开市）时回退到最近可用值，
+            # 与回测 merge_asof(backward) 口径一致；A 股来源仍要求信号日精确匹配。
+            fear_date_used: Optional[date] = signal_date
+            if signal_date not in fear_map and _is_cross_market_fear_source(fear_source_key):
+                fear_date_used = _latest_fear_date(fear_map, signal_date)
+                if fear_date_used is not None:
+                    logger.info(
+                        "A股情绪量能策略 %s 信号日 %s 无 %s 当日恐贪，回退使用 %s 的值",
+                        masked_account_id, signal_date, fear_label, fear_date_used,
+                    )
+            if fear_date_used is None or fear_date_used not in fear_map:
                 log_message = (
                     f"信号日 {signal_date} 缺少恐贪数据（{fear_label}），跳过。"
                     f"请确认 A股基础数据同步/恐贪回跑已完成"
@@ -754,7 +819,7 @@ class AStockFearStrategyTrader:
                 )
                 return
 
-            fear_score = float(fear_map[signal_date])
+            fear_score = float(fear_map[fear_date_used])
             volume_symbol = normalize_external_symbol(config.volume_signal_symbol or symbol) or symbol
             bars = self._fetch_etf_bars(volume_symbol, lookback_start, signal_date)
             use_log_z = getattr(config, "volume_z_threshold", None) is not None
@@ -778,11 +843,11 @@ class AStockFearStrategyTrader:
             sub_bars = None
             sub_fear_map: Dict[date, float] = {}
             if sub_symbol:
-                sub_index_symbol = _fear_source_index_symbol(getattr(config, "sub_fear_source", None) or "a_stock_000688_sh")
+                sub_fear_source = getattr(config, "sub_fear_source", None) or "a_stock_000688_sh"
+                sub_index_symbol = _fear_source_index_symbol(sub_fear_source)
                 if sub_index_symbol:
                     sub_fear_map = self._fetch_fear_map(sub_index_symbol, lookback_start, signal_date)
-                    if signal_date in sub_fear_map:
-                        sub_fear_score = float(sub_fear_map[signal_date])
+                    sub_fear_score = _resolve_fear_score(sub_fear_map, signal_date, sub_fear_source)
                     sub_volume_symbol = normalize_external_symbol(config.sub_volume_signal_symbol or sub_symbol) or sub_symbol
                     sub_bars = self._fetch_etf_bars(sub_volume_symbol, lookback_start, signal_date)
                     sub_volume_ratio = self._volume_ratio_at(sub_bars, signal_date)
@@ -790,7 +855,7 @@ class AStockFearStrategyTrader:
                         sub_log_z = self._log_z_at(sub_bars, signal_date)
                     else:
                         sub_log_z = None
-                    sub_fear_label = _fear_source_label(getattr(config, "sub_fear_source", None) or "a_stock_000688_sh")
+                    sub_fear_label = _fear_source_label(sub_fear_source)
 
             # 第二候补数据（可选，三标的轮动）：恐贪 + 量比（独立阈值）
             sub2_symbol = normalize_external_symbol(config.sub2_symbol) if getattr(config, "sub2_symbol", None) else None
@@ -801,11 +866,11 @@ class AStockFearStrategyTrader:
             sub2_bars = None
             sub2_fear_map: Dict[date, float] = {}
             if sub2_symbol:
-                sub2_index_symbol = _fear_source_index_symbol(getattr(config, "sub2_fear_source", None) or "qqq_clone")
+                sub2_fear_source = getattr(config, "sub2_fear_source", None) or "qqq_clone"
+                sub2_index_symbol = _fear_source_index_symbol(sub2_fear_source)
                 if sub2_index_symbol:
                     sub2_fear_map = self._fetch_fear_map(sub2_index_symbol, lookback_start, signal_date)
-                    if signal_date in sub2_fear_map:
-                        sub2_fear_score = float(sub2_fear_map[signal_date])
+                    sub2_fear_score = _resolve_fear_score(sub2_fear_map, signal_date, sub2_fear_source)
                     sub2_volume_symbol = normalize_external_symbol(config.sub2_volume_signal_symbol or sub2_symbol) or sub2_symbol
                     sub2_bars = self._fetch_etf_bars(sub2_volume_symbol, lookback_start, signal_date)
                     sub2_volume_ratio = self._volume_ratio_at(sub2_bars, signal_date)
@@ -813,7 +878,7 @@ class AStockFearStrategyTrader:
                         sub2_log_z = self._log_z_at(sub2_bars, signal_date)
                     else:
                         sub2_log_z = None
-                    sub2_fear_label = _fear_source_label(getattr(config, "sub2_fear_source", None) or "qqq_clone")
+                    sub2_fear_label = _fear_source_label(sub2_fear_source)
 
             # 第三候补数据（可选，四标的轮动）：恐贪 + 量比（独立阈值）
             sub3_symbol = normalize_external_symbol(config.sub3_symbol) if getattr(config, "sub3_symbol", None) else None
@@ -824,13 +889,11 @@ class AStockFearStrategyTrader:
             sub3_bars = None
             sub3_fear_map: Dict[date, float] = {}
             if sub3_symbol:
-                sub3_index_symbol = _fear_source_index_symbol(
-                    getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi"
-                )
+                sub3_fear_source = getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi"
+                sub3_index_symbol = _fear_source_index_symbol(sub3_fear_source)
                 if sub3_index_symbol:
                     sub3_fear_map = self._fetch_fear_map(sub3_index_symbol, lookback_start, signal_date)
-                    if signal_date in sub3_fear_map:
-                        sub3_fear_score = float(sub3_fear_map[signal_date])
+                    sub3_fear_score = _resolve_fear_score(sub3_fear_map, signal_date, sub3_fear_source)
                     sub3_volume_symbol = normalize_external_symbol(config.sub3_volume_signal_symbol or sub3_symbol) or sub3_symbol
                     sub3_bars = self._fetch_etf_bars(sub3_volume_symbol, lookback_start, signal_date)
                     sub3_volume_ratio = self._volume_ratio_at(sub3_bars, signal_date)
@@ -838,9 +901,7 @@ class AStockFearStrategyTrader:
                         sub3_log_z = self._log_z_at(sub3_bars, signal_date)
                     else:
                         sub3_log_z = None
-                    sub3_fear_label = _fear_source_label(
-                        getattr(config, "sub3_fear_source", None) or "a_stock_930851_csi"
-                    )
+                    sub3_fear_label = _fear_source_label(sub3_fear_source)
 
             # 估值点位闸门（可选，与回测同一口径）：各腿用自己恐贪来源指数的信号日估值点位
             valuation_window = int(getattr(config, "valuation_window", None) or VALUATION_POSITION_SHORT_WINDOW)
