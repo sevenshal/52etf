@@ -618,13 +618,15 @@ const SOXXFearGreed = () => {
   // 今日已收盘入库：点位/价格与概要卡片、历史曲线保持一致（日线收盘值）；
   // 盘中（history 尚未更新今日）才用实时快照点位（A股为盘中快照指数点位）。
   const closeIsToday = latest?.date === chinaToday;
-  // 日线已回填当日时，盘中快照可能来自部署前的旧计算版本；不能让它覆盖最新日线的
-  // 子指标。只有当日日线尚未入库时才将盘中快照作为详情的实时来源。
-  const useRealtimeDetail = Boolean(realtime && !closeIsToday);
+  // 盘中快照必须是当日的：跨日后接口仍会返回上一交易日最后一条快照，不能让它
+  // 覆盖已回填的日线（特别是新旧计算口径的分项不同）。当日日线已入库时，日线仍
+  // 是完整且权威的详情来源。
+  const realtimeIsCurrentTradeDate = realtime?.trade_date === chinaToday;
+  const useRealtimeDetail = Boolean(realtime && realtimeIsCurrentTradeDate && !closeIsToday);
   const displayedRealtime = useRealtimeDetail ? realtime : null;
   const displayedRealtimeMeta = displayedRealtime?.fear_and_greed_clone;
   const displayedRealtimeScore = displayedRealtimeMeta?.score;
-  const displayPrice = closeIsToday ? latestPrice : (realtimePrice ?? latestPrice);
+  const displayPrice = useRealtimeDetail ? (realtimePrice ?? latestPrice) : latestPrice;
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
   const valuation = expandedDetail.valuation || expandedSummary?.valuation;
   const valuation252Label = valuation?.valuation_position_252_label || valuation?.valuation_position_label;
