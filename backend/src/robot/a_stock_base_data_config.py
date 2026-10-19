@@ -100,8 +100,9 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "中证2000",
         "label": "中证2000",
         "index_name": "中证2000指数",
-        # 中证2000没有任何自己的期权，借中证500/创业板ETF期权的PCR当风险偏好代理。
-        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
+        # 中证2000没有自己的期权，且与现有期权指数的成分重叠不足；改用和中证全指
+        # 相同的全市场期权 P/C、IV 口径，避免分项永久缺失而无法回填。
+        "option_underlyings": ["*"],
         "proxy_etf": "563300.SH",
     },
     {
@@ -120,7 +121,8 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
         "ticker": "北证50",
         "label": "北证50",
         "index_name": "北证50",
-        "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS),
+        # 北交所成分与现有期权指数无重叠，使用全市场期权情绪代理。
+        "option_underlyings": ["*"],
     },
     {
         "symbol": "000680.SH",

@@ -63,8 +63,8 @@ def test_a_stock_fear_greed_targets_include_bse_50():
     assert target["ticker"] == "北证50"
     assert target["index_name"] == "北证50"
     assert "899050.BJ" in pools
-    # 北证50 和所有期权指数零交集，候选照常声明，运行时权重全为 0、put/call 分项缺失。
-    assert target["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
+    # 北证50 与现有期权指数零交集，改用中证全指同口径的全市场期权情绪代理。
+    assert target["option_underlyings"] == [ALL_A_STOCK_OPTIONS]
     assert target.get("proxy_etf") is None
 
 
@@ -186,9 +186,9 @@ def test_a_stock_fear_greed_targets_include_csi_1000_and_2000():
         assert proxy_etf in A_STOCK_ETF_DAILY_SYMBOLS
         assert A_STOCK_ETF_DAILY_NAMES[proxy_etf] == proxy_name
 
-    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，走统一代理候选集。
+    # 中证1000 用中金所自己的股指期权(MO)；中证2000 没有任何期权，走全市场口径。
     assert targets_by_symbol["000852.SH"]["option_underlyings"] == ["OP000852.SH"]
-    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == A_STOCK_OPTION_PROXY_UNDERLYINGS
+    assert targets_by_symbol["932000.CSI"]["option_underlyings"] == [ALL_A_STOCK_OPTIONS]
 
 
 def test_indexes_with_their_own_options_use_them():
@@ -220,11 +220,11 @@ def test_indexes_without_their_own_options_share_one_proxy_candidate_set():
     """没有自己期权的指数统一用同一组候选，具体权重在运行时按成分重叠度算。
 
     以前是给每条指数手挑标的，挑错了就往 put/call 分项里灌噪音（中证煤炭、上证红利
-    曾经挂着科创50+创业板+中证500）。现在只声明候选，重叠为 0 的自动权重归零，
-    北证50 这种零交集的会直接缺失该分项。
+    曾经挂着科创50+创业板+中证500）。现在只声明候选，重叠为 0 的自动权重归零；
+    北证50、微盘400和中证2000例外，使用全市场期权情绪代理。
     """
     own_options = {"000016.SH", "000300.SH", "000852.SH", "000905.SH", "000688.SH", "399006.SZ"}
-    whole_market = {"000985.SH"}
+    whole_market = {"000985.SH", "932000.CSI", "899050.BJ", "MICRO400.CN"}
     for item in A_STOCK_INDEX_FEAR_GREED_TARGETS:
         symbol = str(item["symbol"]).upper()
         if symbol in own_options or symbol in whole_market:

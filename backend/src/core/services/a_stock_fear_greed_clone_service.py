@@ -85,7 +85,8 @@ A_STOCK_INNO100_TARGET = {
 }
 
 A_STOCK_MICRO400_FEAR_SYMBOL = "MICRO400.CN"
-A_STOCK_MICRO400_OPTION_UNDERLYINGS = tuple(A_STOCK_OPTION_PROXY_UNDERLYINGS)
+# 微盘400与现有期权指数的成分重叠不足；与中证全指共用全市场期权情绪代理。
+A_STOCK_MICRO400_OPTION_UNDERLYINGS = (ALL_A_STOCK_OPTIONS,)
 A_STOCK_MICRO400_TARGET = {
     "symbol": A_STOCK_MICRO400_FEAR_SYMBOL,
     "ticker": "微盘400",
@@ -1588,6 +1589,17 @@ class AStockInnovation100FearGreedCloneCalculator:
         if self.target_symbol in iv_by_tracked.columns:
             self._implied_volatility_mode = "direct"
             return iv_by_tracked[self.target_symbol].dropna().sort_index()
+
+        if ALL_A_STOCK_OPTIONS in self.option_underlyings:
+            # 与中证全指一致：没有某条可映射的期权链时，使用全部可用期权指数 IV 的
+            # 市场级代理，而不是再按目标指数的成分重叠度筛选。这样北证50、微盘400、
+            # 中证2000 也能获得同一条市场风险预期序列。
+            market_iv = iv_by_tracked.mean(axis=1, skipna=True)
+            if market_iv.empty:
+                self._implied_volatility_mode = "unavailable"
+                return pd.Series(dtype=float)
+            self._implied_volatility_mode = "market"
+            return market_iv.dropna().sort_index()
 
         candidate_codes = (
             list(OPTION_UNDERLYING_TRACKED_INDEX)

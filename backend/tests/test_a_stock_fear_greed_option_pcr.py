@@ -128,10 +128,13 @@ class OptionVolumePcrScopeTest(TestCase):
         # 成交量加总口径会得到 (200+750)/(400+500)≈1.056，明显偏向中证500。
         self.assertNotAlmostEqual(blended, 950.0 / 900.0, places=3)
 
-    def test_zero_overlap_index_gets_no_put_call_component(self):
-        """北证50 这类和所有期权指数零交集的，权重全为 0，直接返回空序列。"""
+    def test_bse_50_uses_the_market_wide_put_call_component(self):
+        """北证50与中证全指共享全市场期权口径，不因成分零交集而缺失。"""
         holdings = [{"symbol": "830001.BJ", "weight": 1.0}]
-        self.assertTrue(self._proxied_pcr("899050.BJ", holdings).empty)
+        series = self._proxied_pcr("899050.BJ", holdings)
+        puts = sum(vol for _, _, cp, vol in CONTRACTS if cp == "P")
+        calls = sum(vol for _, _, cp, vol in CONTRACTS if cp == "C")
+        self.assertAlmostEqual(float(series.iloc[0]), puts / calls, places=9)
 
     def test_missing_holdings_falls_back_to_equal_weight(self):
         """拿不到成分快照时退回等权，至少不会被成交量最大的标的绑架。"""
@@ -141,6 +144,31 @@ class OptionVolumePcrScopeTest(TestCase):
             .iloc[0]
         )
         self.assertAlmostEqual(blended, (200.0 / 400.0 + 750.0 / 500.0) / 2, places=9)
+
+    def test_bse_50_uses_market_wide_iv_proxy(self):
+        """全市场口径的指数不按成分重叠度筛 IV，应共享同一市场级 IV 序列。"""
+        from unittest.mock import patch
+
+        calculator = AStockInnovation100FearGreedCloneCalculator("899050.BJ")
+        iv_by_tracked = pd.DataFrame(
+            {
+                "000300.SH": [0.20, 0.22],
+                "000852.SH": [0.30, 0.34],
+            },
+            index=pd.DatetimeIndex(["2026-09-01", "2026-09-02"]),
+        )
+        with patch.object(
+            calculator, "_load_option_implied_volatility_by_tracked_index",
+            return_value=iv_by_tracked,
+        ), patch.object(calculator, "_option_proxy_weights") as proxy_weights:
+            result = calculator._load_option_implied_volatility(
+                date(2026, 9, 1), date(2026, 9, 2), None, None
+            )
+
+        self.assertEqual(calculator._implied_volatility_mode, "market")
+        self.assertFalse(proxy_weights.called)
+        self.assertAlmostEqual(float(result.iloc[0]), 0.25)
+        self.assertAlmostEqual(float(result.iloc[1]), 0.28)
 
 
 class OptionDailyCoverageTest(TestCase):
