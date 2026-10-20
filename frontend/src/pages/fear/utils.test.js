@@ -5,8 +5,17 @@ import {
   fearTextColor,
   resolveFearSummaryScore,
 } from './utils';
+import { CN_ETF_OPTIONS } from './components/fearMarketTaxonomy';
 
 const TODAY = '2026-09-12';
+
+test('A股自算贪恐目录包含守猪逮兔新增的八条实际跟踪指数', () => {
+  const symbols = new Set(CN_ETF_OPTIONS.map(item => item.symbol));
+  [
+    '000001.SH', '000913.CSI', '399987.SZ', '931079.CSI',
+    '000906.SH', 'H30590.CSI', '930713.CSI', '980017.SZ',
+  ].forEach(symbol => expect(symbols.has(symbol)).toBe(true));
+});
 const summary = ({ latestDate, latestScore = 62.4, intradayScore } = {}) => ({
   latest: latestDate ? { date: latestDate, score: latestScore } : null,
   intraday: intradayScore === undefined ? undefined : { score: intradayScore },

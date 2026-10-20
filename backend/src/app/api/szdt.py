@@ -8,12 +8,26 @@ from ...core.services.szdt_etf_volume import get_a_share_etf_intraday_volume_com
 from ...core.services.szdt_us_volume import get_us_stock_intraday_volume_compare, get_us_stock_list_metrics
 from ...core.services.szdt_a_stock_backtest import run_szdt_a_stock_backtest
 from ...core.services.szdt_us_backtest import US_STOCK_TYPES, run_szdt_us_backtest
+from ...core.services.a_stock_index_valuation import load_a_stock_index_valuations
+from ...robot.a_stock_base_data_config import A_STOCK_ETF_VALUATION_SYMBOLS
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/quant")
 
 # 初始化SZDT服务
 szdt_service = SZDTService()
+
+
+def _normalize_a_stock_etf_code(code: str) -> str:
+    """把守猪逮兔的 SH.510300 格式统一为分析库使用的 510300.SH。"""
+    value = str(code or "").strip().upper()
+    if "." not in value:
+        return value
+    left, right = value.split(".", 1)
+    if left in {"SH", "SZ"}:
+        return f"{right}.{left}"
+    return value
 
 # 数据模型
 class StockModel(BaseModel):
@@ -379,6 +393,31 @@ async def get_etf_emotion(
 async def get_etf_volume_metrics(codes: str = Query(..., description="逗号分隔的 SH.510300 / 510300.SH 代码")):
     """A 股 ETF 实时成交量与提示看板同口径的盘中量比（批量、进程缓存）。"""
     return {"data": get_a_share_etf_volume_metrics(codes.split(","))}
+
+
+@router.get("/etf/valuation-points")
+async def get_etf_valuation_points(codes: str = Query(..., description="逗号分隔的 SH.510300 / 510300.SH 代码")):
+    """批量返回守猪逮兔境内股票 ETF 对应指数的估值点位。
+
+    非股票指数 ETF（债券、黄金）与 QDII 不映射，前端以空值展示，不能误用 A 股成分估值。
+    """
+    etf_codes = list(dict.fromkeys(
+        _normalize_a_stock_etf_code(code) for code in str(codes).split(",") if str(code).strip()
+    ))
+    index_by_etf = {
+        code: A_STOCK_ETF_VALUATION_SYMBOLS[code]
+        for code in etf_codes
+        if code in A_STOCK_ETF_VALUATION_SYMBOLS
+    }
+    valuations = await run_in_threadpool(
+        lambda: load_a_stock_index_valuations(index_by_etf.values())
+    ) if index_by_etf else {}
+    return {
+        "data": {
+            etf_code: {"symbol": symbol, **valuations.get(symbol, {})}
+            for etf_code, symbol in index_by_etf.items()
+        }
+    }
 
 
 @router.get("/etf/volume-compare/{code}")

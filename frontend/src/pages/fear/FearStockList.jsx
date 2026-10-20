@@ -117,14 +117,22 @@ const FearStockList = () => {
       setCandidates(formattedCandidates);
 
       let volumeMetrics = {};
+      let valuationPoints = {};
       if (activeType === 3 && formattedCandidates.length > 0) {
         try {
-          const volumeResponse = await request.get('/api/quant/etf/volume-metrics', {
-            params: { codes: formattedCandidates.map(item => item.code).join(',') },
-          });
-          volumeMetrics = volumeResponse.data?.data || {};
+          const codes = formattedCandidates.map(item => item.code).join(',');
+          const [volumeResult, valuationResult] = await Promise.allSettled([
+            request.get('/api/quant/etf/volume-metrics', { params: { codes } }),
+            request.get('/api/quant/etf/valuation-points', { params: { codes } }),
+          ]);
+          if (volumeResult.status === 'fulfilled') {
+            volumeMetrics = volumeResult.value.data?.data || {};
+          }
+          if (valuationResult.status === 'fulfilled') {
+            valuationPoints = valuationResult.value.data?.data || {};
+          }
         } catch (error) {
-          // 实时行情失败不影响贪恐主列表；下次刷新会走后端的短缓存重试。
+          // 行情或估值快照失败不影响贪恐主列表；下次刷新会重试。
         }
       } else if ([1, 2, 7].includes(activeType) && formattedCandidates.length > 0) {
         try {
@@ -161,6 +169,10 @@ const FearStockList = () => {
           emo_price: emoData.emotion?.price ?? '-',
           volume: (activeType === 3 ? volumeMetrics[toAStockTsCode(emoData.code)] : volumeMetrics[emoData.code])?.volume ?? null,
           volume_ratio: (activeType === 3 ? volumeMetrics[toAStockTsCode(emoData.code)] : volumeMetrics[emoData.code])?.volume_ratio ?? null,
+          valuation: activeType === 3 ? (valuationPoints[toAStockTsCode(emoData.code)] || null) : null,
+          valuation_position: activeType === 3
+            ? valuationPoints[toAStockTsCode(emoData.code)]?.valuation_position_pct ?? null
+            : null,
         };
       }).sort((a, b) => b.etf_scale - a.etf_scale);
 
@@ -678,6 +690,27 @@ const FearStockList = () => {
         else if (value >= 60) color = '#ff4d4f'; // 红色
         return <span style={{ color }}>{value}</span>;
       }
+    },
+    {
+      title: <Tooltip title="成分股一致预期估值相对指数点位的近504交易日分位：越大越贵。仅适用于已登记的境内股票指数ETF；债券、黄金和QDII不显示。">估值点位</Tooltip>,
+      dataIndex: 'valuation_position',
+      key: 'valuation_position',
+      width: 90,
+      align: 'right',
+      sorter: (a, b) => (Number(a.valuation_position) || -1) - (Number(b.valuation_position) || -1),
+      render: (value, record) => {
+        if (!Number.isFinite(Number(value))) return '-';
+        const numeric = Number(value);
+        const color = numeric >= 80 ? '#ff4d4f' : numeric <= 20 ? '#52c41a' : undefined;
+        const valuation = record.valuation || {};
+        const details = [
+          valuation.index_name || valuation.symbol,
+          valuation.index_date && `估值日 ${valuation.index_date}`,
+          Number.isFinite(Number(valuation.coverage_ratio)) && `覆盖率 ${(Number(valuation.coverage_ratio) * 100).toFixed(1)}%`,
+          Number.isFinite(Number(valuation.valuation_position_252_pct)) && `252日 ${Number(valuation.valuation_position_252_pct).toFixed(1)}`,
+        ].filter(Boolean).join('；');
+        return <Tooltip title={details || '近504交易日估值分位'}><span style={{ color }}>{numeric.toFixed(1)}</span></Tooltip>;
+      },
     },
     {
       title: '成交量',

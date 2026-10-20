@@ -292,6 +292,16 @@ A_STOCK_INDEX_FEAR_GREED_TARGETS = [
 # 通达信行业树仅作为展示分类。实际计算统一绑定可公开获取行情、成分权重，
 # 且已有场内 ETF/LOF 的中证或国证指数，不直接使用通达信 880xxx 板块代码。
 ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
+    # 守猪逮兔 A 股 ETF 列表中原先没有自算贪恐/估值的境内股票指数。
+    # 这些 ETF 的估值同样按各自指数成分股的一致预期聚合，不能借用名称相近的指数。
+    {"symbol": "000001.SH", "ticker": "上证综指", "label": "上证综指", "index_name": "上证综合指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "510210.SH"},
+    {"symbol": "000913.CSI", "ticker": "300医药", "label": "300医药", "index_name": "沪深300医药卫生指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512010.SH"},
+    {"symbol": "399987.SZ", "ticker": "中证酒", "label": "中证酒", "index_name": "中证酒指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512690.SH"},
+    {"symbol": "931079.CSI", "ticker": "5G通信", "label": "5G通信", "index_name": "中证5G通信主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515050.SH"},
+    {"symbol": "000906.SH", "ticker": "中证800", "label": "中证800", "index_name": "中证800指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515800.SH"},
+    {"symbol": "H30590.CSI", "ticker": "中证机器人", "label": "中证机器人", "index_name": "中证机器人指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "562500.SH"},
+    {"symbol": "930713.CSI", "ticker": "人工智能", "label": "人工智能", "index_name": "中证人工智能主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159819.SZ"},
+    {"symbol": "980017.SZ", "ticker": "国证芯片", "label": "国证芯片", "index_name": "国证半导体芯片指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159995.SZ"},
     # 一级行业
     {"symbol": "000987.SH", "ticker": "全指原材料", "label": "原材料", "index_name": "中证全指原材料指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159944.SZ"},
     {"symbol": "000989.SH", "ticker": "全指可选消费", "label": "可选消费", "index_name": "中证全指可选消费指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "159936.SZ"},
@@ -367,6 +377,14 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "515220.SH",
     "510880.SH",
     "512890.SH",
+    "510210.SH",
+    "512010.SH",
+    "512690.SH",
+    "515050.SH",
+    "515800.SH",
+    "562500.SH",
+    "159819.SZ",
+    "159995.SZ",
     "159944.SZ",
     "159936.SZ",
     "159938.SZ",
@@ -405,6 +423,14 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "562700.SH",
 )
 A_STOCK_ETF_DAILY_NAMES = {
+    "510210.SH": "上证综指ETF",
+    "512010.SH": "医药ETF",
+    "512690.SH": "酒ETF",
+    "515050.SH": "5GETF",
+    "515800.SH": "中证800ETF",
+    "562500.SH": "机器人ETF",
+    "159819.SZ": "人工智能ETF",
+    "159995.SZ": "芯片ETF",
     "563360.SH": "A500ETF",
     "510050.SH": "上证50ETF",
     "510500.SH": "中证500ETF",
@@ -489,6 +515,39 @@ A_STOCK_ETF_DAILY_SYMBOLS = tuple(
         ]
     )
 )
+
+# 守猪逮兔 A 股 ETF → 用于列表“估值点位”的自算指数。这里刻意不根据名称猜测：
+# 同名/近似主题 ETF 的成分与权重可能完全不同。未登记的债券、黄金和 QDII ETF 保持无估值。
+A_STOCK_ETF_VALUATION_SYMBOLS = {
+    "510050.SH": "000016.SH",
+    "510210.SH": "000001.SH",
+    "510300.SH": "000300.SH",
+    "510500.SH": "000905.SH",
+    "510880.SH": "000015.SH",
+    "512010.SH": "000913.CSI",
+    "512100.SH": "000852.SH",
+    "512170.SH": "399989.SZ",
+    "512480.SH": "H30184.CSI",
+    "512660.SH": "399967.SZ",
+    "512690.SH": "399987.SZ",
+    "512800.SH": "399986.SZ",
+    "512880.SH": "399975.SZ",
+    "515030.SH": "930997.CSI",
+    "515050.SH": "931079.CSI",
+    "515230.SH": "H30202.CSI",
+    "515790.SH": "931151.CSI",
+    "515800.SH": "000906.SH",
+    "562500.SH": "H30590.CSI",
+    "563300.SH": "932000.CSI",
+    "588000.SH": "000688.SH",
+    "159819.SZ": "930713.CSI",
+    "159865.SZ": "930707.CSI",
+    "159869.SZ": "930901.CSI",
+    "159915.SZ": "399006.SZ",
+    "159928.SZ": "000932.SH",
+    "159992.SZ": "931152.CSI",
+    "159995.SZ": "980017.SZ",
+}
 A_STOCK_FEAR_SAFE_HAVEN_INDEXES = [
     {"ts_code": "H11006.CSI", "name": "中证国债"},
 ]
