@@ -54,3 +54,4 @@ def test_symbol_flow_has_individual_five_day_net_amount_and_ratio():
     assert latest["flow_5d_amount"] > 0
     assert latest["flow_5d_ratio"] > 0
     assert latest["share_change_ratio"] > 0
+    assert latest["share_ratio_20d"] > 1

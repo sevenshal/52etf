@@ -57,6 +57,11 @@ class AStockEtfShareFlowService:
             return pd.DataFrame()
         merged["previous_share"] = merged.groupby("ts_code")["fd_share"].shift(1)
         merged["previous_close"] = merged.groupby("ts_code")["close"].shift(1)
+        # 份额比与量比同样用“当日 / 不含当日的前20日均值”，而非单日变动率。
+        merged["share_ma20_prior"] = merged.groupby("ts_code")["fd_share"].transform(
+            lambda values: values.shift(1).rolling(20, min_periods=10).mean()
+        )
+        merged["share_ratio_20d"] = merged["fd_share"] / merged["share_ma20_prior"]
         # fd_share 的单位为万份；以收盘价估算创设/赎回对应的资金量。
         merged["estimated_flow_amount"] = (merged["fd_share"] - merged["previous_share"]) * 10000.0 * merged["close"]
         merged["previous_aum"] = merged["previous_share"] * 10000.0 * merged["previous_close"]
@@ -178,7 +183,7 @@ class AStockEtfShareFlowService:
             for row in symbol_flow.loc[symbol_flow["ts_code"] == symbol].tail(limit).itertuples(index=False):
                 rows.append({
                     "date": row.trade_date.date().isoformat(),
-                    "share_change_pct": _round(row.share_change_ratio * 100, 3),
+                    "share_ratio_20d": _round(row.share_ratio_20d, 3),
                     "flow_ratio_pct": _round(row.flow_ratio * 100, 3),
                     "estimated_flow_amount_yi": _round(row.estimated_flow_amount / 100000000, 2),
                     "flow_5d_ratio_pct": _round(row.flow_5d_ratio * 100, 3),

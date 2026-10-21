@@ -1271,8 +1271,8 @@ const SummaryCard = ({ option, summary, shareFlowSummary, active, onToggle }) =>
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>
         {shareFlowSummary?.latest && (
-          <span title="当日ETF份额变化 ÷ 前日份额；正数为净申购，负数为净赎回">
-            份额比 {formatNumber(shareFlowSummary.latest.share_change_pct, 2)}%
+          <span title="当日ETF总份额 ÷ 不含当日的前20个交易日平均总份额；大于1表示份额高于近期常态">
+            份额比 {formatVolumeRatio(shareFlowSummary.latest.share_ratio_20d)}
           </span>
         )}
       </div>
