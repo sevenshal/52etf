@@ -119,6 +119,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "evc_static_info_sync",
     "cnn_fear_greed_fetch",
     "a_stock_base_data_sync",
+    "a_stock_etf_valuation_index_backfill",
     "a_stock_chinabond_curve_backfill",
     "etf_holdings_backfill",
     "soxx_fear_greed_backfill",
@@ -136,6 +137,7 @@ SYMBOLS_RUN_TASK_KEYS = frozenset({
     "soxx_fear_greed_backfill",
     "a_stock_etf_fear_greed_backfill",
     "a_stock_index_valuation_refresh",
+    "a_stock_etf_valuation_index_backfill",
 })
 STOCK_SYSTEM_POOL_TASK_KEY = "stock_system_pool_refresh"
 SECTOR_NINE_TURN_TASK_KEY = "sector_nine_turn_daily"
@@ -694,6 +696,40 @@ def _run_a_stock_chinabond_curve_backfill(
         f"range={result.get('start_date')}~{result.get('end_date')} "
         f"trading_days={result.get('trading_days')} refresh_dates={result.get('refresh_dates')} "
         f"saved_rows={result.get('saved_rows')} errors={len(result.get('errors') or [])}"
+    )
+
+
+def _run_a_stock_etf_valuation_index_backfill(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    symbols: Optional[Any] = None,
+):
+    """仅回补本轮新增 ETF 估值所需的 8 个指数输入。"""
+    from .a_stock_base_data_config import A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS
+    from .a_stock_base_data_sync import sync_a_stock_index_history
+
+    requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
+    supported_symbols = set(A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS)
+    unknown_symbols = sorted(requested_symbols - supported_symbols)
+    if unknown_symbols:
+        raise ValueError(f"仅支持本轮新增估值指数: {','.join(unknown_symbols)}")
+
+    target_symbols = [
+        symbol for symbol in A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS
+        if not requested_symbols or symbol in requested_symbols
+    ]
+    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2024, 8, 1)
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    if start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+    result = sync_a_stock_index_history(target_symbols, start_value, end_value)
+    daily_result = result["index_daily"]
+    weight_result = result["index_weight"]
+    return (
+        "A股ETF估值指数定向回补 "
+        f"symbols={','.join(target_symbols)} range={result['start_date']}~{result['end_date']} "
+        f"daily_saved={daily_result.get('saved_rows', 0)} daily_errors={len(daily_result.get('errors') or [])} "
+        f"weight_saved={weight_result.get('saved_rows', 0)} weight_errors={len(weight_result.get('errors') or [])}"
     )
 
 
@@ -1931,6 +1967,41 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=True,
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
+            ),
+            "a_stock_etf_valuation_index_backfill": TaskDefinition(
+                task_key="a_stock_etf_valuation_index_backfill",
+                name="A股ETF估值指数定向回补",
+                description=(
+                    "只回补本轮新增守猪逮兔 A 股 ETF 估值所需的 8 个指数日线和成分权重；"
+                    "不会同步全市场行情、财报、期权或中债数据。"
+                ),
+                default_time="18:35",
+                default_enabled=False,
+                sort_order=74,
+                runner=_run_a_stock_etf_valuation_index_backfill,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="2024-08-01",
+                        description="YYYY-MM-DD；为空时从 2024-08-01 补至今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时补至今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="symbols",
+                        label="指数列表",
+                        value_type="string",
+                        default="",
+                        description="可选，限本轮新增的 8 个指数；为空时全部回补。",
                     ),
                 ),
             ),

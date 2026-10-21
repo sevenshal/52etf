@@ -1475,10 +1475,21 @@ class AStockBaseDataSyncService:
         end_date: date,
         incremental: bool = True,
         explicit_start: Optional[date] = None,
+        index_codes: Optional[Iterable[str]] = None,
     ) -> Dict:
         default_start = _parse_date(start_date)
         end_value = _parse_date(end_date)
         index_items = _a_stock_index_daily_items()
+        requested_codes = {
+            str(code or "").strip().upper()
+            for code in (index_codes or [])
+            if str(code or "").strip()
+        }
+        if requested_codes:
+            index_items = [
+                item for item in index_items
+                if str(item.get("ts_code") or "").strip().upper() in requested_codes
+            ]
         if not default_start or not end_value or default_start > end_value or not index_items:
             return {"index_count": len(index_items), "jobs": 0, "saved_rows": 0, "errors": [], "start_date": None}
 
@@ -1966,6 +1977,7 @@ class AStockBaseDataSyncService:
         end_date: date,
         incremental: bool = True,
         explicit_start: Optional[date] = None,
+        index_codes: Optional[Iterable[str]] = None,
     ) -> Dict:
         end_value = _parse_date(end_date)
         if not end_value:
@@ -1986,6 +1998,16 @@ class AStockBaseDataSyncService:
                 ]
             }.values()
         )
+        requested_codes = {
+            str(code or "").strip().upper()
+            for code in (index_codes or [])
+            if str(code or "").strip()
+        }
+        if requested_codes:
+            index_items = [
+                item for item in index_items
+                if item["index_code"] in requested_codes
+            ]
         latest_by_index = self._latest_index_weight_dates([item["index_code"] for item in index_items])
         default_start = _parse_date(start_date) or _warmup_start(DEFAULT_START_DATE, A_STOCK_INDEX_WEIGHT_WARMUP_DAYS)
         jobs: List[Tuple[str, date, date]] = []
@@ -5404,6 +5426,58 @@ def sync_a_stock_chinabond_yield_curves(
         return {
             "curve_defs_saved": defs_saved,
             **result,
+        }
+    finally:
+        service.close()
+
+
+def sync_a_stock_index_history(
+    index_codes: Iterable[str],
+    start_date: date,
+    end_date: date,
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Dict:
+    """只补指定指数的日线及成分权重，不触发全市场基础数据同步。"""
+    codes = list(dict.fromkeys(
+        str(code or "").strip().upper()
+        for code in index_codes
+        if str(code or "").strip()
+    ))
+    if not codes:
+        raise ValueError("至少需要一个指数代码")
+    start_value = _parse_date(start_date)
+    end_value = _parse_date(end_date)
+    if not start_value or not end_value or start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+
+    service = AStockBaseDataSyncService(
+        analytics_db=analytics_db,
+        tushare_service=tushare_service,
+        progress_callback=progress_callback,
+    )
+    try:
+        daily_result = service.sync_index_daily(
+            start_value,
+            end_value,
+            incremental=False,
+            explicit_start=start_value,
+            index_codes=codes,
+        )
+        weight_result = service.sync_index_weight(
+            start_value,
+            end_value,
+            incremental=False,
+            explicit_start=start_value,
+            index_codes=codes,
+        )
+        return {
+            "symbols": codes,
+            "start_date": start_value.isoformat(),
+            "end_date": end_value.isoformat(),
+            "index_daily": daily_result,
+            "index_weight": weight_result,
         }
     finally:
         service.close()

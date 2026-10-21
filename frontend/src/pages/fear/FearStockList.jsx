@@ -18,6 +18,12 @@ const toAStockTsCode = (code) => {
   const [market, ticker] = String(code || '').toUpperCase().split('.');
   return market && ticker ? `${ticker}.${market}` : String(code || '').toUpperCase();
 };
+// Number(null) 和 Number('') 都会得到 0；估值点位缺失时不能因此被渲染成 0.0。
+const toFiniteNumber = (value) => {
+  if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
 
 const formatVolume = (value) => {
   const numeric = Number(value);
@@ -697,17 +703,30 @@ const FearStockList = () => {
       key: 'valuation_position',
       width: 90,
       align: 'right',
-      sorter: (a, b) => (Number(a.valuation_position) || -1) - (Number(b.valuation_position) || -1),
+      sorter: (a, b) => {
+        const left = toFiniteNumber(a.valuation_position);
+        const right = toFiniteNumber(b.valuation_position);
+        if (left === null) return right === null ? 0 : -1;
+        if (right === null) return 1;
+        return left - right;
+      },
       render: (value, record) => {
-        if (!Number.isFinite(Number(value))) return '-';
-        const numeric = Number(value);
-        const color = numeric >= 80 ? '#ff4d4f' : numeric <= 20 ? '#52c41a' : undefined;
+        const numeric = toFiniteNumber(value);
         const valuation = record.valuation || {};
+        if (numeric === null) {
+          const unavailableReason = valuation.reason === 'valuation_snapshot_missing'
+            ? '该指数暂未生成估值快照'
+            : record.valuation
+              ? '该指数估值样本不足，暂未形成估值点位'
+              : '该 ETF 未关联可用的 A 股股票指数估值';
+          return <Tooltip title={unavailableReason}><span>-</span></Tooltip>;
+        }
+        const color = numeric >= 80 ? '#ff4d4f' : numeric <= 20 ? '#52c41a' : undefined;
         const details = [
           valuation.index_name || valuation.symbol,
           valuation.index_date && `估值日 ${valuation.index_date}`,
-          Number.isFinite(Number(valuation.coverage_ratio)) && `覆盖率 ${(Number(valuation.coverage_ratio) * 100).toFixed(1)}%`,
-          Number.isFinite(Number(valuation.valuation_position_252_pct)) && `252日 ${Number(valuation.valuation_position_252_pct).toFixed(1)}`,
+          toFiniteNumber(valuation.coverage_ratio) !== null && `覆盖率 ${(toFiniteNumber(valuation.coverage_ratio) * 100).toFixed(1)}%`,
+          toFiniteNumber(valuation.valuation_position_252_pct) !== null && `252日 ${toFiniteNumber(valuation.valuation_position_252_pct).toFixed(1)}`,
         ].filter(Boolean).join('；');
         return <Tooltip title={details || '近504交易日估值分位'}><span style={{ color }}>{numeric.toFixed(1)}</span></Tooltip>;
       },

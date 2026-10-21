@@ -343,6 +343,13 @@ ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     {"symbol": "931230.CSI", "ticker": "汽车零部件", "label": "汽车零部件", "index_name": "中证汽车零部件主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "562700.SH"},
 ]
 
+# 本轮守猪逮兔 A 股 ETF 估值补齐时新增的 8 个指数。一次性定向补数任务只能处理
+# 这些指数，避免填写历史开始日期时误触发全市场基础数据回刷。
+A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS = (
+    "000001.SH", "000913.CSI", "399987.SZ", "931079.CSI",
+    "000906.SH", "H30590.CSI", "930713.CSI", "980017.SZ",
+)
+
 A_STOCK_INDEX_FEAR_GREED_TARGETS.extend(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS)
 A_STOCK_FACTOR_INDEX_POOLS.extend(
     {"index_code": item["symbol"], "name": item["ticker"]}
