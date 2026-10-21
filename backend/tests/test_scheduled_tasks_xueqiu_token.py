@@ -206,6 +206,7 @@ class XueqiuTokenMonitorTest(TestCase):
             },
             "a_stock_base_data_sync": {"start_date", "end_date", "incremental"},
             "a_stock_etf_valuation_index_backfill": {"start_date", "end_date", "symbols"},
+            "a_stock_etf_share_flow_sync": {"start_date", "end_date"},
             "a_stock_chinabond_curve_backfill": {"start_date", "end_date"},
             "szdt_a_stock_trading": set(),
             "szdt_us_trading": set(),

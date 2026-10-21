@@ -2041,6 +2041,59 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"]).sort_values("trade_date")
 
+    def get_a_stock_fund_share_range_frame(
+        self,
+        ts_code: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 2000,
+        raise_on_error: bool = False,
+    ) -> pd.DataFrame:
+        """获取单只 ETF 历史份额；fund_share 单次最多返回 2000 行。"""
+        fund_code = self.normalize_symbol(ts_code)
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not fund_code or not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        frames = []
+        offset = 0
+        limit = max(1, min(int(limit or 2000), 2000))
+        first_error = None
+        while True:
+            try:
+                self._fund_daily_rate_limiter.wait()
+                frame = self.pro.fund_share(
+                    ts_code=fund_code,
+                    start_date=start_value.strftime("%Y%m%d"),
+                    end_date=end_value.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,fd_share",
+                    limit=limit,
+                    offset=offset,
+                )
+            except Exception as exc:
+                first_error = exc
+                self.logger.warning(
+                    "Tushare fund_share fetch failed for %s %s~%s offset=%s: %s",
+                    fund_code, start_value, end_value, offset, exc,
+                )
+                break
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                break
+            frames.append(frame)
+            if len(frame) < limit:
+                break
+            offset += limit
+        if not frames:
+            if raise_on_error and first_error is not None:
+                raise first_error
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["ts_code", "trade_date"], keep="last"
+        )
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        result["fd_share"] = pd.to_numeric(result["fd_share"], errors="coerce")
+        return result.dropna(subset=["ts_code", "trade_date", "fd_share"]).sort_values("trade_date")
+
     def get_option_basic_frame(self, exchange: str) -> pd.DataFrame:
         """获取交易所期权合约基础信息（沪深 ETF 期权 + 中金所股指期权）。"""
         exchange_value = str(exchange or "").strip().upper()

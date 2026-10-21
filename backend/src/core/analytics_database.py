@@ -54,6 +54,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "a_stock_report_rc",
         "a_stock_fund_basic",
         "a_stock_fund_daily",
+        "a_stock_fund_share",
         "a_stock_fund_adj_factor",
         "a_stock_fund_daily_qfq",
         "a_stock_index_daily",
@@ -547,6 +548,17 @@ class AStockFundDaily(AnalyticsBase):
     pct_chg = Column(Float)
     vol = Column(Float)
     amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockFundShare(AnalyticsBase):
+    """ETF 每日份额（Tushare fund_share，单位：万份）。"""
+    __tablename__ = "a_stock_fund_share"
+
+    ts_code = Column(String(16), primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    fd_share = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
@@ -1107,6 +1119,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_basic_name ON a_stock_fund_basic(name)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_symbol_date ON a_stock_fund_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_daily_date_symbol ON a_stock_fund_daily(trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_share_symbol_date ON a_stock_fund_share(ts_code, trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_share_date_symbol ON a_stock_fund_share(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_adj_factor_symbol_date ON a_stock_fund_adj_factor(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_adj_factor_date_symbol ON a_stock_fund_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_index_daily_date ON a_stock_index_daily(ts_code, trade_date)",

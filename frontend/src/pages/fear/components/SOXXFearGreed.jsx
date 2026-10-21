@@ -259,6 +259,8 @@ const SOXXFearGreed = () => {
   const [timeRange, setTimeRange] = useState(3);
   // 点击子分项卡片：把该分项的得分曲线叠加到历史曲线上（再点一次取消）
   const [activeComponentKey, setActiveComponentKey] = useState(null);
+  const [shareFlow, setShareFlow] = useState(null);
+  const [shareFlowError, setShareFlowError] = useState(null);
 
   useEffect(() => {
     setActiveComponentKey(null);
@@ -304,6 +306,20 @@ const SOXXFearGreed = () => {
   useEffect(() => {
     fetchSummaries();
   }, [fetchSummaries]);
+
+  const fetchShareFlow = useCallback(async () => {
+    setShareFlowError(null);
+    try {
+      const { data } = await request.get('/api/a-stock-etf-share-flow/research');
+      setShareFlow(data || null);
+    } catch (error) {
+      setShareFlowError(error?.response?.data?.detail || error.message || '获取宽基ETF净申赎数据失败');
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchShareFlow();
+  }, [fetchShareFlow]);
 
   useEffect(() => {
     if (!expandedSymbol || detailBySymbol[expandedSymbol]) return undefined;
@@ -915,6 +931,44 @@ const SOXXFearGreed = () => {
       {summaryError && (
         <Alert type="warning" showIcon message="自算贪恐摘要暂不可用" description={summaryError} style={{ marginBottom: 12 }} />
       )}
+
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        title="宽基 ETF 净申赎压力（研究观察）"
+        extra={<Button size="small" onClick={fetchShareFlow}>刷新</Button>}
+      >
+        {shareFlowError && <Alert type="warning" showIcon message="份额数据暂不可用" description={shareFlowError} />}
+        {!shareFlowError && !shareFlow && <Skeleton active paragraph={{ rows: 2 }} title={false} />}
+        {!shareFlowError && shareFlow && (
+          <>
+            <Row gutter={[12, 12]}>
+              <Col xs={12} sm={6}><Statistic title="净申赎压力" value={shareFlow.latest?.score} precision={1} suffix="/100" /></Col>
+              <Col xs={12} sm={6}><Statistic title="5日估算净申赎" value={shareFlow.latest?.estimated_flow_amount_yi} precision={2} suffix="亿元" /></Col>
+              <Col xs={12} sm={6}><Statistic title="5日规模占比" value={shareFlow.latest?.flow_5d_ratio_pct} precision={3} suffix="%" /></Col>
+              <Col xs={12} sm={6}><Statistic title="数据日期" value={shareFlow.latest?.date || '-'} /></Col>
+            </Row>
+            <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{shareFlow.proxy_note}</Text>
+            <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>{shareFlow.score_direction}；暂未参与任何自算贪恐总分。</Text>
+            <div style={{ marginTop: 10, fontSize: 12 }}>
+              <Text strong>历史阶段（沪深300前后30交易日确认）：</Text>{' '}
+              {(shareFlow.analysis?.phase_distribution || []).map(item => (
+                <Tag key={item.phase} color={item.phase === 'bottom' ? 'green' : 'volcano'}>
+                  {item.phase === 'bottom' ? '阶段底' : '阶段顶'} n={item.count}，中位数 {formatNumber(item.median, 1)}
+                </Tag>
+              ))}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12 }}>
+              <Text strong>无前视未来收益（按当日分数分桶）：</Text>{' '}
+              {(shareFlow.analysis?.future_returns || []).map(item => (
+                <Tag key={item.bucket}>
+                  {item.bucket}：20日 {formatNumber(item.return_20d_mean_pct, 1)}%，60日 {formatNumber(item.return_60d_mean_pct, 1)}%（n={item.count}）
+                </Tag>
+              ))}
+            </div>
+          </>
+        )}
+      </Card>
 
       {summaryLoading && !summaries.length ? (
         <>

@@ -120,6 +120,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "cnn_fear_greed_fetch",
     "a_stock_base_data_sync",
     "a_stock_etf_valuation_index_backfill",
+    "a_stock_etf_share_flow_sync",
     "a_stock_chinabond_curve_backfill",
     "etf_holdings_backfill",
     "soxx_fear_greed_backfill",
@@ -730,6 +731,27 @@ def _run_a_stock_etf_valuation_index_backfill(
         f"symbols={','.join(target_symbols)} range={result['start_date']}~{result['end_date']} "
         f"daily_saved={daily_result.get('saved_rows', 0)} daily_errors={len(daily_result.get('errors') or [])} "
         f"weight_saved={weight_result.get('saved_rows', 0)} weight_errors={len(weight_result.get('errors') or [])}"
+    )
+
+
+def _run_a_stock_etf_share_flow_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    """只同步宽基 ETF 份额，为净申赎研究服务。"""
+    from .a_stock_base_data_sync import sync_a_stock_etf_share_history
+    from ..core.services.a_stock_etf_share_flow_service import ETF_SHARE_FLOW_BASKET
+
+    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2015, 1, 1)
+    end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    if start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+    result = sync_a_stock_etf_share_history(
+        [item["symbol"] for item in ETF_SHARE_FLOW_BASKET], start_value, end_value,
+    )
+    return (
+        f"宽基ETF份额同步 range={result['start_date']}~{result['end_date']} "
+        f"symbols={len(result['symbols'])} saved={result['saved_rows']} errors={len(result['errors'])}"
     )
 
 
@@ -2002,6 +2024,31 @@ class ScheduledTaskManager:
                         value_type="string",
                         default="",
                         description="可选，限本轮新增的 8 个指数；为空时全部回补。",
+                    ),
+                ),
+            ),
+            "a_stock_etf_share_flow_sync": TaskDefinition(
+                task_key="a_stock_etf_share_flow_sync",
+                name="宽基ETF份额定向同步",
+                description="仅同步6只核心宽基ETF的基金份额，用于净申赎压力研究；不触发全市场A股基础数据同步，也不计入自算贪恐总分。",
+                default_time="18:38",
+                default_enabled=True,
+                sort_order=75,
+                runner=_run_a_stock_etf_share_flow_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date",
+                        label="开始日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时从2015-01-01回补。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date",
+                        label="结束日期",
+                        value_type="string",
+                        default="",
+                        description="可选，YYYY-MM-DD；为空时同步到今天。",
                     ),
                 ),
             ),

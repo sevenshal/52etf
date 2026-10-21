@@ -23,6 +23,7 @@ from ..core.analytics_database import (
     AStockFundAdjFactor,
     AStockFundBasic,
     AStockFundDaily,
+    AStockFundShare,
     AStockFundFlowDaily,
     AStockIncome,
     AStockIndexDaily,
@@ -5483,6 +5484,49 @@ def sync_a_stock_index_history(
         service.close()
 
 
+def sync_a_stock_etf_share_history(
+    symbols: List[str],
+    start_date: date,
+    end_date: date,
+    *,
+    tushare_service: Optional[TushareService] = None,
+) -> Dict:
+    """定向同步 ETF 份额，避免研究任务触发全市场基础数据同步。"""
+    start_value = _parse_date(start_date)
+    end_value = _parse_date(end_date)
+    codes = list(dict.fromkeys(
+        str(item or "").strip().upper() for item in symbols if str(item or "").strip()
+    ))
+    if not start_value or not end_value or start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+    if not codes:
+        return {"symbols": [], "saved_rows": 0, "errors": []}
+
+    tushare = tushare_service or TushareService.get_instance()
+    analytics_db = AnalyticsSession()
+    saved_rows = 0
+    errors = []
+    try:
+        for symbol in codes:
+            try:
+                frame = tushare.get_a_stock_fund_share_range_frame(
+                    symbol, start_value, end_value, raise_on_error=True,
+                )
+                saved_rows += _bulk_upsert_fund_share_frame(analytics_db, frame)
+            except Exception as exc:
+                logger.warning("A stock ETF share sync failed for %s: %s", symbol, exc)
+                errors.append({"symbol": symbol, "error": str(exc)})
+        return {
+            "symbols": codes,
+            "start_date": start_value.isoformat(),
+            "end_date": end_value.isoformat(),
+            "saved_rows": saved_rows,
+            "errors": errors,
+        }
+    finally:
+        analytics_db.close()
+
+
 def _normalize_fund_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "ts_code",
@@ -5534,6 +5578,28 @@ def _bulk_upsert_fund_daily_frame(analytics_db: Session, frame: pd.DataFrame) ->
         AStockFundDaily.__tablename__,
         columns,
         normalized.loc[:, columns],
+    )
+    return len(normalized)
+
+
+def _bulk_upsert_fund_share_frame(analytics_db: Session, frame: pd.DataFrame) -> int:
+    """写入 ETF 每日份额；单独表避免与二级市场日线混淆。"""
+    if frame is None or frame.empty:
+        return 0
+    now = datetime.now()
+    normalized = pd.DataFrame(index=frame.index)
+    normalized["ts_code"] = _clean_text_series(frame, "ts_code")
+    normalized["trade_date"] = _date_series(frame, "trade_date")
+    normalized["fd_share"] = _numeric_series(frame, "fd_share", 4)
+    normalized["created_at"] = now
+    normalized["updated_at"] = now
+    normalized = normalized.dropna(subset=["ts_code", "trade_date", "fd_share"])
+    normalized = normalized.drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+    if normalized.empty:
+        return 0
+    analytics_db.commit()
+    _insert_or_replace_analytics_frame(
+        AStockFundShare.__tablename__, list(normalized.columns), normalized
     )
     return len(normalized)
 
