@@ -41,7 +41,7 @@ class AStockEtfShareFlowService:
     """构造份额变化子分数，并提供无前视及事后阶段顶底两类检验。"""
 
     @staticmethod
-    def calculate_flow_frame(share_frame: pd.DataFrame, price_frame: pd.DataFrame) -> pd.DataFrame:
+    def calculate_symbol_flow_frame(share_frame: pd.DataFrame, price_frame: pd.DataFrame) -> pd.DataFrame:
         shares = share_frame.copy()
         prices = price_frame.copy()
         if shares.empty or prices.empty:
@@ -60,13 +60,28 @@ class AStockEtfShareFlowService:
         # fd_share 的单位为万份；以收盘价估算创设/赎回对应的资金量。
         merged["estimated_flow_amount"] = (merged["fd_share"] - merged["previous_share"]) * 10000.0 * merged["close"]
         merged["previous_aum"] = merged["previous_share"] * 10000.0 * merged["previous_close"]
+        merged["share_change_ratio"] = (merged["fd_share"] - merged["previous_share"]) / merged["previous_share"]
+        merged["flow_ratio"] = merged["estimated_flow_amount"] / merged["previous_aum"]
+        merged["flow_5d_amount"] = merged.groupby("ts_code")["estimated_flow_amount"].transform(
+            lambda values: values.rolling(5, min_periods=3).sum()
+        )
+        merged["aum_5d"] = merged.groupby("ts_code")["previous_aum"].transform(
+            lambda values: values.rolling(5, min_periods=3).mean()
+        )
+        merged["flow_5d_ratio"] = merged["flow_5d_amount"] / merged["aum_5d"]
+        return merged.replace([np.inf, -np.inf], np.nan)
+
+    @classmethod
+    def calculate_flow_frame(cls, share_frame: pd.DataFrame, price_frame: pd.DataFrame) -> pd.DataFrame:
+        merged = cls.calculate_symbol_flow_frame(share_frame, price_frame)
+        if merged.empty:
+            return pd.DataFrame()
         daily = merged.groupby("trade_date", as_index=False).agg(
             estimated_flow_amount=("estimated_flow_amount", "sum"),
             previous_aum=("previous_aum", "sum"),
             etf_count=("ts_code", "count"),
         )
         daily = daily[(daily["etf_count"] >= 3) & (daily["previous_aum"] > 0)].copy()
-        daily["flow_ratio"] = daily["estimated_flow_amount"] / daily["previous_aum"]
         daily["flow_5d_amount"] = daily["estimated_flow_amount"].rolling(5, min_periods=3).sum()
         daily["aum_5d"] = daily["previous_aum"].rolling(5, min_periods=3).mean()
         daily["flow_5d_ratio"] = daily["flow_5d_amount"] / daily["aum_5d"]
@@ -143,6 +158,7 @@ class AStockEtfShareFlowService:
     def get_payload(self, history_days: int = 504) -> Dict[str, Any]:
         shares, prices, benchmark = self._load_frames()
         flow = self.calculate_flow_frame(shares, prices)
+        symbol_flow = self.calculate_symbol_flow_frame(shares, prices)
         analysis = self.analyze(flow, benchmark)
         records = []
         for row in flow.tail(max(1, min(int(history_days), 2000))).itertuples(index=False):
@@ -154,6 +170,21 @@ class AStockEtfShareFlowService:
                 "etf_count": int(row.etf_count),
             })
         latest = records[-1] if records else None
+        by_symbol = {}
+        limit = max(1, min(int(history_days), 2000))
+        for item in ETF_SHARE_FLOW_BASKET:
+            symbol = item["symbol"]
+            rows = []
+            for row in symbol_flow.loc[symbol_flow["ts_code"] == symbol].tail(limit).itertuples(index=False):
+                rows.append({
+                    "date": row.trade_date.date().isoformat(),
+                    "share_change_pct": _round(row.share_change_ratio * 100, 3),
+                    "flow_ratio_pct": _round(row.flow_ratio * 100, 3),
+                    "estimated_flow_amount_yi": _round(row.estimated_flow_amount / 100000000, 2),
+                    "flow_5d_ratio_pct": _round(row.flow_5d_ratio * 100, 3),
+                    "flow_5d_amount_yi": _round(row.flow_5d_amount / 100000000, 2),
+                })
+            by_symbol[symbol] = {"name": item["name"], "latest": rows[-1] if rows else None, "history": rows}
         return {
             "name": "宽基ETF净申赎压力",
             "included_in_total": False,
@@ -163,5 +194,6 @@ class AStockEtfShareFlowService:
             "benchmark": {"symbol": BENCHMARK_INDEX, "name": "沪深300"},
             "latest": latest,
             "history": records,
+            "by_symbol": by_symbol,
             "analysis": analysis,
         }

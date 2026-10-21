@@ -273,6 +273,7 @@ const SOXXFearGreed = () => {
     });
     return result;
   }, [summaries]);
+  const shareFlowBySymbol = shareFlow?.by_symbol || {};
 
   const expandedETF = useMemo(
     () => ETF_OPTIONS.find(item => item.symbol === expandedSymbol) || null,
@@ -280,6 +281,7 @@ const SOXXFearGreed = () => {
   );
   const expandedDetail = expandedSymbol ? (detailBySymbol[expandedSymbol] || DEFAULT_DETAIL_STATE) : DEFAULT_DETAIL_STATE;
   const expandedSummary = expandedSymbol ? summaryBySymbol[expandedSymbol] : null;
+  const expandedShareFlow = expandedETF ? shareFlowBySymbol[expandedETF.shareFlowSymbol || expandedETF.symbol] : null;
   const realtime = expandedSymbol ? realtimeBySymbol[expandedSymbol] : null;
   const realtimeError = expandedSymbol ? realtimeErrorBySymbol[expandedSymbol] : null;
   const detailError = expandedSymbol ? detailErrorBySymbol[expandedSymbol] : null;
@@ -422,6 +424,11 @@ const SOXXFearGreed = () => {
     const volumeTurnSignals = ['volume_bottom', 'volume_top'].flatMap(kind => buildSignalMarkPoints(kind, filteredData));
     const prices = filteredData.map(item => item.etf_price?.close ?? null);
     const volumes = filteredData.map(item => item.etf_price?.volume ?? null);
+    const shareFlowByDate = new Map((expandedShareFlow?.history || []).map(item => [item.date, item]));
+    const netShareFlowAmounts = filteredData.map(item => shareFlowByDate.get(item.date)?.estimated_flow_amount_yi ?? null);
+    const showShareFlow = netShareFlowAmounts.some(isFiniteNumber);
+    const volumeYAxisIndex = showShareFlow ? 3 : 2;
+    const valuationYAxisIndex = showShareFlow ? 4 : 3;
     const valuationHistoryByDate = new Map(
       (expandedDetail?.valuation_history || []).map(item => [item.date, item])
     );
@@ -465,16 +472,18 @@ const SOXXFearGreed = () => {
           priceSeriesName,
           ...(showValuationRatio ? ['估值系数'] : []),
           '成交量',
+          ...(showShareFlow ? ['当日净申赎额'] : []),
         ],
         top: 0,
       },
       grid: [
-        { left: 56, right: showValuationRatio ? 112 : 64, top: 48, height: '57%' },
-        { left: 56, right: showValuationRatio ? 112 : 64, top: '72%', bottom: 58 },
+        { left: 56, right: showValuationRatio ? 112 : 64, top: 48, height: showShareFlow ? '46%' : '57%' },
+        { left: 56, right: showValuationRatio ? 112 : 64, top: showShareFlow ? '60%' : '72%', height: showShareFlow ? '12%' : undefined, bottom: showShareFlow ? undefined : 58 },
+        ...(showShareFlow ? [{ left: 56, right: showValuationRatio ? 112 : 64, top: '79%', bottom: 58 }] : []),
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
-        { type: 'slider', xAxisIndex: [0, 1], start: 0, end: 100, bottom: 8 },
+        { type: 'inside', xAxisIndex: showShareFlow ? [0, 1, 2] : [0, 1], start: 0, end: 100 },
+        { type: 'slider', xAxisIndex: showShareFlow ? [0, 1, 2] : [0, 1], start: 0, end: 100, bottom: 8 },
       ],
       axisPointer: { link: [{ xAxisIndex: 'all' }] },
       xAxis: [
@@ -491,6 +500,12 @@ const SOXXFearGreed = () => {
           boundaryGap: true,
           data: dates,
         },
+        ...(showShareFlow ? [{
+          type: 'category',
+          gridIndex: 2,
+          boundaryGap: true,
+          data: dates,
+        }] : []),
       ],
       yAxis: [
         {
@@ -508,6 +523,14 @@ const SOXXFearGreed = () => {
           axisLine: { show: true, lineStyle: { color: '#fa8c16' } },
           splitLine: { show: false },
         },
+        ...(showShareFlow ? [{
+          type: 'value',
+          name: '净额(亿)',
+          gridIndex: 2,
+          axisLabel: { formatter: value => `${Number(value).toFixed(0)}亿` },
+          axisLine: { show: true, lineStyle: { color: '#722ed1' } },
+          splitLine: { lineStyle: { color: '#f5f5f5' } },
+        }] : []),
         {
           type: 'value',
           name: '成交量',
@@ -602,7 +625,7 @@ const SOXXFearGreed = () => {
         ...(showValuationRatio ? [{
           name: '估值系数',
           type: 'line',
-          yAxisIndex: 3,
+          yAxisIndex: valuationYAxisIndex,
           smooth: true,
           showSymbol: false,
           connectNulls: false,
@@ -614,15 +637,27 @@ const SOXXFearGreed = () => {
           name: '成交量',
           type: 'bar',
           xAxisIndex: 1,
-          yAxisIndex: 2,
+          yAxisIndex: volumeYAxisIndex,
           data: volumes,
           barMaxWidth: 12,
           itemStyle: { color: 'rgba(89, 126, 164, 0.55)' },
           emphasis: { itemStyle: { color: '#597ea4' } },
         },
+        ...(showShareFlow ? [{
+          name: '当日净申赎额',
+          type: 'bar',
+          xAxisIndex: 2,
+          yAxisIndex: 2,
+          data: netShareFlowAmounts,
+          barMaxWidth: 12,
+          itemStyle: {
+            color: params => (Number(params.value) >= 0 ? 'rgba(56, 158, 13, 0.65)' : 'rgba(207, 19, 34, 0.65)'),
+          },
+          emphasis: { itemStyle: { color: params => (Number(params.value) >= 0 ? '#389e0d' : '#cf1322') } },
+        }] : []),
       ],
     };
-  }, [activeComponentKey, expandedDetail, expandedETF, filteredData]);
+  }, [activeComponentKey, expandedDetail, expandedETF, expandedShareFlow, filteredData]);
 
   const toggleExpanded = (symbol) => {
     setExpandedSymbol(current => (current === symbol ? null : symbol));
@@ -1001,6 +1036,7 @@ const SOXXFearGreed = () => {
           <CardGrid
             options={US_ETF_OPTIONS}
             summaryBySymbol={summaryBySymbol}
+            shareFlowBySymbol={shareFlowBySymbol}
             expandedSymbol={expandedSymbol}
             onToggle={toggleExpanded}
             detailNode={detailNode}
@@ -1009,6 +1045,7 @@ const SOXXFearGreed = () => {
           <CardGrid
             options={HK_ETF_OPTIONS}
             summaryBySymbol={summaryBySymbol}
+            shareFlowBySymbol={shareFlowBySymbol}
             expandedSymbol={expandedSymbol}
             onToggle={toggleExpanded}
             detailNode={detailNode}
@@ -1021,6 +1058,7 @@ const SOXXFearGreed = () => {
                 title={group.title}
                 options={group.options}
                 summaryBySymbol={summaryBySymbol}
+                shareFlowBySymbol={shareFlowBySymbol}
                 expandedSymbol={expandedSymbol}
                 onToggle={toggleExpanded}
                 detailNode={detailNode}
@@ -1041,6 +1079,7 @@ const SOXXFearGreed = () => {
                   <IndustryGroup
                     group={group}
                     summaryBySymbol={summaryBySymbol}
+                    shareFlowBySymbol={shareFlowBySymbol}
                     expandedSymbol={expandedSymbol}
                     onToggle={toggleExpanded}
                   />
@@ -1054,6 +1093,7 @@ const SOXXFearGreed = () => {
                   <IndustryGroup
                     group={group}
                     summaryBySymbol={summaryBySymbol}
+                    shareFlowBySymbol={shareFlowBySymbol}
                     expandedSymbol={expandedSymbol}
                     onToggle={toggleExpanded}
                   />
@@ -1068,7 +1108,7 @@ const SOXXFearGreed = () => {
   );
 };
 
-const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => {
+const CardGrid = ({ options, summaryBySymbol, shareFlowBySymbol = {}, expandedSymbol, onToggle, detailNode }) => {
   const expandedIndex = options.findIndex(item => item.symbol === expandedSymbol);
   return (
     <div className="soxx-fear-summary-grid">
@@ -1077,6 +1117,7 @@ const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle, detailNo
           <SummaryCard
             option={item}
             summary={summaryBySymbol[item.symbol]}
+            shareFlowSummary={shareFlowBySymbol[item.shareFlowSymbol || item.symbol]}
             active={expandedSymbol === item.symbol}
             onToggle={() => onToggle(item.symbol)}
           />
@@ -1087,7 +1128,7 @@ const CardGrid = ({ options, summaryBySymbol, expandedSymbol, onToggle, detailNo
   );
 };
 
-const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle, detailNode }) => (
+const MarketGroup = ({ title, options, summaryBySymbol, shareFlowBySymbol, expandedSymbol, onToggle, detailNode }) => (
   <section className="soxx-fear-market-group">
     <div className="soxx-fear-group-title">
       <Text strong>{title}</Text>
@@ -1096,6 +1137,7 @@ const MarketGroup = ({ title, options, summaryBySymbol, expandedSymbol, onToggle
     <CardGrid
       options={options}
       summaryBySymbol={summaryBySymbol}
+      shareFlowBySymbol={shareFlowBySymbol}
       expandedSymbol={expandedSymbol}
       onToggle={onToggle}
       detailNode={detailNode}
@@ -1108,7 +1150,7 @@ const industryGroupContains = (group, symbol) => Boolean(symbol) && [
   ...(group.children || []).flatMap(child => child.options || []),
 ].some(item => item.symbol === symbol);
 
-const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => {
+const IndustryGroup = ({ group, summaryBySymbol, shareFlowBySymbol, expandedSymbol, onToggle }) => {
   const count = industryOptionCount(group);
   const options = [
     ...(group.options || []).map(item => ({
@@ -1142,6 +1184,7 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
         <CardGrid
           options={options}
           summaryBySymbol={summaryBySymbol}
+          shareFlowBySymbol={shareFlowBySymbol}
           expandedSymbol={expandedSymbol}
           onToggle={onToggle}
         />
@@ -1150,7 +1193,7 @@ const IndustryGroup = ({ group, summaryBySymbol, expandedSymbol, onToggle }) => 
   );
 };
 
-const SummaryCard = ({ option, summary, active, onToggle }) => {
+const SummaryCard = ({ option, summary, shareFlowSummary, active, onToggle }) => {
   const latest = summary?.latest;
   const intraday = summary?.intraday;
   // 盘中/收盘取舍与个股详情页「所属指数 · 贪恐」共用同一个函数，两处永远显示同一个数
@@ -1227,6 +1270,11 @@ const SummaryCard = ({ option, summary, active, onToggle }) => {
         <span title="恐贪日期成交量 ÷ 不含当日的前20个交易日平均成交量">
           量比 {formatVolumeRatio(summary?.volume_ratio_20d)}
         </span>
+        {shareFlowSummary?.latest && (
+          <span title="当日ETF份额变化 ÷ 前日份额；正数为净申购，负数为净赎回">
+            份额比 {formatNumber(shareFlowSummary.latest.share_change_pct, 2)}%
+          </span>
+        )}
       </div>
       {showValuation && (
         <div className="soxx-fear-summary-valuation">

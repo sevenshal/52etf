@@ -320,6 +320,7 @@
 .soxx-fear-summary-footer {
   display: flex;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 9px;
   color: #8c8c8c;
@@ -480,7 +481,7 @@
 }
 
 .soxx-fear-chart {
-  height: 520px;
+  height: 590px;
 }
 
 @media (max-width: 1440px) {
@@ -608,7 +609,7 @@
   }
 
   .soxx-fear-chart {
-    height: 430px;
+    height: 540px;
   }
 }
 

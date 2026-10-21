@@ -42,3 +42,15 @@ def test_share_flow_analysis_has_forward_returns_and_hindsight_phase_labels():
     assert len(result["future_returns"]) == 5
     assert {item["phase"] for item in result["phase_distribution"]} == {"top", "bottom"}
     assert result["sample_count"] > 100
+
+
+def test_symbol_flow_has_individual_five_day_net_amount_and_ratio():
+    shares, prices, _ = _frames()
+    result = AStockEtfShareFlowService.calculate_symbol_flow_frame(shares, prices)
+
+    latest = result[result["ts_code"] == "510300.SH"].iloc[-1]
+    assert latest["estimated_flow_amount"] > 0
+    assert latest["flow_ratio"] > 0
+    assert latest["flow_5d_amount"] > 0
+    assert latest["flow_5d_ratio"] > 0
+    assert latest["share_change_ratio"] > 0
