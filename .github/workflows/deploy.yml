@@ -180,8 +180,10 @@ jobs:
 
       - name: Install and restart remote service
         run: |
-          ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            "${ECS_USER}@${ECS_HOST}" bash -s -- "${{ steps.build-package.outputs.req_hash }}" <<'REMOTE'
+          # 6022 经 frps 转发，偶发短断连时重试。远端脚本对已替换的源码也保持幂等。
+          for attempt in 1 2 3; do
+            if ssh -i ~/.ssh/deploy_key -p "$ECS_PORT" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+              "${ECS_USER}@${ECS_HOST}" bash -s -- "${{ steps.build-package.outputs.req_hash }}" <<'REMOTE'
           set -e
           REQ_HASH="$1"
           BACKEND=/home/quantd/quant_prod/backend
@@ -195,19 +197,32 @@ jobs:
             printf '%s' "$REQ_HASH" > "$BACKEND/.deps-hash"
             rm -f /home/quantd/deps.tgz
           fi
-          echo "[deploy] replacing source..."
-          rm -rf "$BACKEND/_src_extract"
-          mkdir -p "$BACKEND/_src_extract"
-          tar xzf /home/quantd/src.tgz -C "$BACKEND/_src_extract"
-          rm -rf "$BACKEND/site-packages/src"
-          mv "$BACKEND/_src_extract/src" "$BACKEND/site-packages/src"
-          rmdir "$BACKEND/_src_extract" 2>/dev/null || true
-          rm -f /home/quantd/src.tgz
+          if [ -f /home/quantd/src.tgz ]; then
+            echo "[deploy] replacing source..."
+            rm -rf "$BACKEND/_src_extract"
+            mkdir -p "$BACKEND/_src_extract"
+            tar xzf /home/quantd/src.tgz -C "$BACKEND/_src_extract"
+            rm -rf "$BACKEND/site-packages/src"
+            mv "$BACKEND/_src_extract/src" "$BACKEND/site-packages/src"
+            rmdir "$BACKEND/_src_extract" 2>/dev/null || true
+            rm -f /home/quantd/src.tgz
+          else
+            echo "[deploy] source archive already applied; continuing idempotently."
+          fi
           systemctl --user restart quant-server
           sleep 5
           systemctl --user --no-pager --lines=8 status quant-server
           if [ -d "$BACKEND/site-packages.old" ]; then rm -rf "$BACKEND/site-packages.old"; fi
           REMOTE
+            then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "[deploy] SSH disconnected; retrying install in 5 seconds (attempt $((attempt + 1))/3)..."
+              sleep 5
+            fi
+          done
+          exit 1
 
       - name: Cleanup SSH key
         if: always()
