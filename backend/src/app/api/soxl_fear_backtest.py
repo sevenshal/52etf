@@ -19,6 +19,7 @@ from ...core.database import ETFFearGreedCloneHistory, Session
 from ...core.event_stream import publish_event
 from ...core.services.a_stock_index_valuation import (
     VALUATION_POSITION_MAX_WINDOW,
+    VALUATION_POSITION_LONG_WINDOW,
     VALUATION_POSITION_SHORT_WINDOW,
     valuation_buy_allowed,
     valuation_sell_allowed,
@@ -70,7 +71,11 @@ SELL_MA5_CONFIRM_MODES = {
 }
 MA5_WINDOW = 5
 SIGNAL_BELOW_MA5_COLUMN = "signal_below_ma5"
-VALUATION_POSITION_WINDOWS = (VALUATION_POSITION_SHORT_WINDOW, VALUATION_POSITION_MAX_WINDOW)
+VALUATION_POSITION_WINDOWS = (
+    VALUATION_POSITION_SHORT_WINDOW,
+    VALUATION_POSITION_MAX_WINDOW,
+    VALUATION_POSITION_LONG_WINDOW,
+)
 
 US_TARGET_OPTIONS = [
     {"label": "SOXL.US", "value": "SOXL.US", "market": "us"},
@@ -260,7 +265,7 @@ class SOXLFearStrategyParams(BaseModel):
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
     # 空仓时任一标的极恐放量都买（都触发买更恐慌的）；持有 X 时若 X 恐贪 > 该阈值且另一标的有买入信号则换仓。
     swap_threshold: Optional[float] = None
-    # 估值点位闸门（可选）：估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，
+    # 估值点位闸门（可选）：估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504/1000 个交易日里的分位，
     # 越大越贵（>=80 极度高估、<20 极度低估），与贪恐页面同一口径、逐日无未来函数。
     # A股指数用成分一致预期估值，美股指数ETF（QQQ/SPY/SOXX/DIA）用美股ETF估值分析；
     # 没有估值的来源/日期（如 CNN、样本不足 120 天）不设闸。
@@ -275,7 +280,7 @@ class SOXLFearStrategyParams(BaseModel):
     @validator("valuation_window")
     def validate_valuation_window(cls, value):
         if value not in VALUATION_POSITION_WINDOWS:
-            raise ValueError("估值点位窗口仅支持 252 或 504 个交易日")
+            raise ValueError("估值点位窗口仅支持 252、504 或 1000 个交易日")
         return value
 
     @validator("valuation_buy_max", "valuation_sell_min", "valuation_force_sell_greed")
@@ -514,7 +519,7 @@ class SOXLFearSearchParams(BaseModel):
     def validate_valuation_window_values(cls, value):
         normalized = list(dict.fromkeys(value or []))
         if not normalized or any(item not in VALUATION_POSITION_WINDOWS for item in normalized):
-            raise ValueError("估值点位窗口候选仅支持 252 或 504")
+            raise ValueError("估值点位窗口候选仅支持 252、504 或 1000")
         return normalized
 
     @validator("valuation_buy_max_values", "valuation_sell_min_values", "valuation_force_sell_greed_values")
@@ -802,7 +807,7 @@ class SoxlFearSearchParams(BaseModel):
     @validator("valuation_window")
     def validate_valuation_window(cls, value):
         if value not in VALUATION_POSITION_WINDOWS:
-            raise ValueError("估值窗口仅支持 252 或 504")
+            raise ValueError("估值窗口仅支持 252、504 或 1000")
         return value
 
     @validator("execute_next_open_values")

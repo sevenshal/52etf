@@ -1762,7 +1762,7 @@ const SoxlFearBacktest = () => {
               </Col>
               <Col xs={24} md={8}>
                 <Form.Item name="soxl_valuation_window" label="SOXX 估值分位窗口">
-                  <Select options={[{ value: 252, label: '近252个交易日' }, { value: 504, label: '近504个交易日' }]} />
+                  <Select options={[{ value: 252, label: '近252个交易日' }, { value: 504, label: '近504个交易日' }, { value: 1000, label: '近1000个交易日' }]} />
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
@@ -1830,7 +1830,7 @@ const SoxlFearBacktest = () => {
                 message={isSoxlMode ? 'SOXX 估值闸门' : '估值点位闸门（可选）'}
                 description={isSoxlMode
                   ? 'SOXL 专用使用最近一个已确认的 SOXX 估值点位；估值高于阈值后，可等待 SOXX 跌破 MA5，或启动移动止盈。'
-                  : '估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖。'}
+                  : '估值点位 = 贪恐来源指数的估值系数（=1−估值偏离）在近 252/504/1000 个交易日里的分位，越大越贵（≥80 极度高估，<20 极度低估），与贪恐页面同一口径，逐日只用当天及以前的数据。买入闸门：极恐放量且估值点位 ≤ 阈值（够便宜）才买；卖出闸门：贪婪且估值点位 ≥ 阈值（够贵）才卖。'}
               />
             </Col>
             {isSoxlMode ? null : (

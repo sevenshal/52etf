@@ -154,7 +154,7 @@ def load_us_index_valuation_position_history(
     *,
     end_date: Optional[date] = None,
 ) -> Dict[date, Dict[int, Optional[float]]]:
-    """逐美股交易日的估值点位（按窗口 252/504），每天只用截至当天的估值偏离历史。"""
+    """逐美股交易日的估值点位（按窗口 252/504/1000），每天只用截至当天的估值偏离历史。"""
     rows = _load_us_valuation_rows(symbol, end_date)
     return build_valuation_position_history((row["date"], row["current_gap_pct"]) for row in rows)
 

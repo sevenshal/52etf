@@ -686,6 +686,9 @@ const SOXXFearGreed = () => {
     : valuation?.valuation_position_pct;
   const valuation252Days = Number(valuation?.valuation_history_252_days)
     || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
+  const valuation1000Label = valuation?.valuation_position_1000_label;
+  const valuation1000Pct = valuation?.valuation_position_1000_pct;
+  const valuation1000Days = Number(valuation?.valuation_history_1000_days) || 0;
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
   // 日线作为完整基底；盘中快照只覆盖自身确实返回的字段，避免旧快照缺少新分量
@@ -887,6 +890,19 @@ const SOXXFearGreed = () => {
                     有效{valuation252Days}日百分位{' '}
                     {isFiniteNumber(valuation252Pct)
                       ? `${formatNumber(valuation252Pct, 1)}%`
+                      : '样本不足'}
+                  </Tag>
+                </Col>
+                <Col xs={12} sm={8}>
+                  <Statistic
+                    title="近1000日位置(越大越贵)"
+                    value={valuation1000Label || '-'}
+                    valueStyle={{ color: valuationColor(valuation1000Label), fontSize: 20 }}
+                  />
+                  <Tag color={valuationColor(valuation1000Label)}>
+                    有效{valuation1000Days}日百分位{' '}
+                    {isFiniteNumber(valuation1000Pct)
+                      ? `${formatNumber(valuation1000Pct, 1)}%`
                       : '样本不足'}
                   </Tag>
                 </Col>

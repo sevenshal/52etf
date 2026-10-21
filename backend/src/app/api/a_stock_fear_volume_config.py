@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from ...core.services.a_stock_index_valuation import (
     VALUATION_POSITION_MAX_WINDOW,
+    VALUATION_POSITION_LONG_WINDOW,
     VALUATION_POSITION_SHORT_WINDOW,
 )
 from ...robot.a_stock_base_data_config import (
@@ -22,6 +23,7 @@ from ...robot.hk_stock_base_data_config import HK_INDEX_FEAR_GREED_TARGET_BY_SYM
 VALUATION_POSITION_WINDOWS = (
     VALUATION_POSITION_SHORT_WINDOW,
     VALUATION_POSITION_MAX_WINDOW,
+    VALUATION_POSITION_LONG_WINDOW,
 )
 SELL_MA5_CONFIRM_OFF = "off"
 SELL_MA5_CONFIRM_ALL = "all"

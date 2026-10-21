@@ -157,6 +157,7 @@ def test_config_payload_valuation_fields():
     assert payload.valuation_sell_min is None
     payload = AStockFearStrategyConfigPayload(valuation_window=504, valuation_sell_min=80, valuation_force_sell_greed=90)
     assert (payload.valuation_window, payload.valuation_sell_min, payload.valuation_force_sell_greed) == (504, 80, 90)
+    assert AStockFearStrategyConfigPayload(valuation_window=1000).valuation_window == 1000
     with pytest.raises(Exception):
         AStockFearStrategyConfigPayload(valuation_window=100)
     with pytest.raises(Exception):

@@ -84,8 +84,8 @@ class SoxlFearStrategyConfigPayload(BaseModel):
 
     @validator("valuation_window")
     def validate_valuation_window(cls, value):
-        if value not in {252, 504}:
-            raise ValueError("valuation_window 仅支持 252 或 504")
+        if value not in {252, 504, 1000}:
+            raise ValueError("valuation_window 仅支持 252、504 或 1000")
         return value
 
     @validator(

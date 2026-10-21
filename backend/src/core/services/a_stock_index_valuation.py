@@ -15,6 +15,9 @@ from .a_stock_consensus import load_a_stock_consensus_valuation_history_map
 
 VALUATION_POSITION_MAX_WINDOW = 504
 VALUATION_POSITION_SHORT_WINDOW = 252
+# 保留 504 日为既有默认/主展示窗口；1000 日只作为新增的长期比较窗口，
+# 不能直接替换 MAX，否则存量 API 的 valuation_position_pct 语义会悄然改变。
+VALUATION_POSITION_LONG_WINDOW = 1000
 VALUATION_POSITION_MIN_SAMPLES = 120
 VALUATION_FULL_CONFIDENCE_REPORT_COUNT = 3
 # 估值点位口径标记：估值系数（=1−估值偏离）在近 N 日里的分位，越大越贵；
@@ -180,7 +183,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .limit(VALUATION_POSITION_MAX_WINDOW)
+            .limit(VALUATION_POSITION_LONG_WINDOW)
             .all()
         )
         if not history_rows:
@@ -242,7 +245,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuation_gap_min=round(min(gaps), 2),
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
             valuation_gap_max=round(max(gaps), 2),
-            method="adaptive_up_to_504d_percentile_of_robust_consensus_undervaluation",
+            method="adaptive_up_to_1000d_percentile_of_robust_consensus_undervaluation",
             _history=daily_results,
         )
         result["index_date"] = latest.date.isoformat()
@@ -376,9 +379,9 @@ def load_a_stock_index_valuation_position_history(
     *,
     end_date: Optional[date] = None,
 ) -> Dict[date, Dict[int, Optional[float]]]:
-    """逐日估值点位，按窗口（252 / 504）给出当天的分位。
+    """逐日估值点位，按窗口（252 / 504 / 1000）给出当天的分位。
 
-    与页面上的 valuation_position_252_pct / valuation_position_pct 同一口径，但每一天只用
+    与页面上的 252 / 504 / 1000 日估值点位同一口径，但每一天只用
     截至当天的估值偏离历史计算，没有未来函数，回测可以直接用。样本不足 120 天时为 None。
     """
     normalized_symbol = str(symbol or "").strip().upper()
@@ -412,10 +415,11 @@ def build_valuation_position_history(
         if not math.isfinite(gap):
             continue
         gaps.append(gap)
-        fields = _build_valuation_position_fields(gaps[-VALUATION_POSITION_MAX_WINDOW:], gap)
+        fields = _build_valuation_position_fields(gaps[-VALUATION_POSITION_LONG_WINDOW:], gap)
         positions[snapshot_date] = {
             VALUATION_POSITION_SHORT_WINDOW: fields["valuation_position_252_pct"],
             VALUATION_POSITION_MAX_WINDOW: fields["valuation_position_pct"],
+            VALUATION_POSITION_LONG_WINDOW: fields["valuation_position_1000_pct"],
         }
     return positions
 
@@ -496,15 +500,16 @@ def _percentile_rank(values: Iterable[float], current: float) -> float:
 
 
 def _build_valuation_position_fields(values: Iterable[float], current: float) -> Dict[str, Any]:
-    """估值点位：当天估值系数（=1−估值偏离）在近 ≤504 / 252 日里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
+    """估值点位：当天估值系数（=1−估值偏离）在近 ≤252 / 504 / 1000 日里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
 
     values / current 传的是估值偏离（current_gap_pct，越大越便宜），这里按相反方向取分位。
     """
-    primary_values = [
+    long_values = [
         float(value)
         for value in values
         if value is not None
-    ][-VALUATION_POSITION_MAX_WINDOW:]
+    ][-VALUATION_POSITION_LONG_WINDOW:]
+    primary_values = long_values[-VALUATION_POSITION_MAX_WINDOW:]
     short_values = primary_values[-VALUATION_POSITION_SHORT_WINDOW:]
 
     def build_position(sample: List[float]) -> tuple[Optional[float], str]:
@@ -516,6 +521,7 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
 
     position_pct, position_label = build_position(primary_values)
     short_position_pct, short_position_label = build_position(short_values)
+    long_position_pct, long_position_label = build_position(long_values)
     return {
         "valuation_position_basis": VALUATION_POSITION_BASIS,
         "valuation_position_pct": position_pct,
@@ -527,6 +533,9 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
         "valuation_position_252_pct": short_position_pct,
         "valuation_position_252_label": short_position_label,
         "valuation_history_252_days": len(short_values),
+        "valuation_position_1000_pct": long_position_pct,
+        "valuation_position_1000_label": long_position_label,
+        "valuation_history_1000_days": len(long_values),
     }
 
 
@@ -552,6 +561,7 @@ def _normalize_legacy_position_fields(payload: Dict[str, Any]) -> Dict[str, Any]
     for pct_key, label_key in (
         ("valuation_position_pct", "valuation_position_label"),
         ("valuation_position_252_pct", "valuation_position_252_label"),
+        ("valuation_position_1000_pct", "valuation_position_1000_label"),
     ):
         value = payload.get(pct_key)
         if value is not None:

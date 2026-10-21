@@ -162,6 +162,7 @@ def test_valuation_position_history_has_no_look_ahead():
     fields = valuation_service._build_valuation_position_fields(gaps, gaps[-1])
     assert full[days[-1]][252] == fields["valuation_position_252_pct"]
     assert full[days[-1]][504] == fields["valuation_position_pct"]
+    assert full[days[-1]][1000] == fields["valuation_position_1000_pct"]
 
 
 def test_valuation_position_is_higher_when_more_expensive():
@@ -188,8 +189,8 @@ def test_legacy_snapshot_position_is_converted_to_new_direction():
 
 def test_search_counts_valuation_candidates():
     base = SOXLFearSearchParams()
-    widened = SOXLFearSearchParams(valuation_sell_min_values=[None, 70, 80], valuation_window_values=[252, 504])
-    assert _count_search_params(widened) == _count_search_params(base) * 6
+    widened = SOXLFearSearchParams(valuation_sell_min_values=[None, 70, 80], valuation_window_values=[252, 504, 1000])
+    assert _count_search_params(widened) == _count_search_params(base) * 9
 
 
 def test_search_count_deduplicates_repeated_candidate_values():

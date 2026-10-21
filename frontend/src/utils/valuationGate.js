@@ -2,6 +2,7 @@
 export const valuationWindowOptions = [
   { label: '近 252 日（约一年）', value: 252 },
   { label: '近 504 日（约两年）', value: 504 },
+  { label: '近 1000 日（约四年）', value: 1000 },
 ];
 
 export const formatValuationGate = (params) => {

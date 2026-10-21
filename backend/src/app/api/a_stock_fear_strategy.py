@@ -106,7 +106,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
         # 存量配置（后加列）可能为 NULL → 补默认窗口
         window = int(value or VALUATION_POSITION_WINDOWS[0])
         if window not in VALUATION_POSITION_WINDOWS:
-            raise ValueError("估值点位窗口仅支持 252 或 504 个交易日")
+            raise ValueError("估值点位窗口仅支持 252、504 或 1000 个交易日")
         return window
 
     @validator("valuation_buy_max", "valuation_sell_min", "valuation_force_sell_greed")

@@ -1233,7 +1233,7 @@ class AStockFearStrategyConfig(Base):
     max_take_profit_sells_per_cycle = Column(Integer, nullable=False, default=2)
     min_position_pct_after_take_profit = Column(Float, nullable=False, default=0.0)
     rebalance_threshold_pct = Column(Float, nullable=False, default=0.0)
-    # 估值点位闸门（与回测同一口径）：窗口 252/504 日；阈值 NULL=关闭
+    # 估值点位闸门（与回测同一口径）：窗口 252/504/1000 日；阈值 NULL=关闭
     valuation_window = Column(Integer, nullable=True, default=252)
     # 估值点位越大越贵。买入需信号日估值点位 <= 该值（够便宜）
     valuation_buy_max = Column(Float, nullable=True)

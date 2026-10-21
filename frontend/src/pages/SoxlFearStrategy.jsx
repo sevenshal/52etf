@@ -907,7 +907,7 @@ const SoxlFearStrategy = ({ embedded = false }) => {
         </Col>
         <Col xs={24} md={8}>
           <Form.Item name="valuation_window" label="SOXX 估值分位窗口" rules={[{ required: true }]}>
-            <Select options={[{ label: '252日', value: 252 }, { label: '504日', value: 504 }]} />
+            <Select options={[{ label: '252日', value: 252 }, { label: '504日', value: 504 }, { label: '1000日', value: 1000 }]} />
           </Form.Item>
         </Col>
         <Col xs={24} md={8}>
