@@ -2,8 +2,8 @@
 
 核心验证：calculate_intraday 复用日频 _build_raw_signals/_score_raw_signals，
 仅注入今日盘中指数点位（rt_idx_k）与实时成分股行情；日频专属组件（期权 PCR、
-信用利差、国债避险）通过 ffill 沿用最近日频值；其中 AA/AAA 信用利差仅展示，
-最终 6 个组件参与评分。
+信用利差、国债避险）通过 ffill 沿用最近日频值；其中 AA/AAA 信用利差与成交量 P/C
+仅展示，持仓量 P/C 在内的 6 个组件参与评分。
 """
 from datetime import date
 from unittest.mock import patch
@@ -94,6 +94,7 @@ def _build_synthetic_context(calculator, n_days: int = 600):
 
     bond = pd.Series(np.linspace(100, 108, n_days), index=days)
     option_pcr = pd.Series(np.random.uniform(0.8, 1.4, n_days), index=days)
+    option_oi_pcr = pd.Series(np.random.uniform(0.8, 1.4, n_days), index=days)
     credit_spread = pd.Series(np.random.uniform(0.5, 1.5, n_days), index=days)
     implied_volatility = pd.Series(np.random.uniform(0.2, 0.5, n_days), index=days)
 
@@ -107,6 +108,7 @@ def _build_synthetic_context(calculator, n_days: int = 600):
         "quotes": quotes,
         "bond": bond,
         "option_pcr": option_pcr,
+        "option_oi_pcr": option_oi_pcr,
         "credit_spread": credit_spread,
         "implied_volatility": implied_volatility,
     }
@@ -132,6 +134,7 @@ def test_calculate_intraday_excludes_display_only_components_from_total():
          patch.object(calculator, "_realtime_quotes", return_value=ctx["quotes"]), \
          patch.object(calculator, "_load_index_close", return_value=ctx["bond"]), \
          patch.object(calculator, "_load_option_volume_pcr", return_value=ctx["option_pcr"]), \
+         patch.object(calculator, "_load_option_open_interest_pcr", return_value=ctx["option_oi_pcr"]), \
          patch.object(calculator, "_load_option_implied_volatility", return_value=ctx["implied_volatility"]), \
          patch.object(calculator, "_load_credit_spread", return_value=ctx["credit_spread"]):
         result = calculator.calculate_intraday(now=pd.Timestamp(ctx["today"]))
@@ -139,6 +142,8 @@ def test_calculate_intraday_excludes_display_only_components_from_total():
     assert result["component_count"] == 6
     assert len(result["components_used"]) == 6
     assert result["components"]["implied_volatility"]["included_in_total"] is True
+    assert result["components"]["put_call_options"]["included_in_total"] is True
+    assert result["components"]["put_call_volume_options"]["included_in_total"] is False
     assert "market_volatility" not in result["components"]
     assert result["components"]["junk_bond_demand"]["included_in_total"] is False
     assert result["components"]["junk_bond_demand"]["used_in_score"] is False

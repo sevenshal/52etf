@@ -149,12 +149,13 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
     "put_call_options": ComponentSpec(
         key="put_call_options",
-        name="A-share Put/Call Options",
-        raw_label="-5-day average related option put/call volume ratio",
+        name="A-share Put/Call Open Interest",
+        raw_label="5-day average related option put/call open-interest ratio",
         source="Tushare opt_basic + opt_daily in DuckDB",
         proxy_note=(
             "Option PCR per tracked index, blended by how much of the target index's "
-            "constituent weight each option's underlying index covers."
+            "constituent weight each option's underlying index covers. Uses open interest "
+            "because institutional protection demand is a stock rather than a daily flow."
         ),
     ),
     "implied_volatility": ComponentSpec(
@@ -177,10 +178,10 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
     ),
 }
 
-# 诊断分量：只保留信用利差与持仓量口径的 put/call，便于与总分分量对照，但不参与总分。
+# 诊断分量：保留信用利差与成交量口径的 put/call，便于与总分分量对照，但不参与总分。
 # - junk_bond_demand：该分量在 A 股阶段顶底样本中的方向不稳定；
-# - put_call_oi_options：持仓量口径 P/C，方向与成交量口径相反（顶部 put 持仓偏高），
-#   2020 年以来方向稳定但精确率低，先只展示、等积累更多样本再决定是否进总分。
+# - put_call_volume_options：成交量口径 P/C 是当日流量，高 P/C 偏向局部底部；保留展示，
+#   但不再驱动总分。
 # 实现波动率相对变化已下线：波动率维度统一由参与总分的期权隐含波动率承担。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
     "junk_bond_demand": ComponentSpec(
@@ -194,15 +195,14 @@ A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
             "top/bottom direction is unstable."
         ),
     ),
-    "put_call_oi_options": ComponentSpec(
-        key="put_call_oi_options",
-        name="A-share Put/Call Open Interest",
-        raw_label="5-day average related option put/call open-interest ratio",
-        source="Tushare opt_basic + opt_daily(oi) in DuckDB",
+    "put_call_volume_options": ComponentSpec(
+        key="put_call_volume_options",
+        name="A-share Put/Call Volume",
+        raw_label="-5-day average related option put/call volume ratio",
+        source="Tushare opt_basic + opt_daily(vol) in DuckDB",
         proxy_note=(
-            "未平仓合约张数口径的 P/C（存量），与参与总分的成交量口径 put_call_options 是两条"
-            "不同的信息（日频相关为负）。方向为正：指数涨得越多、机构多头仓位越重，"
-            "需要持有的 put 保护越多，所以高 P/C 偏向局部顶部。仅作诊断，暂未参与总分。"
+            "成交量口径 P/C（日流量）。散户恐慌买 put 时 P/C 往往升高，偏向局部底部；"
+            "仅作诊断，暂未参与总分。"
         ),
     ),
 }
@@ -300,8 +300,8 @@ class AStockInnovation100FearGreedCloneCalculator:
                     "rating": FearGreedCloneCalculator.rating(score),
                     "method": (
                         "available-component equal-weighted rolling z-score normal CDF; "
-                        "IV replaces realized-volatility change; AA/AAA credit spread and "
-                        "open-interest P/C are display-only"
+                        "IV replaces realized-volatility change; open-interest P/C is the "
+                        "total-score option component; volume P/C and AA/AAA credit spread are display-only"
                     ),
                     "history_days": history_days,
                     "score_window": score_window,
@@ -1026,10 +1026,11 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["market_momentum"] = level / level.rolling(125).mean() - 1.0
         df["stock_price_strength"] = self._weighted_range_position(market_frames, holdings_by_date, index)
         df["stock_price_breadth"] = self._weighted_advancing_amount_ratio(market_frames, holdings_by_date, index)
-        df["put_call_options"] = -option_pcr.rolling(5, min_periods=3).mean()
-        # 持仓量口径：正号。put 未平仓随多头仓位堆积，顶部 put 持仓偏高，
-        # 与成交量口径（散户恐慌买 put，高 P/C 偏底部）方向相反。仅诊断，不进总分。
-        df["put_call_oi_options"] = option_oi_pcr.rolling(5, min_periods=3).mean()
+        # 持仓量口径：正号。put 未平仓随多头仓位堆积，顶部 put 持仓偏高，因此高 P/C
+        # 偏向贪婪；它是总分的 P/C 分量。
+        df["put_call_options"] = option_oi_pcr.rolling(5, min_periods=3).mean()
+        # 成交量 P/C 是当日流量（散户恐慌买 put，高 P/C 偏底部），只保留为诊断。
+        df["put_call_volume_options"] = -option_pcr.rolling(5, min_periods=3).mean()
         # 负号让 IV 越高（预期风险越高）时分数越低，并作为总分的波动率分量。
         df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
@@ -1392,7 +1393,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         holdings_by_date: Optional[Dict[pd.Timestamp, List[Dict[str, Any]]]] = None,
         holdings_as_of_by_date: Optional[Dict[pd.Timestamp, date]] = None,
     ) -> pd.Series:
-        """持仓量（存量）口径的 put/call，只作诊断，不参与总分。"""
+        """持仓量（存量）口径的 put/call，作为 A 股总分的 P/C 分量。"""
         return self._load_option_pcr(
             start_date, end_date, holdings_by_date, holdings_as_of_by_date, value_column="oi"
         )

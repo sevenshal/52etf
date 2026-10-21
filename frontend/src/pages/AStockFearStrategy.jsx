@@ -8,6 +8,7 @@ import {
   Descriptions,
   Form,
   InputNumber,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -164,6 +165,10 @@ const AStockFearStrategy = ({ embedded = false }) => {
   const [liveSubAccounts, setLiveSubAccounts] = useState([]);
   const [logs, setLogs] = useState([]);
   const [strategyState, setStrategyState] = useState(null);
+  const [replayStartDate, setReplayStartDate] = useState(dayjs().subtract(1, 'year'));
+  const [replayResult, setReplayResult] = useState(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replaySyncing, setReplaySyncing] = useState(false);
   const logRequestSeqRef = useRef(0);
   const stateRequestSeqRef = useRef(0);
 
@@ -548,6 +553,45 @@ const AStockFearStrategy = ({ embedded = false }) => {
     }
   };
 
+  const handleReplayPosition = async () => {
+    if (!selectedConfig?.id || !replayStartDate) {
+      message.warning('请先选择回跑开始日期并保存策略配置');
+      return;
+    }
+    setReplayLoading(true);
+    setReplayResult(null);
+    try {
+      const { data } = await request.post(
+        `/api/a-stock-fear-strategy/configs/${selectedConfig.id}/replay-position`,
+        { start_date: replayStartDate.format('YYYY-MM-DD') },
+      );
+      setReplayResult(data);
+      message.success('已回跑到最新历史数据，请核对目标仓位后再同步');
+    } catch (error) {
+      message.error(error.response?.data?.detail || '持仓回跑失败');
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
+  const handleSyncReplayPosition = async () => {
+    if (!selectedConfig?.id || !replayResult?.preview_id) return;
+    setReplaySyncing(true);
+    try {
+      const { data } = await request.post(
+        `/api/a-stock-fear-strategy/configs/${selectedConfig.id}/replay-position/sync`,
+        { preview_id: replayResult.preview_id },
+      );
+      message.success(data?.message || '已同步实盘目标仓位');
+      setReplayResult(null);
+      await Promise.all([fetchConfigs(), fetchLogs(selectedConfig.id), fetchState(selectedConfig.id)]);
+    } catch (error) {
+      message.error(error.response?.data?.detail || '同步实盘目标仓位失败');
+    } finally {
+      setReplaySyncing(false);
+    }
+  };
+
   const handleTabChange = async (tabKey) => {
     setActiveTab(tabKey);
     if (!selectedConfig?.id) return;
@@ -815,6 +859,45 @@ const AStockFearStrategy = ({ embedded = false }) => {
                       onFinish={handleSave}
                     >
                       <Row gutter={16}>
+                        <Col span={24}>
+                          <Card size="small" title="补跑历史信号并同步实盘目标仓位" style={{ marginBottom: 16 }}>
+                            <Alert
+                              type="warning"
+                              showIcon
+                              style={{ marginBottom: 12 }}
+                              message="先回跑预览，再确认同步"
+                              description="回跑使用当前已保存的策略参数和次日开盘成交规则；同步时按实盘子账户当前净资产与实时价换算目标数量，并会触发真实执行器下单。"
+                            />
+                            <Space wrap>
+                              <DatePicker
+                                value={replayStartDate}
+                                onChange={setReplayStartDate}
+                                disabledDate={(current) => current && current > dayjs().endOf('day')}
+                              />
+                              <Button loading={replayLoading} onClick={handleReplayPosition}>回跑到最新并预览应持仓</Button>
+                              {replayResult && (
+                                <Popconfirm
+                                  title="确认同步回跑末日目标仓位到实盘？"
+                                  description="这会更新目标仓位并立即触发执行器，可能产生真实买卖订单。"
+                                  okText="确认同步"
+                                  cancelText="取消"
+                                  onConfirm={handleSyncReplayPosition}
+                                >
+                                  <Button type="primary" danger loading={replaySyncing}>同步预览仓位到实盘</Button>
+                                </Popconfirm>
+                              )}
+                            </Space>
+                            {replayResult && (
+                              <Descriptions size="small" column={3} bordered style={{ marginTop: 12 }}>
+                                <Descriptions.Item label="回跑区间">{replayResult.start_date} ～ {replayResult.end_date}</Descriptions.Item>
+                                <Descriptions.Item label="应持仓">
+                                  {replayResult.is_cash ? '现金' : `${replayResult.desired_symbol} / ${Number(replayResult.target_weight_pct).toFixed(1)}%`}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="交易次数">{replayResult.trade_count}</Descriptions.Item>
+                              </Descriptions>
+                            )}
+                          </Card>
+                        </Col>
                         <Col xs={24} md={8}>
                           <Form.Item name="preset_pair" label="A股指数ETF预设组合">
                             <Select

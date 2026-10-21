@@ -45,8 +45,8 @@ const COMPONENT_LABELS = {
   market_momentum: '市场动量',
   stock_price_strength: '成分股强度',
   stock_price_breadth: '成分股广度',
-  put_call_options: '期权 Put/Call',
-  put_call_oi_options: '期权 P/C（持仓量）',
+  put_call_options: '期权 P/C（持仓量）',
+  put_call_volume_options: '期权 P/C（成交量）',
   market_volatility: '市场波动率',
   implied_volatility: '期权隐含波动率（IV）',
   gold_implied_volatility: '黄金隐含波动率（GVZ）',
@@ -60,14 +60,14 @@ const COMPONENT_LABELS = {
 
 const COMPONENT_VALUE_META = {
   put_call_options: {
-    label: '实际 P/C（5日均值）',
+    label: '持仓量 P/C（5日均值）',
+    description: '按未平仓合约张数计算的 Put/Call；高 P/C 代表保护性 put 持仓偏高，偏向局部顶部。该分量参与总分',
+  },
+  put_call_volume_options: {
+    label: '成交量 P/C（5日均值）',
     // 后端为使“低 P/C = 高分”而存入 -P/C；展示时还原为通常的正数 P/C。
     displayValue: value => (isFiniteNumber(value) ? -Number(value) : value),
-    description: 'Put/Call 比例越低，得分越高',
-  },
-  put_call_oi_options: {
-    label: '持仓量 P/C（5日均值）',
-    description: '按未平仓合约张数计算的 Put/Call；指数涨得越多、机构多头仓位越重，put 保护持仓越高，得分越高（与成交量口径方向相反）。仅作诊断，暂未参与总分',
+    description: '按每日成交量计算的 Put/Call；高 P/C 通常代表恐慌买 put，作为诊断项，不参与总分',
   },
   southbound_flow: {
     label: '南向净买入（亿元，3日均）',

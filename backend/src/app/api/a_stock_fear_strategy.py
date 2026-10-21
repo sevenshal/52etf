@@ -1,6 +1,10 @@
+import hashlib
+import json
 import logging
 from datetime import date, datetime
-from typing import List, Optional
+from math import floor
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, validator
@@ -18,14 +22,18 @@ from ...core.external_trading_database import (
     ExternalTradingSubAccount,
     ExternalTradingTargetPosition,
     get_external_trading_db,
+    get_external_trading_db_ctx,
 )
-from ...core.services.external_trading_ledger import STRATEGY_A_STOCK_FEAR
+from ...core.services.external_trading_executor import trigger_external_trading_executor
+from ...core.services.external_trading_ledger import STRATEGY_A_STOCK_FEAR, sync_target_positions
+from ...core.services.external_trading_valuation import get_realtime_price_details
 from ...core.services.external_trading_market import (
     EXTERNAL_TRADING_MARKET_A_STOCK,
     normalize_external_trading_market_type,
 )
 from ...robot.a_stock_base_data_config import A_STOCK_ETF_DAILY_NAMES
 from ...robot.a_stock_fear_strategy_trader import AStockFearStrategyTrader
+from . import soxl_fear_backtest as fear_backtest
 from .account import valid_admin_account
 from .a_stock_fear_volume_config import (
     A_STOCK_FEAR_SOURCE_OPTIONS,
@@ -48,6 +56,11 @@ A_STOCK_FEAR_SOURCE_KEYS = {
     *A_STOCK_FEAR_SOURCE_OPTIONS,
     HK_INNOVATION_DRUG_FEAR_SOURCE_KEY,
 }
+
+# 预览不落库、不发单；同步时必须带回本进程生成的短期预览 ID，且服务端会再算一遍。
+# 这样无法把任意标的/数量直接伪装成“历史回跑结果”提交给实盘执行器。
+REPLAY_PREVIEWS: Dict[str, Dict[str, Any]] = {}
+REPLAY_PREVIEW_TTL_SECONDS = 30 * 60
 
 
 class AStockFearStrategyConfigPayload(BaseModel):
@@ -424,6 +437,21 @@ class AStockFearStrategyStateSchema(AStockFearStrategyStatePayload):
         from_attributes = True
 
 
+class AStockFearReplayPayload(BaseModel):
+    start_date: date
+    end_date: Optional[date] = None
+
+    @validator("start_date")
+    def validate_start_date(cls, value):
+        if value > date.today():
+            raise ValueError("回跑开始日期不能晚于今天")
+        return value
+
+
+class AStockFearReplaySyncPayload(BaseModel):
+    preview_id: str
+
+
 CONFIG_FIELDS = [
     "enabled",
     "symbol",
@@ -688,6 +716,84 @@ def _state_response(
     )
 
 
+def _config_snapshot(config: AStockFearStrategyConfig) -> SimpleNamespace:
+    """Detach config before a long replay or any await."""
+    return SimpleNamespace(**{
+        column.name: getattr(config, column.name)
+        for column in AStockFearStrategyConfig.__table__.columns
+    })
+
+
+def _backtest_params_from_config(config: Any):
+    """Build the exact next-open historical engine parameters from live config."""
+    values = {
+        name: getattr(config, name)
+        for name in fear_backtest.SOXLFearStrategyParams.model_fields
+        if hasattr(config, name)
+    }
+    values.update(
+        execute_next_open=True,
+        slippage_pct=-1.0,
+        stamp_duty_pct=0.0,
+        buy_turn_signal_mode="legacy",
+        sell_turn_signal_mode="legacy",
+    )
+    return fear_backtest.SOXLFearStrategyParams(**values)
+
+
+def _run_position_replay(config: Any, start_date: date, end_date: date) -> Dict[str, Any]:
+    """Replay a saved live configuration and return only the final desired holding."""
+    params = _backtest_params_from_config(config)
+    sources = [config.fear_source]
+    (
+        base_dfs, _, _, sub_base_df, _, sub2_base_df, _, sub3_base_df, _,
+    ) = fear_backtest._prepare_search_dataframes(
+        config.symbol, start_date, end_date, sources, config.volume_signal_symbol,
+        sub_symbol=config.sub_symbol, sub_fear_source=config.sub_fear_source,
+        sub_volume_signal_symbol=config.sub_volume_signal_symbol,
+        sub2_symbol=config.sub2_symbol, sub2_fear_source=config.sub2_fear_source,
+        sub2_volume_signal_symbol=config.sub2_volume_signal_symbol,
+        sub3_symbol=config.sub3_symbol, sub3_fear_source=config.sub3_fear_source,
+        sub3_volume_signal_symbol=config.sub3_volume_signal_symbol,
+        sell_ma5_signal_symbol=None,
+    )
+    result = fear_backtest._run_seesaw_backtest(
+        base_dfs[config.fear_source], sub_base_df, params, 1_000_000.0, detailed=True,
+        sub2_base_df=sub2_base_df, sub3_base_df=sub3_base_df,
+    )
+    trades = result.get("trades") or []
+    last_trade = trades[-1] if trades else None
+    held_symbol = str(last_trade.get("symbol") or "").upper() if last_trade and last_trade.get("action") == "BUY" else None
+    target_weight_pct = float(last_trade.get("position_pct_after") or 0.0) if held_symbol else 0.0
+    return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "trade_count": int(result.get("trade_count") or 0),
+        "last_trade": last_trade,
+        "desired_symbol": held_symbol,
+        "target_weight_pct": round(target_weight_pct, 4),
+        "is_cash": not bool(held_symbol),
+        "total_return": result.get("total_return"),
+        "max_drawdown": result.get("max_drawdown"),
+    }
+
+
+def _remember_replay_preview(config: Any, replay: Dict[str, Any]) -> str:
+    now = datetime.now()
+    payload = {
+        "config_id": config.id,
+        "updated_at": str(config.updated_at),
+        "created_at": now.isoformat(),
+        "replay": replay,
+    }
+    preview_id = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
+    REPLAY_PREVIEWS[preview_id] = {**payload, "expires_at": now.timestamp() + REPLAY_PREVIEW_TTL_SECONDS}
+    for key, item in list(REPLAY_PREVIEWS.items()):
+        if float(item.get("expires_at") or 0) < now.timestamp():
+            REPLAY_PREVIEWS.pop(key, None)
+    return preview_id
+
+
 def _resolve_trading_account_id(
     payload: AStockFearStrategyConfigPayload,
     account_id: str,
@@ -936,6 +1042,113 @@ def update_a_stock_fear_strategy_state_by_config(
     db.commit()
     db.refresh(state)
     return _state_response(config, state)
+
+
+@router.post("/configs/{config_id}/replay-position")
+def replay_a_stock_fear_strategy_position(
+    config_id: int,
+    payload: AStockFearReplayPayload,
+    account_id: str = Depends(valid_admin_account),
+    db: Session = Depends(get_db),
+):
+    """只读回跑：预览从指定日期跑到最新数据后策略本应持有的标的。"""
+    config = _config_snapshot(_get_config_or_404(db, account_id, config_id))
+    db.close()
+    end_date = payload.end_date or date.today()
+    if payload.start_date >= end_date:
+        raise HTTPException(status_code=400, detail="回跑开始日期必须早于结束日期")
+    try:
+        replay = _run_position_replay(config, payload.start_date, end_date)
+        preview_id = _remember_replay_preview(config, replay)
+        return {"preview_id": preview_id, "expires_in_seconds": REPLAY_PREVIEW_TTL_SECONDS, **replay}
+    except Exception as exc:
+        logger.error("A股情绪量能持仓回跑失败 config=%s: %s", config_id, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=f"持仓回跑失败: {exc}")
+
+
+@router.post("/configs/{config_id}/replay-position/sync")
+async def sync_a_stock_fear_strategy_replay_position(
+    config_id: int,
+    payload: AStockFearReplaySyncPayload,
+    account_id: str = Depends(valid_admin_account),
+    db: Session = Depends(get_db),
+):
+    """确认后按回跑末日仓位同步真实子账户目标，并触发执行器。"""
+    preview = REPLAY_PREVIEWS.get(payload.preview_id)
+    if not preview or int(preview.get("config_id") or 0) != config_id:
+        raise HTTPException(status_code=400, detail="回跑预览不存在，请重新回跑后再同步")
+    if float(preview.get("expires_at") or 0) < datetime.now().timestamp():
+        REPLAY_PREVIEWS.pop(payload.preview_id, None)
+        raise HTTPException(status_code=400, detail="回跑预览已过期，请重新回跑后再同步")
+    config = _config_snapshot(_get_config_or_404(db, account_id, config_id))
+    db.close()
+    if str(preview.get("updated_at")) != str(config.updated_at):
+        raise HTTPException(status_code=400, detail="策略配置已变更，请重新回跑后再同步")
+    replay = _run_position_replay(
+        config,
+        date.fromisoformat(preview["replay"]["start_date"]),
+        date.fromisoformat(preview["replay"]["end_date"]),
+    )
+    if replay != preview["replay"]:
+        raise HTTPException(status_code=400, detail="回跑数据已变化，请重新预览并确认")
+
+    symbols = [item for item in (config.symbol, config.sub_symbol, config.sub2_symbol, config.sub3_symbol) if item]
+    try:
+        quotes = await get_realtime_price_details(config.external_trading_account_id, symbols, raise_on_missing=True)
+        price_map = {str(symbol).upper(): float(item["price"]) for symbol, item in quotes.items() if item.get("price")}
+        trader = AStockFearStrategyTrader()
+        snapshot = await trader._build_snapshot(config, price_map)
+        desired_symbol = replay["desired_symbol"]
+        targets = []
+        if desired_symbol:
+            price = float(price_map.get(desired_symbol) or 0)
+            if price <= 0:
+                raise ValueError(f"缺少 {desired_symbol} 的实时参考价")
+            target_quantity = floor(
+                snapshot.portfolio_value * float(replay["target_weight_pct"]) / 100.0 / price / 100
+            ) * 100
+            targets.append({
+                "symbol": desired_symbol,
+                "target_quantity": max(0, target_quantity),
+                "target_weight_pct": replay["target_weight_pct"],
+                "target_value": round(max(0, target_quantity) * price, 2),
+                "reference_price": round(price, 4),
+                "reference_price_source": "a_stock_fear_replay",
+            })
+        signal_version = f"a_stock_fear_replay:{config_id}:{datetime.now():%Y%m%d%H%M%S}"
+        with get_external_trading_db_ctx() as trading_db:
+            sub_account = trading_db.query(ExternalTradingSubAccount).filter(
+                ExternalTradingSubAccount.id == config.live_sub_account_id,
+                ExternalTradingSubAccount.account_id == account_id,
+                ExternalTradingSubAccount.external_trading_account_id == config.external_trading_account_id,
+                ExternalTradingSubAccount.strategy_type == STRATEGY_A_STOCK_FEAR,
+                ExternalTradingSubAccount.strategy_config_id == config_id,
+                ExternalTradingSubAccount.enabled == True,  # noqa: E712
+            ).first()
+            if not sub_account:
+                raise ValueError("实盘虚拟子账户归属不匹配或未启用")
+            sync_target_positions(
+                trading_db, sub_account=sub_account, targets=targets,
+                signal_id=f"a_stock_fear_replay:{config_id}", signal_version=signal_version,
+            )
+        executor = await trigger_external_trading_executor(
+            account_id=account_id,
+            external_account_id=config.external_trading_account_id,
+            trigger_source="a_stock_fear_replay_sync",
+        )
+        REPLAY_PREVIEWS.pop(payload.preview_id, None)
+        return {
+            "message": "已同步回跑末日目标仓位并触发执行器",
+            "replay": replay,
+            "targets": targets,
+            "signal_version": signal_version,
+            "executor": executor,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("A股情绪量能回跑仓位同步失败 config=%s: %s", config_id, exc, exc_info=True)
+        raise HTTPException(status_code=400, detail=f"同步实盘目标仓位失败: {exc}")
 
 
 @router.post("/configs/{config_id}/manual-check")

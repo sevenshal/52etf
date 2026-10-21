@@ -225,20 +225,20 @@ class OptionDailyCoverageTest(TestCase):
 
 
 class OpenInterestPcrComponentTest(TestCase):
-    """持仓量口径 P/C：只作诊断，且方向与成交量口径相反。"""
+    """持仓量口径 P/C 参与总分；成交量口径降为诊断。"""
 
-    def test_component_is_registered_as_display_only(self):
+    def test_open_interest_component_is_registered_for_total_score(self):
         from src.core.services.a_stock_fear_greed_clone_service import (
             A_STOCK_ALL_COMPONENTS,
             A_STOCK_COMPONENTS,
             A_STOCK_DISPLAY_ONLY_COMPONENTS,
         )
 
-        self.assertIn("put_call_oi_options", A_STOCK_ALL_COMPONENTS)
-        self.assertIn("put_call_oi_options", A_STOCK_DISPLAY_ONLY_COMPONENTS)
-        self.assertNotIn("put_call_oi_options", A_STOCK_COMPONENTS)
-        # 原来的成交量口径仍在总分里，两者的 key 不能混用。
+        self.assertIn("put_call_options", A_STOCK_ALL_COMPONENTS)
         self.assertIn("put_call_options", A_STOCK_COMPONENTS)
+        self.assertNotIn("put_call_options", A_STOCK_DISPLAY_ONLY_COMPONENTS)
+        self.assertIn("put_call_volume_options", A_STOCK_ALL_COMPONENTS)
+        self.assertIn("put_call_volume_options", A_STOCK_DISPLAY_ONLY_COMPONENTS)
 
     def test_loader_requests_open_interest_column(self):
         from unittest.mock import patch
@@ -301,5 +301,5 @@ class OpenInterestPcrComponentTest(TestCase):
                 levels, {}, date(2026, 8, 1), date(2026, 9, 1)
             )
 
-        self.assertAlmostEqual(1.6, float(raw["put_call_oi_options"].iloc[-1]))
-        self.assertAlmostEqual(-0.9, float(raw["put_call_options"].iloc[-1]))
+        self.assertAlmostEqual(1.6, float(raw["put_call_options"].iloc[-1]))
+        self.assertAlmostEqual(-0.9, float(raw["put_call_volume_options"].iloc[-1]))
