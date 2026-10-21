@@ -183,7 +183,6 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             db.query(ETFFearGreedCloneHistory)
             .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
             .order_by(ETFFearGreedCloneHistory.date.desc())
-            .limit(VALUATION_POSITION_LONG_WINDOW)
             .all()
         )
         if not history_rows:
@@ -245,7 +244,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuation_gap_min=round(min(gaps), 2),
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
             valuation_gap_max=round(max(gaps), 2),
-            method="adaptive_up_to_1000d_percentile_of_robust_consensus_undervaluation",
+            method="full_lifecycle_percentile_of_robust_consensus_undervaluation",
             _history=daily_results,
         )
         result["index_date"] = latest.date.isoformat()
@@ -500,15 +499,16 @@ def _percentile_rank(values: Iterable[float], current: float) -> float:
 
 
 def _build_valuation_position_fields(values: Iterable[float], current: float) -> Dict[str, Any]:
-    """估值点位：当天估值系数（=1−估值偏离）在近 ≤252 / 504 / 1000 日里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
+    """估值点位：当天估值系数（=1−估值偏离）在 252 / 504 / 1000 日及全生命周期里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
 
     values / current 传的是估值偏离（current_gap_pct，越大越便宜），这里按相反方向取分位。
     """
-    long_values = [
+    all_values = [
         float(value)
         for value in values
         if value is not None
-    ][-VALUATION_POSITION_LONG_WINDOW:]
+    ]
+    long_values = all_values[-VALUATION_POSITION_LONG_WINDOW:]
     primary_values = long_values[-VALUATION_POSITION_MAX_WINDOW:]
     short_values = primary_values[-VALUATION_POSITION_SHORT_WINDOW:]
 
@@ -522,6 +522,7 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
     position_pct, position_label = build_position(primary_values)
     short_position_pct, short_position_label = build_position(short_values)
     long_position_pct, long_position_label = build_position(long_values)
+    all_time_position_pct, all_time_position_label = build_position(all_values)
     return {
         "valuation_position_basis": VALUATION_POSITION_BASIS,
         "valuation_position_pct": position_pct,
@@ -536,6 +537,9 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
         "valuation_position_1000_pct": long_position_pct,
         "valuation_position_1000_label": long_position_label,
         "valuation_history_1000_days": len(long_values),
+        "valuation_position_all_time_pct": all_time_position_pct,
+        "valuation_position_all_time_label": all_time_position_label,
+        "valuation_history_all_time_days": len(all_values),
     }
 
 

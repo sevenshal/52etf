@@ -119,16 +119,18 @@ def test_valuation_ratio_keeps_values_outside_zero_to_one():
     assert _valuation_ratio(120.0) == pytest.approx(-0.2)
 
 
-def test_valuation_position_uses_504_days_and_keeps_252_and_1000_day_comparisons():
+def test_valuation_position_uses_504_days_and_keeps_252_1000_and_all_time_comparisons():
     result = _build_valuation_position_fields(range(1, 1201), 1200)
 
     assert result["valuation_history_days"] == 504
     assert result["valuation_history_252_days"] == 252
     assert result["valuation_history_1000_days"] == 1000
+    assert result["valuation_history_all_time_days"] == 1200
     assert result["valuation_position_is_full_window"] is True
     assert result["valuation_position_label"] == "极度低估"
     assert result["valuation_position_252_label"] == "极度低估"
     assert result["valuation_position_1000_label"] == "极度低估"
+    assert result["valuation_position_all_time_label"] == "极度低估"
 
 
 def test_valuation_position_does_not_rate_fewer_than_120_days():
@@ -141,6 +143,8 @@ def test_valuation_position_does_not_rate_fewer_than_120_days():
     assert result["valuation_position_252_label"] == "样本不足"
     assert result["valuation_position_1000_pct"] is None
     assert result["valuation_position_1000_label"] == "样本不足"
+    assert result["valuation_position_all_time_pct"] is None
+    assert result["valuation_position_all_time_label"] == "样本不足"
 
 
 def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):

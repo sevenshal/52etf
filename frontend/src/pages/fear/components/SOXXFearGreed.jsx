@@ -689,6 +689,9 @@ const SOXXFearGreed = () => {
   const valuation1000Label = valuation?.valuation_position_1000_label;
   const valuation1000Pct = valuation?.valuation_position_1000_pct;
   const valuation1000Days = Number(valuation?.valuation_history_1000_days) || 0;
+  const valuationAllTimeLabel = valuation?.valuation_position_all_time_label;
+  const valuationAllTimePct = valuation?.valuation_position_all_time_pct;
+  const valuationAllTimeDays = Number(valuation?.valuation_history_all_time_days) || 0;
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
   // 日线作为完整基底；盘中快照只覆盖自身确实返回的字段，避免旧快照缺少新分量
@@ -856,88 +859,38 @@ const SOXXFearGreed = () => {
 
           {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
             <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
-              <Row gutter={[12, 12]}>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="当前估值系数(越大越贵)"
-                    value={isFiniteNumber(valuation.current_gap_pct) ? (1 - valuation.current_gap_pct / 100).toFixed(2) : '-'}
-                    valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
-                  />
-                  <Tag>
-                    目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}
+              <div className="soxx-fear-valuation-compact">
+                <div className="soxx-fear-valuation-current">
+                  <span>当前估值系数（越大越贵）</span>
+                  <strong style={{ color: valuationColor(valuation.valuation_position_label) }}>
+                    {isFiniteNumber(valuation.current_gap_pct) ? (1 - valuation.current_gap_pct / 100).toFixed(2) : '-'}
+                  </strong>
+                  <Tag>目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}</Tag>
+                </div>
+                <Space wrap size={[4, 4]} className="soxx-fear-valuation-positions">
+                  <Tag color={valuationColor(valuation.valuation_position_label)} title={`有效${valuation.valuation_history_days || 0}日`}>
+                    504日 {valuation.valuation_position_label || '-'} · {isFiniteNumber(valuation.valuation_position_pct) ? `${formatNumber(valuation.valuation_position_pct, 1)}%` : '样本不足'}
                   </Tag>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="中期估值位置(越大越贵)"
-                    value={valuation.valuation_position_label || '-'}
-                    valueStyle={{ color: valuationColor(valuation.valuation_position_label), fontSize: 20 }}
-                  />
-                  <Tag color={valuationColor(valuation.valuation_position_label)}>
-                    近{valuation.valuation_history_days || 0}日百分位{' '}
-                    {isFiniteNumber(valuation.valuation_position_pct)
-                      ? `${formatNumber(valuation.valuation_position_pct, 1)}%`
-                      : '样本不足'}
+                  <Tag color={valuationColor(valuation252Label)} title={`有效${valuation252Days}日`}>
+                    252日 {valuation252Label || '-'} · {isFiniteNumber(valuation252Pct) ? `${formatNumber(valuation252Pct, 1)}%` : '样本不足'}
                   </Tag>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="近252日位置(越大越贵)"
-                    value={valuation252Label || '-'}
-                    valueStyle={{ color: valuationColor(valuation252Label), fontSize: 20 }}
-                  />
-                  <Tag color={valuationColor(valuation252Label)}>
-                    有效{valuation252Days}日百分位{' '}
-                    {isFiniteNumber(valuation252Pct)
-                      ? `${formatNumber(valuation252Pct, 1)}%`
-                      : '样本不足'}
+                  <Tag color={valuationColor(valuation1000Label)} title={`有效${valuation1000Days}日`}>
+                    1000日 {valuation1000Label || '-'} · {isFiniteNumber(valuation1000Pct) ? `${formatNumber(valuation1000Pct, 1)}%` : '样本不足'}
                   </Tag>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="近1000日位置(越大越贵)"
-                    value={valuation1000Label || '-'}
-                    valueStyle={{ color: valuationColor(valuation1000Label), fontSize: 20 }}
-                  />
-                  <Tag color={valuationColor(valuation1000Label)}>
-                    有效{valuation1000Days}日百分位{' '}
-                    {isFiniteNumber(valuation1000Pct)
-                      ? `${formatNumber(valuation1000Pct, 1)}%`
-                      : '样本不足'}
+                  <Tag color={valuationColor(valuationAllTimeLabel)} title={`有效${valuationAllTimeDays}日`}>
+                    全生命周期 {valuationAllTimeLabel || '-'} · {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%` : '样本不足'}
                   </Tag>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="有效估值权重"
-                    value={(valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100}
-                    precision={1}
-                    suffix="%"
-                  />
-                  <Text type="secondary">
-                    {valuation.covered_count}/{valuation.constituent_count || '-'} 个成分
-                  </Text>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic title="估值数据日期" value={valuation.valuation_date_max || '-'} />
-                  <Text type="secondary">
-                    区间 {valuation.valuation_date_min || '-'} 至 {valuation.valuation_date_max || '-'}
-                  </Text>
-                </Col>
-                <Col xs={12} sm={8}>
-                  <Statistic
-                    title="待更新权重"
-                    value={(valuation.stale_weight_ratio ?? 0) * 100}
-                    precision={1}
-                    suffix="%"
-                    valueStyle={{ color: (valuation.stale_weight_ratio ?? 0) > 0.3 ? '#d4380d' : undefined }}
-                  />
-                  <Text type="secondary">
-                    {valuation.stale_covered_count ?? 0}/{valuation.covered_count ?? 0} 个成分退到T-1池或沿用旧估值
-                  </Text>
-                </Col>
-              </Row>
+                </Space>
+                <div className="soxx-fear-valuation-meta">
+                  <span>有效权重 {((valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100).toFixed(1)}%（{valuation.covered_count}/{valuation.constituent_count || '-'}）</span>
+                  <span>估值日 {valuation.valuation_date_max || '-'} </span>
+                  <span className={(valuation.stale_weight_ratio ?? 0) > 0.3 ? 'soxx-fear-valuation-stale' : ''}>
+                    待更新 {((valuation.stale_weight_ratio ?? 0) * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                估值系数 = 1 − 低估率（低估率为按指数成分权重聚合的一致预期目标价相对当日价格的空间），越大越贵，大于 1 表示指数已高于估值中枢；成分股按其最新一期定期报告(T期)披露日之后的研报取目标价，每家机构只用最新一篇，给出目标价的机构不足2家时退到T-1期披露日之后，仍没有则沿用此前估值(最多365天)；退到T-1池或沿用旧估值的成分计入"待更新权重"；估值位置是估值系数在历史中的百分位（越大越贵，≥80 极度高估、低于20 极度低估），中期位置最多使用504个有效交易日，短期位置最多使用252日，不足时采用全部有效历史，少于120日不评级。
+                估值系数越大越贵；各点位为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。覆盖不足或研报待更新的成分会计入“待更新”。
               </Text>
             </Card>
           )}
