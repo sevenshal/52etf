@@ -85,6 +85,31 @@ def test_full_sync_caps_manual_backfill_at_128_days(monkeypatch):
     assert state["trading_days"] == 128
 
 
+def test_full_sync_from_selected_start_date_is_not_limited_to_128_days(monkeypatch):
+    selected_start = date(2020, 1, 2)
+    symbols = ["000001.SZ"]
+    monkeypatch.setattr(
+        sync_module,
+        "market_universe_since",
+        lambda start_date: (symbols, selected_start, date(2026, 8, 24), 1600),
+    )
+    monkeypatch.setattr(sync_module.TushareService, "get_instance", classmethod(lambda cls: object()))
+    monkeypatch.setattr(
+        sync_module,
+        "fetch_historical_minute_batch",
+        lambda _service, _batch, _start_date, _end_date: {"frame": pd.DataFrame(), "errors": []},
+    )
+    monkeypatch.setattr(sync_module, "prune_minute_history", lambda _keep_from: 0)
+    monkeypatch.setattr(ChanMinuteSyncManager, "_state", _running_state("dated-full-job"))
+
+    ChanMinuteSyncManager._run("dated-full-job", trading_days=128, full=True, start_date=selected_start)
+    state = ChanMinuteSyncManager.snapshot()
+
+    assert state["status"] == "SUCCESS"
+    assert state["trading_days"] == 1600
+    assert state["start_date"] == "2020-01-02"
+
+
 def test_incremental_sync_adds_one_day_and_uses_sixteen_symbol_batches(monkeypatch):
     symbols = [f"{index:06d}.SZ" for index in range(1, 21)]
     fetched_batches = []

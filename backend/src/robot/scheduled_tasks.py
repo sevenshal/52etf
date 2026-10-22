@@ -133,6 +133,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "hk_sentiment_sync",
     "a_stock_innovation100_rebuild",
     "a_stock_micro400_rebuild",
+    "chan_minute_sync",
 })
 # 手动执行弹窗里可以临时限定标的的任务。这里传的 symbols 只对这一次执行生效，
 # 不会写进任务配置，避免一次性回填之后每天的定时执行也被缩到这几个指数。
@@ -855,13 +856,21 @@ def _run_market_alert_baseline(baseline_days: int = 20):
             f"· 基准取前 {result.get('baseline_days')} 个交易日")
 
 
-def _run_chan_minute_sync(full: bool = False, trading_days: int = 128):
-    """Run daily incremental sync; manual API runs request a 128-trading-day backfill."""
+def _run_chan_minute_sync(
+    full: bool = False,
+    trading_days: int = 128,
+    start_date: Optional[str] = None,
+):
+    """Run the daily incremental sync, or a manually selected full history range."""
     from ..core.services.chan_minute_sync import ChanMinuteSyncManager
 
+    parsed_start_date = _parse_optional_task_date(start_date, "开始日期")
+    if parsed_start_date is not None:
+        full = True
     state = ChanMinuteSyncManager.start(
         full=full,
         trading_days=trading_days,
+        start_date=parsed_start_date,
     )
     if state.get("status") == "RUNNING" and state.get("job_id"):
         while state.get("status") == "RUNNING":
@@ -2254,7 +2263,7 @@ class ScheduledTaskManager:
                 name="分钟行情同步",
                 description=(
                     "同步全市场个股 1 分钟线（缠论、分时小图、提示看板量能基准共用）；申万行业分钟线见「申万分钟行情同步」。"
-                    "日常盘后按实际缺口增量同步并额外重叠1个交易日；点击手动执行时回补最近128个交易日。"
+                    "日常盘后和手动增量均按实际缺口同步并额外重叠1个交易日；手动也可指定开始日期，全量重拉至最近交易日。"
                 ),
                 default_time="21:30",
                 default_enabled=True,

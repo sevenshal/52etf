@@ -103,9 +103,8 @@ def run_scheduled_task_now(
         if task_key in START_DATE_RUN_TASK_KEYS and payload and payload.start_date:
             runner_kwargs["start_date"] = payload.start_date
         if task_key == "chan_minute_sync":
-            # Manual execution is the explicit 128-trading-day repair action;
-            # the scheduled runner keeps its default incremental behavior.
-            runner_kwargs.update(full=True, trading_days=128)
+            # 手动执行不填日期时，与定时任务共用增量逻辑；填日期才全量回拉。
+            runner_kwargs["full"] = bool(payload and payload.start_date)
         if task_key == "sw_minute_sync":
             # 手动执行 = 全量回补，交易日数取任务参数；定时执行不带 full，走增量
             runner_kwargs["full"] = True

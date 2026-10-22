@@ -407,6 +407,34 @@ def recent_market_universe(trading_days: int = ROLLING_TRADING_DAYS) -> tuple[li
     return [row[0] for row in symbols], ordered_dates[0], ordered_dates[-1]
 
 
+def market_universe_since(start_date: date) -> tuple[list[str], date, date, int]:
+    """Return the active universe and all available trading dates since ``start_date``.
+
+    This deliberately does not apply the rolling backfill cap: it is the explicit
+    manual full-sync path, where the operator chooses the beginning of history.
+    """
+    connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+    try:
+        dates = connection.execute(
+            """
+            SELECT DISTINCT trade_date
+            FROM a_stock_market_daily
+            WHERE trade_date >= ?
+            ORDER BY trade_date
+            """,
+            [start_date],
+        ).fetchall()
+        symbols = connection.execute(
+            "SELECT ts_code FROM a_stock_basic WHERE list_status = 'L' ORDER BY ts_code"
+        ).fetchall()
+    finally:
+        connection.close()
+    if not dates:
+        raise ValueError(f"开始日期 {start_date.isoformat()} 之后没有A股日行情，无法全量同步分钟行情")
+    ordered_dates = [row[0] for row in dates]
+    return [row[0] for row in symbols], ordered_dates[0], ordered_dates[-1], len(ordered_dates)
+
+
 def prune_minute_history(keep_from: date) -> int:
     with _MINUTE_WRITE_LOCK:
         connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=False)

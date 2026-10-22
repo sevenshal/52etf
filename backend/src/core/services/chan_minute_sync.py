@@ -6,7 +6,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -17,6 +17,7 @@ from .chan_minute_data import (
     fetch_historical_minute_batch,
     historical_minute_batch_size,
     incremental_minute_sync_groups,
+    market_universe_since,
     prune_minute_history,
     recent_market_universe,
     upsert_minute_frame,
@@ -49,7 +50,12 @@ class ChanMinuteSyncManager:
             return dict(cls._state, errors=list(cls._state.get("errors") or []))
 
     @classmethod
-    def start(cls, trading_days: int = ROLLING_TRADING_DAYS, full: bool = False) -> dict[str, Any]:
+    def start(
+        cls,
+        trading_days: int = ROLLING_TRADING_DAYS,
+        full: bool = False,
+        start_date: date | None = None,
+    ) -> dict[str, Any]:
         with cls._lock:
             if cls._state.get("status") == "RUNNING":
                 return dict(cls._state, errors=list(cls._state.get("errors") or []))
@@ -73,7 +79,7 @@ class ChanMinuteSyncManager:
             }
         threading.Thread(
             target=cls._run,
-            args=(job_id, trading_days, full),
+            args=(job_id, trading_days, full, start_date),
             daemon=True,
             name="chan-minute-sync",
         ).start()
@@ -87,11 +93,14 @@ class ChanMinuteSyncManager:
         return cls.snapshot()
 
     @classmethod
-    def _run(cls, job_id: str, trading_days: int, full: bool) -> None:
+    def _run(cls, job_id: str, trading_days: int, full: bool, start_date: date | None = None) -> None:
         try:
             requested_days = min(MAX_BACKFILL_TRADING_DAYS, max(1, int(trading_days)))
             if full:
-                symbols, calendar_start, calendar_end = recent_market_universe(requested_days)
+                if start_date is not None:
+                    symbols, calendar_start, calendar_end, requested_days = market_universe_since(start_date)
+                else:
+                    symbols, calendar_start, calendar_end = recent_market_universe(requested_days)
                 groups = [
                     {
                         "symbols": symbols,
