@@ -692,6 +692,21 @@ const SOXXFearGreed = () => {
   const valuationAllTimeLabel = valuation?.valuation_position_all_time_label;
   const valuationAllTimePct = valuation?.valuation_position_all_time_pct;
   const valuationAllTimeDays = Number(valuation?.valuation_history_all_time_days) || 0;
+  const renderMarketMultiplePositions = (field) => {
+    const metricLabel = field === 'pe_ttm' ? 'PE(TTM)' : 'PB';
+    return [252, 504, 1000, 'all_time'].map(window => {
+      const suffix = window === 'all_time' ? 'all_time' : window;
+      const label = valuation?.[`${field}_position_${suffix}_label`];
+      const pct = valuation?.[`${field}_position_${suffix}_pct`];
+      const days = Number(valuation?.[`${field}_history_${suffix}_days`]) || 0;
+      const windowLabel = window === 'all_time' ? '全周期' : `${window}日`;
+      return (
+        <Tag key={`${field}-${suffix}`} color={valuationColor(label)} title={`有效${days}日`}>
+          {windowLabel} {label || '-'} · {isFiniteNumber(pct) ? `${formatNumber(pct, 1)}%` : '样本不足'}
+        </Tag>
+      );
+    });
+  };
   const realtimeEnabled = expandedETF?.realtime !== false;
   const pricePrecision = expandedETF?.pricePrecision ?? 2;
   // 日线作为完整基底；盘中快照只覆盖自身确实返回的字段，避免旧快照缺少新分量
@@ -881,6 +896,14 @@ const SOXXFearGreed = () => {
                     全生命周期 {valuationAllTimeLabel || '-'} · {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%` : '样本不足'}
                   </Tag>
                 </Space>
+                <div className="soxx-fear-market-multiple-row">
+                  <strong>PE(TTM) {formatNumber(valuation.pe_ttm, 2)}×</strong>
+                  <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pe_ttm')}</Space>
+                </div>
+                <div className="soxx-fear-market-multiple-row">
+                  <strong>PB {formatNumber(valuation.pb, 2)}×</strong>
+                  <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pb')}</Space>
+                </div>
                 <div className="soxx-fear-valuation-meta">
                   <span>有效权重 {((valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100).toFixed(1)}%（{valuation.covered_count}/{valuation.constituent_count || '-'}）</span>
                   <span>估值日 {valuation.valuation_date_max || '-'} </span>
@@ -890,7 +913,7 @@ const SOXXFearGreed = () => {
                 </div>
               </div>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                估值系数越大越贵；各点位为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。覆盖不足或研报待更新的成分会计入“待更新”。
+                估值系数、PE(TTM)、PB 的点位均为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。PE/PB 只聚合正数成分倍数；覆盖不足或研报待更新的成分会计入“待更新”。
               </Text>
             </Card>
           )}

@@ -6,10 +6,12 @@ import pytest
 from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation_map
 from src.core.services.a_stock_index_valuation import (
+    _build_market_multiple_position_fields,
     _build_valuation_position_fields,
     _percentile_rank,
     _valuation_ratio,
     _valuation_position_label,
+    calculate_weighted_index_market_multiples,
     calculate_weighted_index_valuation,
 )
 
@@ -145,6 +147,32 @@ def test_valuation_position_does_not_rate_fewer_than_120_days():
     assert result["valuation_position_1000_label"] == "样本不足"
     assert result["valuation_position_all_time_pct"] is None
     assert result["valuation_position_all_time_label"] == "样本不足"
+
+
+def test_weighted_market_multiples_use_harmonic_mean_and_exclude_non_positive_values():
+    result = calculate_weighted_index_market_multiples(
+        holdings=[_holding("AAA.SH", 0.5), _holding("BBB.SZ", 0.3), _holding("CCC.SH", 0.2)],
+        market_multiples={
+            "AAA.SH": {"pe_ttm": 10.0, "pb": 2.0},
+            "BBB.SZ": {"pe_ttm": 20.0, "pb": 4.0},
+            "CCC.SH": {"pe_ttm": -5.0, "pb": 0.0},
+        },
+    )
+
+    assert result["pe_ttm"] == pytest.approx(12.3077)
+    assert result["pb"] == pytest.approx(2.4615)
+
+
+def test_market_multiple_positions_expose_all_requested_windows():
+    history = [{"pe_ttm": float(value), "pb": float(value * 2)} for value in range(1, 1201)]
+    result = _build_market_multiple_position_fields(history, {"pe_ttm": 1200.0, "pb": 2400.0})
+
+    assert result["pe_ttm_history_252_days"] == 252
+    assert result["pe_ttm_history_504_days"] == 504
+    assert result["pe_ttm_history_1000_days"] == 1000
+    assert result["pe_ttm_history_all_time_days"] == 1200
+    assert result["pe_ttm_position_all_time_label"] == "极度高估"
+    assert result["pb_position_504_label"] == "极度高估"
 
 
 def test_load_holdings_on_or_before_uses_effective_snapshot(monkeypatch):

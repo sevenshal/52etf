@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from datetime import date
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, text
 
 from ..analytics_database import AnalyticsSession
 from ..database import AStockIndexValuationSnapshot, ETFFearGreedCloneHistory, Session
@@ -175,6 +176,82 @@ def calculate_weighted_index_valuation(
     return result
 
 
+MARKET_MULTIPLE_FIELDS = ("pe_ttm", "pb")
+
+
+def calculate_weighted_index_market_multiples(
+    *,
+    holdings: Iterable[Any],
+    market_multiples: Dict[str, Dict[str, Any]],
+) -> Dict[str, Optional[float]]:
+    """按成分权重聚合 ETF 的 TTM PE / PB。
+
+    倍数不能直接算算术平均：PE = 市值 / 盈利、PB = 市值 / 净资产，正确的指数
+    聚合口径是正数倍数的加权调和平均（即先加权收益率/净资产收益率再取倒数）。
+    亏损股 PE 为负或空，没有经济意义，PE 聚合时排除；PB 也只使用正数倍数。
+    """
+    covered_weights = {field: 0.0 for field in MARKET_MULTIPLE_FIELDS}
+    inverse_weighted_sums = {field: 0.0 for field in MARKET_MULTIPLE_FIELDS}
+    for holding in holdings:
+        weight = _positive_number(getattr(holding, "weight", None))
+        if weight is None:
+            continue
+        multiples = market_multiples.get(str(getattr(holding, "holding_symbol", "")).upper()) or {}
+        for field in MARKET_MULTIPLE_FIELDS:
+            multiple = _positive_number(multiples.get(field))
+            if multiple is None:
+                continue
+            covered_weights[field] += weight
+            inverse_weighted_sums[field] += weight / multiple
+    return {
+        field: (
+            round(covered_weights[field] / inverse_weighted_sums[field], 4)
+            if inverse_weighted_sums[field] > 0
+            else None
+        )
+        for field in MARKET_MULTIPLE_FIELDS
+    }
+
+
+def load_a_stock_market_multiple_history_map(
+    db: Any,
+    symbols: Iterable[str],
+    trade_dates: Iterable[date],
+) -> Dict[date, Dict[str, Dict[str, float]]]:
+    """读取成分股在指数有效交易日的 TTM PE / PB 历史快照。"""
+    normalized_symbols = list(dict.fromkeys(str(symbol or "").strip().upper() for symbol in symbols if symbol))
+    requested_dates = sorted(set(day for day in trade_dates if day))
+    if not normalized_symbols or not requested_dates:
+        return {}
+    requested_date_set = set(requested_dates)
+    result: Dict[date, Dict[str, Dict[str, float]]] = defaultdict(dict)
+    for offset in range(0, len(normalized_symbols), 500):
+        chunk = normalized_symbols[offset:offset + 500]
+        symbol_params = {f"symbol_{index}": symbol for index, symbol in enumerate(chunk)}
+        placeholders = ",".join(f":{key}" for key in symbol_params)
+        rows = db.execute(text(f"""
+            SELECT ts_code, trade_date, pe_ttm, pb
+            FROM a_stock_market_daily
+            WHERE ts_code IN ({placeholders})
+              AND trade_date BETWEEN :start_date AND :end_date
+        """), {
+            **symbol_params,
+            "start_date": requested_dates[0],
+            "end_date": requested_dates[-1],
+        }).mappings().all()
+        for row in rows:
+            trade_day = row.get("trade_date")
+            symbol = str(row.get("ts_code") or "").upper()
+            if trade_day not in requested_date_set or not symbol:
+                continue
+            result[trade_day][symbol] = {
+                field: value
+                for field in MARKET_MULTIPLE_FIELDS
+                if (value := _positive_number(row.get(field))) is not None
+            }
+    return dict(result)
+
+
 def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
     db = Session()
@@ -214,12 +291,22 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             holding_symbols,
             index_levels,
         )
+        market_multiple_history = load_a_stock_market_multiple_history_map(
+            analytics_db,
+            holding_symbols,
+            index_levels,
+        )
         daily_results = []
+        daily_market_multiples: Dict[date, Dict[str, Optional[float]]] = {}
         for trade_day, index_level in index_levels.items():
             day_holdings = [
                 SimpleNamespace(holding_symbol=row["symbol"], **row)
                 for row in holdings_history.get(trade_day, [])
             ]
+            daily_market_multiples[trade_day] = calculate_weighted_index_market_multiples(
+                holdings=day_holdings,
+                market_multiples=market_multiple_history.get(trade_day, {}),
+            )
             day_valuations = {
                 valuation_symbol: SimpleNamespace(**payload)
                 for valuation_symbol, payload in valuation_history.get(trade_day, {}).items()
@@ -239,8 +326,13 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             return {"status": "unavailable", "reason": "valuation_history_missing"}
         result = daily_results[-1]
         gaps = [item["current_gap_pct"] for item in daily_results]
+        latest_market_multiples = daily_market_multiples.get(latest.date, {})
         result.update(
             **_build_valuation_position_fields(gaps, result["current_gap_pct"]),
+            **_build_market_multiple_position_fields(
+                daily_market_multiples.values(),
+                latest_market_multiples,
+            ),
             valuation_gap_min=round(min(gaps), 2),
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
             valuation_gap_max=round(max(gaps), 2),
@@ -541,6 +633,52 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
         "valuation_position_all_time_label": all_time_position_label,
         "valuation_history_all_time_days": len(all_values),
     }
+
+
+def _build_market_multiple_position_fields(
+    history: Iterable[Dict[str, Optional[float]]],
+    current: Dict[str, Optional[float]],
+) -> Dict[str, Any]:
+    """给 ETF 聚合 PE_TTM / PB 附加多窗口历史分位字段。"""
+    result: Dict[str, Any] = {}
+    history_rows = list(history)
+    for field in MARKET_MULTIPLE_FIELDS:
+        all_values = [
+            float(row[field])
+            for row in history_rows
+            if _positive_number(row.get(field)) is not None
+        ]
+        long_values = all_values[-VALUATION_POSITION_LONG_WINDOW:]
+        primary_values = long_values[-VALUATION_POSITION_MAX_WINDOW:]
+        short_values = primary_values[-VALUATION_POSITION_SHORT_WINDOW:]
+        current_value = _positive_number(current.get(field))
+
+        def build_position(sample: List[float]) -> tuple[Optional[float], str]:
+            if current_value is None or len(sample) < VALUATION_POSITION_MIN_SAMPLES:
+                return None, "样本不足"
+            position_pct = _percentile_rank(sample, current_value)
+            return position_pct, _valuation_position_label(position_pct)
+
+        position_252, label_252 = build_position(short_values)
+        position_504, label_504 = build_position(primary_values)
+        position_1000, label_1000 = build_position(long_values)
+        position_all_time, label_all_time = build_position(all_values)
+        result.update({
+            field: current_value,
+            f"{field}_position_252_pct": position_252,
+            f"{field}_position_252_label": label_252,
+            f"{field}_history_252_days": len(short_values),
+            f"{field}_position_504_pct": position_504,
+            f"{field}_position_504_label": label_504,
+            f"{field}_history_504_days": len(primary_values),
+            f"{field}_position_1000_pct": position_1000,
+            f"{field}_position_1000_label": label_1000,
+            f"{field}_history_1000_days": len(long_values),
+            f"{field}_position_all_time_pct": position_all_time,
+            f"{field}_position_all_time_label": label_all_time,
+            f"{field}_history_all_time_days": len(all_values),
+        })
+    return result
 
 
 def _valuation_position_label(position_pct: float) -> str:

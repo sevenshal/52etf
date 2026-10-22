@@ -374,6 +374,22 @@
   min-width: 0;
 }
 
+.soxx-fear-market-multiple-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 5px;
+  border-top: 1px dashed #e8e8e8;
+}
+
+.soxx-fear-market-multiple-row > strong {
+  flex: 0 0 104px;
+  color: #595959;
+  font-size: 12px;
+}
+
 .soxx-fear-valuation-meta {
   grid-column: 1 / -1;
   display: flex;
@@ -402,6 +418,15 @@
   .soxx-fear-valuation-positions {
     display: block;
     margin-top: 7px;
+  }
+
+  .soxx-fear-market-multiple-row {
+    display: block;
+  }
+
+  .soxx-fear-market-multiple-row > strong {
+    display: block;
+    margin-bottom: 4px;
   }
 
   .soxx-fear-valuation-meta {
