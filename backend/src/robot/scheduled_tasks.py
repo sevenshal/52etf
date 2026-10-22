@@ -63,6 +63,8 @@ A_STOCK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 A_STOCK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 550
 A_STOCK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
 A_STOCK_FEAR_GREED_DEFAULT_MIN_PERIODS = 120
+ETF_SHARE_FLOW_INCREMENTAL_TRADING_DAYS = 3
+ETF_SHARE_FLOW_CALENDAR_LOOKBACK_DAYS = 30
 HK_FEAR_GREED_DEFAULT_RECENT_DAYS = 3
 HK_FEAR_GREED_DEFAULT_HISTORY_DAYS = 900
 HK_FEAR_GREED_DEFAULT_SCORE_WINDOW = 252
@@ -734,16 +736,49 @@ def _run_a_stock_etf_valuation_index_backfill(
     )
 
 
+def _recent_a_stock_trading_dates(end_date: date, count: int) -> List[date]:
+    """返回截至 end_date 的最近交易日；日历暂不可用时退化为工作日窗口。"""
+    if count <= 0:
+        return []
+    start_date = end_date - timedelta(days=ETF_SHARE_FLOW_CALENDAR_LOOKBACK_DAYS)
+    try:
+        from ..core.services.tushare import TushareService
+
+        calendar = TushareService.get_instance().get_trade_calendar_frame(start_date, end_date)
+        if not calendar.empty:
+            dates = [
+                item for item in calendar.loc[calendar["is_open"].astype(str) == "1", "cal_date"].tolist()
+                if start_date <= item <= end_date
+            ]
+            if len(dates) >= count:
+                return dates[-count:]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ETF share flow trading-calendar lookup failed: %s", exc)
+
+    # 日历接口异常不阻断同步；回退为最近 count 个工作日，节假日会由数据源自然跳过。
+    dates = []
+    candidate = end_date
+    while len(dates) < count:
+        if candidate.weekday() < 5:
+            dates.append(candidate)
+        candidate -= timedelta(days=1)
+    return list(reversed(dates))
+
+
 def _run_a_stock_etf_share_flow_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ):
-    """只同步宽基 ETF 份额，为净申赎研究服务。"""
+    """同步宽基 ETF 份额；默认最近三个交易日，传开始日期可回补历史。"""
     from .a_stock_base_data_sync import sync_a_stock_etf_share_history
     from ..core.services.a_stock_etf_share_flow_service import ETF_SHARE_FLOW_BASKET
 
-    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2015, 1, 1)
     end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
+    start_value = _parse_optional_task_date(start_date, "开始日期")
+    if start_value is None:
+        start_value = _recent_a_stock_trading_dates(
+            end_value, ETF_SHARE_FLOW_INCREMENTAL_TRADING_DAYS,
+        )[0]
     if start_value > end_value:
         raise ValueError("开始日期不能晚于结束日期")
     result = sync_a_stock_etf_share_history(
@@ -2041,7 +2076,7 @@ class ScheduledTaskManager:
                         label="开始日期",
                         value_type="string",
                         default="",
-                        description="可选，YYYY-MM-DD；为空时从2015-01-01回补。",
+                        description="可选，YYYY-MM-DD；为空时只同步最近3个交易日，填写后按日期回补。",
                     ),
                     TaskParameterDefinition(
                         key="end_date",

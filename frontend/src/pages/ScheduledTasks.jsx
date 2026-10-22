@@ -75,6 +75,14 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '传入开始日期后，系统会从该日期往后抓到今天，并按持仓日期覆盖写入数据库。'
     };
   }
+  if (taskKey === 'a_stock_etf_share_flow_sync') {
+    return {
+      autoLabel: '增量同步',
+      backfillLabel: '按日期全量回刷',
+      autoDetail: '不传开始日期，只同步截至当天的最近 3 个 A 股交易日；用于补齐上游份额数据的晚到情况。',
+      backfillDetail: '传入开始日期后，从所选日期回刷到今天，可用于全量重建宽基 ETF 净申赎历史。'
+    };
+  }
   if (taskKey === 'a_stock_innovation100_rebuild' || taskKey === 'a_stock_micro400_rebuild') {
     return {
       autoLabel: '增量续算',
