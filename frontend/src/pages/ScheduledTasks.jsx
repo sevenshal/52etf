@@ -51,6 +51,14 @@ const getRunStartDateHint = (taskKey) => {
       backfillDetail: '从所选日期将当前在市 A 股的 1 分钟行情全量拉取到最近交易日；同步完成后会清理所选日期之前的分钟行情。'
     };
   }
+  if (taskKey === 'sw_minute_sync') {
+    return {
+      autoLabel: '增量同步',
+      backfillLabel: '从日期全量同步',
+      autoDetail: '与每天自动触发完全一致：只补申万一、二级行业指数缺失的分钟行情，并额外重叠 1 个交易日。',
+      backfillDetail: '从所选日期将申万一、二级行业指数的 1 分钟行情全量拉取到最近交易日；同步完成后会清理所选日期之前的申万分钟行情。'
+    };
+  }
   if (taskKey === 'evc_static_info_sync') {
     return {
       autoLabel: '增量同步',

@@ -212,7 +212,7 @@ class XueqiuTokenMonitorTest(TestCase):
             "szdt_us_trading": set(),
             "szdt_us_volume_baseline": set(),
             "chan_minute_sync": set(),
-            "sw_minute_sync": {"trading_days"},
+            "sw_minute_sync": set(),
             "a_stock_innovation100_rebuild": {"start_date", "end_date", "full_rebuild"},
             "a_stock_micro400_rebuild": {"start_date", "end_date", "full_rebuild"},
             "a_stock_etf_fear_greed_backfill": {

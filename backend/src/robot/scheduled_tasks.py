@@ -134,6 +134,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "a_stock_innovation100_rebuild",
     "a_stock_micro400_rebuild",
     "chan_minute_sync",
+    "sw_minute_sync",
 })
 # 手动执行弹窗里可以临时限定标的的任务。这里传的 symbols 只对这一次执行生效，
 # 不会写进任务配置，避免一次性回填之后每天的定时执行也被缩到这几个指数。
@@ -890,12 +891,25 @@ def _run_chan_minute_sync(
     )
 
 
-def _run_sw_minute_sync(full: bool = False, trading_days: int = 128):
-    """申万一/二级分钟线：定时按缺口增量（窗口与个股分钟线一致）；手动执行时回补 trading_days 个交易日。"""
+def _run_sw_minute_sync(
+    full: bool = False,
+    trading_days: int = 128,
+    start_date: Optional[str] = None,
+):
+    """申万一/二级分钟线：定时增量；手动可按日期全量回拉。"""
     from ..core.services.chan_minute_data import ROLLING_TRADING_DAYS
     from ..core.services.sw_minute_data import sync_sw_minute_bars
 
-    result = sync_sw_minute_bars(int(trading_days) if full else ROLLING_TRADING_DAYS, full=full)
+    parsed_start_date = _parse_optional_task_date(start_date, "开始日期")
+    if parsed_start_date is not None:
+        full = True
+    sync_kwargs = {"full": full}
+    if parsed_start_date is not None:
+        sync_kwargs["start_date"] = parsed_start_date
+    result = sync_sw_minute_bars(
+        int(trading_days) if full else ROLLING_TRADING_DAYS,
+        **sync_kwargs,
+    )
     errors = result.get("errors") or []
     if errors and not result.get("saved_rows"):
         raise RuntimeError(f"申万分钟线同步失败: {errors[:5]}")
@@ -2276,25 +2290,14 @@ class ScheduledTaskManager:
                 name="申万分钟行情同步",
                 description=(
                     "同步申万一/二级行业指数 1 分钟线（sw_mins），供行业分时小图与提示看板行业量能基准、历史回放使用。"
-                    "日常盘后按缺口增量同步（与个股分钟线同一滚动窗口）；点击手动执行时回补最近 N 个交易日。"
+                    "日常盘后和手动增量均按缺口同步（与个股分钟线同一滚动窗口）；手动也可指定开始日期，全量重拉至最近交易日。"
                     "与个股分钟行情同步拆开，手动回补行业分钟线不会连带重拉个股、挤占 stk_mins 频次。"
                 ),
                 default_time="21:40",
                 default_enabled=True,
                 sort_order=76,
                 runner=_run_sw_minute_sync,
-                parameter_schema=(
-                    TaskParameterDefinition(
-                        key="trading_days",
-                        label="手动回补交易日数",
-                        value_type="integer",
-                        default=128,
-                        description="只在点击手动执行时生效；定时执行始终按缺口增量同步。",
-                        min_value=1,
-                        max_value=250,
-                        step=1,
-                    ),
-                ),
+                parameter_schema=(),
             ),
             "a_stock_innovation100_rebuild": TaskDefinition(
                 task_key="a_stock_innovation100_rebuild",

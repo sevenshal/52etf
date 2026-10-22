@@ -6,6 +6,7 @@ from src.robot import scheduled_tasks
 
 def test_chan_minute_sync_exposes_manual_start_date_option():
     assert "chan_minute_sync" in scheduled_tasks.START_DATE_RUN_TASK_KEYS
+    assert "sw_minute_sync" in scheduled_tasks.START_DATE_RUN_TASK_KEYS
     task = scheduled_tasks.ScheduledTaskManager().task_definitions["chan_minute_sync"]
     assert "手动增量" in task.description
     assert "指定开始日期" in task.description
@@ -58,6 +59,16 @@ def test_manual_minute_task_without_date_uses_incremental_mode(monkeypatch):
         scheduled_tasks_api.ScheduledTaskRunRequest(start_date="2020-01-02"),
         account_id="admin",
     )
+    scheduled_tasks_api.run_scheduled_task_now(
+        "sw_minute_sync",
+        scheduled_tasks_api.ScheduledTaskRunRequest(),
+        account_id="admin",
+    )
+    scheduled_tasks_api.run_scheduled_task_now(
+        "sw_minute_sync",
+        scheduled_tasks_api.ScheduledTaskRunRequest(start_date="2020-01-02"),
+        account_id="admin",
+    )
 
     assert calls == [
         {
@@ -69,6 +80,21 @@ def test_manual_minute_task_without_date_uses_incremental_mode(monkeypatch):
         },
         {
             "task_key": "chan_minute_sync",
+            "trigger_source": "manual",
+            "triggered_by": "admin",
+            "background": True,
+            "start_date": "2020-01-02",
+            "full": True,
+        },
+        {
+            "task_key": "sw_minute_sync",
+            "trigger_source": "manual",
+            "triggered_by": "admin",
+            "background": True,
+            "full": False,
+        },
+        {
+            "task_key": "sw_minute_sync",
             "trigger_source": "manual",
             "triggered_by": "admin",
             "background": True,

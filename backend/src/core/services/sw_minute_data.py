@@ -51,6 +51,15 @@ def recent_trading_dates(connection, days: int, end_date: Optional[date] = None)
     return sorted(row[0] for row in rows if row and row[0])
 
 
+def trading_dates_since(connection, start_date: date) -> List[date]:
+    """Return every available trading date from an explicitly selected full-sync start."""
+    rows = connection.execute(
+        "SELECT DISTINCT trade_date FROM a_stock_market_daily WHERE trade_date >= ? ORDER BY trade_date",
+        [start_date],
+    ).fetchall()
+    return [row[0] for row in rows if row and row[0]]
+
+
 def plan_batches(codes: List[str], dates: List[date]) -> List[Tuple[List[str], date, date]]:
     """切成 (指数列表, 起始日, 结束日) 批次，每批行数上限 CODES_PER_BATCH×DAYS_PER_BATCH×241。"""
     batches: List[Tuple[List[str], date, date]] = []
@@ -122,13 +131,22 @@ def prune_sw_minutes(keep_from: date) -> int:
     return int(count or 0)
 
 
-def sync_sw_minute_bars(trading_days: int, full: bool = False, service: Optional[Any] = None) -> Dict[str, Any]:
-    """同步申万一/二级分钟线：全量回补 trading_days 个交易日，或只补缺失交易日（额外重叠 1 天）。"""
+def sync_sw_minute_bars(
+    trading_days: int,
+    full: bool = False,
+    service: Optional[Any] = None,
+    start_date: Optional[date] = None,
+) -> Dict[str, Any]:
+    """同步申万一/二级分钟线：可从指定日期全量回拉，或按缺口增量同步。"""
     service = service or TushareService.get_instance()
     connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
     try:
         codes = sw_minute_codes(connection)
-        window = recent_trading_dates(connection, trading_days)
+        window = (
+            trading_dates_since(connection, start_date)
+            if start_date is not None
+            else recent_trading_dates(connection, trading_days)
+        )
         latest = connection.execute(
             "SELECT max(CAST(trade_time AS DATE)) FROM a_stock_sw_minute_bar"
         ).fetchone()[0]

@@ -101,15 +101,20 @@ def test_incremental_sync_does_not_prune_long_history(monkeypatch):
 
 
 def test_sw_minute_task_runner_incremental_by_default_and_full_when_manual(monkeypatch):
-    """定时执行走增量（滚动窗口）；手动执行由 API 带 full=True，按参数回补 N 个交易日。"""
+    """定时和手动不填日期均增量；手动日期回填才全量。"""
     from src.core.services import sw_minute_data as module
     from src.core.services.chan_minute_data import ROLLING_TRADING_DAYS
     from src.robot.scheduled_tasks import _run_sw_minute_sync
 
     calls = []
-    monkeypatch.setattr(module, "sync_sw_minute_bars", lambda days, full=False: calls.append((days, full)) or {
+    monkeypatch.setattr(module, "sync_sw_minute_bars", lambda days, full=False, start_date=None: calls.append((days, full, start_date)) or {
         "saved_rows": 10, "requests": 1, "mode": "full" if full else "incremental", "errors": []})
 
     _run_sw_minute_sync(trading_days=60)
     _run_sw_minute_sync(full=True, trading_days=60)
-    assert calls == [(ROLLING_TRADING_DAYS, False), (60, True)]
+    _run_sw_minute_sync(start_date="2020-01-02")
+    assert calls == [
+        (ROLLING_TRADING_DAYS, False, None),
+        (60, True, None),
+        (128, True, date(2020, 1, 2)),
+    ]
