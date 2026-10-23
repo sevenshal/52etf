@@ -29,6 +29,8 @@ def test_share_flow_score_uses_only_prior_history_and_requires_basket_coverage()
 
     assert not flow.empty
     assert flow.iloc[0]["etf_count"] == 3
+    assert flow.iloc[8]["flow_20d_amount"] != flow.iloc[8]["flow_20d_amount"]
+    assert flow.iloc[19]["flow_20d_amount"] > 0
     # 252 日滚动分位数至少要有 120 个 5 日观测，不能在样本开头产生分数。
     assert flow.iloc[100]["score"] != flow.iloc[100]["score"]
     assert flow.iloc[-1]["score"] == flow.iloc[-1]["score"]

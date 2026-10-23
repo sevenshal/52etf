@@ -962,7 +962,7 @@ const SOXXFearGreed = () => {
       <Card
         size="small"
         style={{ marginBottom: 16 }}
-        title="宽基 ETF 净申赎压力（研究观察）"
+        title="宽基 ETF 净申赎强度（研究观察）"
         extra={<Button size="small" onClick={fetchShareFlow}>刷新</Button>}
       >
         {shareFlowError && <Alert type="warning" showIcon message="份额数据暂不可用" description={shareFlowError} />}
@@ -970,10 +970,11 @@ const SOXXFearGreed = () => {
         {!shareFlowError && shareFlow && (
           <>
             <Row gutter={[12, 12]}>
-              <Col xs={12} sm={6}><Statistic title="净申赎压力" value={shareFlow.latest?.score} precision={1} suffix="/100" /></Col>
-              <Col xs={12} sm={6}><Statistic title="5日估算净申赎" value={shareFlow.latest?.estimated_flow_amount_yi} precision={2} suffix="亿元" /></Col>
-              <Col xs={12} sm={6}><Statistic title="5日规模占比" value={shareFlow.latest?.flow_5d_ratio_pct} precision={3} suffix="%" /></Col>
-              <Col xs={12} sm={6}><Statistic title="数据日期" value={shareFlow.latest?.date || '-'} /></Col>
+              <Col xs={12} sm={8} md={6} xl={4}><Statistic title="净申赎强度" value={shareFlow.latest?.score} precision={1} suffix="/100" /></Col>
+              <Col xs={12} sm={8} md={6} xl={4}><Statistic title="5日估算净申赎" value={shareFlow.latest?.estimated_flow_amount_yi} precision={2} suffix="亿元" /></Col>
+              <Col xs={12} sm={8} md={6} xl={4}><Statistic title="近20日估算净申赎" value={shareFlow.latest?.estimated_flow_20d_amount_yi} precision={2} suffix="亿元" /></Col>
+              <Col xs={12} sm={8} md={6} xl={4}><Statistic title="5日规模占比" value={shareFlow.latest?.flow_5d_ratio_pct} precision={3} suffix="%" /></Col>
+              <Col xs={12} sm={8} md={6} xl={4}><Statistic title="数据日期" value={shareFlow.latest?.date || '-'} /></Col>
             </Row>
             <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{shareFlow.proxy_note}</Text>
             <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>{shareFlow.score_direction}；暂未参与任何自算贪恐总分。</Text>

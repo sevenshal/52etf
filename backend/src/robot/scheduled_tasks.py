@@ -2088,7 +2088,7 @@ class ScheduledTaskManager:
             "a_stock_etf_share_flow_sync": TaskDefinition(
                 task_key="a_stock_etf_share_flow_sync",
                 name="宽基ETF份额定向同步",
-                description="仅同步6只核心宽基ETF的基金份额，用于净申赎压力研究；不触发全市场A股基础数据同步，也不计入自算贪恐总分。",
+                description="仅同步6只核心宽基ETF的基金份额，用于净申赎强度研究；不触发全市场A股基础数据同步，也不计入自算贪恐总分。",
                 default_time="18:38",
                 default_enabled=True,
                 sort_order=75,

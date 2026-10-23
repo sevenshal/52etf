@@ -1,4 +1,4 @@
-"""宽基 ETF 净申赎压力研究。
+"""宽基 ETF 净申赎强度研究。
 
 份额变化反映 ETF 一级市场的净创设/赎回，不能识别实际投资者，更不能直接认定为
 “国家队”交易。本模块只提供可复核的宽基净申赎代理及其历史检验，始终不参与贪恐总分。
@@ -90,6 +90,8 @@ class AStockEtfShareFlowService:
         daily["flow_5d_amount"] = daily["estimated_flow_amount"].rolling(5, min_periods=3).sum()
         daily["aum_5d"] = daily["previous_aum"].rolling(5, min_periods=3).mean()
         daily["flow_5d_ratio"] = daily["flow_5d_amount"] / daily["aum_5d"]
+        # 与 5 日压力指标分开呈现，保留更长的资金净流入/流出观察窗口。
+        daily["flow_20d_amount"] = daily["estimated_flow_amount"].rolling(20, min_periods=10).sum()
         rolling_mean = daily["flow_5d_ratio"].rolling(SCORE_WINDOW, min_periods=SCORE_MIN_PERIODS).mean()
         rolling_std = daily["flow_5d_ratio"].rolling(SCORE_WINDOW, min_periods=SCORE_MIN_PERIODS).std(ddof=0)
         daily["z_score"] = (daily["flow_5d_ratio"] - rolling_mean) / rolling_std.replace(0, np.nan)
@@ -172,6 +174,7 @@ class AStockEtfShareFlowService:
                 "score": _round(row.score, 2),
                 "flow_5d_ratio_pct": _round(row.flow_5d_ratio * 100, 3),
                 "estimated_flow_amount_yi": _round(row.flow_5d_amount / 100000000, 2),
+                "estimated_flow_20d_amount_yi": _round(row.flow_20d_amount / 100000000, 2),
                 "etf_count": int(row.etf_count),
             })
         latest = records[-1] if records else None
@@ -191,10 +194,10 @@ class AStockEtfShareFlowService:
                 })
             by_symbol[symbol] = {"name": item["name"], "latest": rows[-1] if rows else None, "history": rows}
         return {
-            "name": "宽基ETF净申赎压力",
+            "name": "宽基ETF净申赎强度",
             "included_in_total": False,
             "proxy_note": "ETF 份额变化仅反映一级市场净创设/赎回，无法识别资金主体；不可直接推断国家队买卖。",
-            "score_direction": "高分=相对历史更强的净申购/创设压力；低分=净赎回压力。",
+            "score_direction": "高分=相对历史更强的净申购/创设强度；低分=净赎回强度。",
             "basket": ETF_SHARE_FLOW_BASKET,
             "benchmark": {"symbol": BENCHMARK_INDEX, "name": "沪深300"},
             "latest": latest,

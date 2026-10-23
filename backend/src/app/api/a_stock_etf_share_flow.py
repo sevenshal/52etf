@@ -1,4 +1,4 @@
-"""宽基 ETF 净申赎压力：独立研究接口，不参与自算贪恐总分。"""
+"""宽基 ETF 净申赎强度：独立研究接口，不参与自算贪恐总分。"""
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .account import valid_admin_account
