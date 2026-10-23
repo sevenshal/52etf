@@ -42,6 +42,9 @@ def test_share_flow_analysis_has_forward_returns_and_hindsight_phase_labels():
     result = AStockEtfShareFlowService.analyze(flow, benchmark)
 
     assert len(result["future_returns"]) == 5
+    assert {"return_20d_mean_pct", "return_60d_mean_pct", "return_120d_mean_pct", "return_200d_mean_pct"}.issubset(
+        result["future_returns"][0]
+    )
     assert {item["phase"] for item in result["phase_distribution"]} == {"top", "bottom"}
     assert result["sample_count"] > 100
 

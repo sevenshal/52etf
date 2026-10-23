@@ -990,7 +990,7 @@ const SOXXFearGreed = () => {
               <Text strong>无前视未来收益（按当日分数分桶）：</Text>{' '}
               {(shareFlow.analysis?.future_returns || []).map(item => (
                 <Tag key={item.bucket}>
-                  {item.bucket}：20日 {formatNumber(item.return_20d_mean_pct, 1)}%，60日 {formatNumber(item.return_60d_mean_pct, 1)}%（n={item.count}）
+                  {item.bucket}：20日 {formatNumber(item.return_20d_mean_pct, 1)}%，60日 {formatNumber(item.return_60d_mean_pct, 1)}%，120日 {formatNumber(item.return_120d_mean_pct, 1)}%，200日 {formatNumber(item.return_200d_mean_pct, 1)}%（n={item.count}）
                 </Tag>
               ))}
             </div>

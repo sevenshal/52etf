@@ -27,6 +27,7 @@ ETF_SHARE_FLOW_BASKET = [
 BENCHMARK_INDEX = "000300.SH"
 SCORE_WINDOW = 252
 SCORE_MIN_PERIODS = 120
+FUTURE_RETURN_HORIZONS = (20, 60, 120, 200)
 
 
 def _round(value, digits=4):
@@ -109,7 +110,7 @@ class AStockEtfShareFlowService:
         benchmark = benchmark.dropna(subset=["close"]).sort_values("trade_date").drop_duplicates("trade_date")
         # 份额清算结果当日收盘后才可知，收益从下一交易日开盘可得的近似价格开始计算。
         benchmark["execution_close"] = benchmark["close"].shift(-1)
-        for horizon in (20, 60):
+        for horizon in FUTURE_RETURN_HORIZONS:
             benchmark[f"future_{horizon}d_return"] = benchmark["close"].shift(-horizon - 1) / benchmark["execution_close"] - 1.0
         # 这个标签明确是回顾性定义，不能作为当日交易信号。
         rolling_low = benchmark["close"].rolling(61, center=True, min_periods=61).min()
@@ -129,7 +130,7 @@ class AStockEtfShareFlowService:
         future = []
         for bucket, group in data.groupby("score_bucket", observed=False):
             item = {"bucket": str(bucket), "count": int(len(group))}
-            for horizon in (20, 60):
+            for horizon in FUTURE_RETURN_HORIZONS:
                 values = group[f"future_{horizon}d_return"].dropna()
                 item[f"return_{horizon}d_mean_pct"] = _round(values.mean() * 100, 2) if len(values) else None
                 item[f"return_{horizon}d_median_pct"] = _round(values.median() * 100, 2) if len(values) else None
