@@ -1588,6 +1588,37 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["ts_code", "trade_date"])
 
+    def get_margin_range_frame(self, start_date: date, end_date: date) -> pd.DataFrame:
+        """获取交易所两融汇总。按自然年分段，避开接口单次 4,000 行上限。"""
+        start_value = self._to_date(start_date)
+        end_value = self._to_date(end_date)
+        if not start_value or not end_value or start_value > end_value:
+            return pd.DataFrame()
+        frames = []
+        cursor = start_value
+        fields = "trade_date,exchange_id,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl"
+        while cursor <= end_value:
+            chunk_end = min(end_value, date(cursor.year, 12, 31))
+            try:
+                frame = self.pro.margin(
+                    start_date=cursor.strftime("%Y%m%d"),
+                    end_date=chunk_end.strftime("%Y%m%d"),
+                    fields=fields,
+                )
+            except Exception as exc:
+                self.logger.warning("Tushare margin fetch failed for %s~%s: %s", cursor, chunk_end, exc)
+                raise
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                frames.append(frame)
+            cursor = chunk_end + timedelta(days=1)
+        if not frames:
+            return pd.DataFrame()
+        result = pd.concat(frames, ignore_index=True).drop_duplicates(
+            subset=["trade_date", "exchange_id"], keep="last"
+        )
+        result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return result.dropna(subset=["trade_date", "exchange_id"])
+
     @staticmethod
     def _merge_daily_and_basic_frame(daily: pd.DataFrame, daily_basic: pd.DataFrame) -> pd.DataFrame:
         if daily is None or daily.empty:

@@ -121,6 +121,7 @@ START_DATE_RUN_TASK_KEYS = frozenset({
     "evc_static_info_sync",
     "cnn_fear_greed_fetch",
     "a_stock_base_data_sync",
+    "a_stock_margin_sync",
     "a_stock_etf_valuation_index_backfill",
     "a_stock_etf_share_flow_sync",
     "a_stock_chinabond_curve_backfill",
@@ -549,6 +550,9 @@ def _format_a_stock_base_data_sync_result(result: Dict) -> str:
         "A stock base data sync "
         f"start={result.get('start_date')} "
         f"market_start={result.get('market_start_date')} "
+        f"margin_start={result.get('margin_start_date')} "
+        f"margin_saved_rows={result.get('margin_saved_rows')} "
+        f"margin_trade_dates={result.get('margin_trade_dates')} "
         f"index_start={result.get('index_start_date')} "
         f"index_daily_saved={result.get('index_daily_saved_rows')} "
         f"index_daily_jobs={result.get('index_daily_jobs')} "
@@ -627,6 +631,7 @@ def _run_a_stock_base_data_sync(
     logger.info(
         (
             "A stock base data synced: status=%s mode=%s end_date=%s tables=%s "
+            "margin_saved_rows=%s margin_trade_dates=%s "
             "index_daily_saved=%s index_daily_jobs=%s index_daily_errors=%s "
             "fund_daily_saved=%s fund_daily_jobs=%s fund_daily_date_batches=%s fund_daily_symbol_jobs=%s fund_daily_errors=%s "
             "option_basic_saved=%s option_daily_saved=%s option_refresh_dates=%s option_chunks=%s option_errors=%s "
@@ -641,6 +646,8 @@ def _run_a_stock_base_data_sync(
         result.get("mode"),
         result.get("end_date"),
         result.get("tables"),
+        result.get("margin_saved_rows"),
+        result.get("margin_trade_dates"),
         result.get("index_daily_saved_rows"),
         result.get("index_daily_jobs"),
         result.get("index_daily_errors"),
@@ -679,6 +686,26 @@ def _run_a_stock_base_data_sync(
         result.get("fund_flow_errors"),
     )
     return _format_a_stock_base_data_sync_result(result)
+
+
+def _run_a_stock_margin_sync(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    incremental: bool = True,
+):
+    """两融专用轻量同步，供首次回补及紧急修复使用。"""
+    from .a_stock_base_data_sync import sync_a_stock_margin_data
+
+    result = sync_a_stock_margin_data(
+        start_date=_parse_optional_task_date(start_date, "开始日期"),
+        end_date=_parse_optional_task_date(end_date, "结束日期"),
+        incremental=incremental and not start_date,
+    )
+    return (
+        "A股两融同步完成 "
+        f"mode={result['mode']} range={result['start_date']}~{result['end_date']} "
+        f"saved_rows={result['saved_rows']} trade_dates={result['trade_dates']}"
+    )
 
 
 def _run_a_stock_chinabond_curve_backfill(
@@ -2057,6 +2084,29 @@ class ScheduledTaskManager:
                         value_type="boolean",
                         default=True,
                         description="仅在未填写开始日期时生效；关闭后执行全量逻辑。",
+                    ),
+                ),
+            ),
+            "a_stock_margin_sync": TaskDefinition(
+                task_key="a_stock_margin_sync",
+                name="A股两融数据同步",
+                description="仅同步Tushare交易所融资融券汇总，供两融杠杆看板首次回补或修复；不运行全量A股基础数据任务。",
+                default_time="18:40",
+                default_enabled=False,
+                sort_order=75,
+                runner=_run_a_stock_margin_sync,
+                parameter_schema=(
+                    TaskParameterDefinition(
+                        key="start_date", label="开始日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时仅同步缺失历史与最近修复窗口。",
+                    ),
+                    TaskParameterDefinition(
+                        key="end_date", label="结束日期", value_type="string", default="",
+                        description="可选，YYYY-MM-DD；为空时同步到今天。",
+                    ),
+                    TaskParameterDefinition(
+                        key="incremental", label="增量模式", value_type="boolean", default=True,
+                        description="未填写开始日期时生效；首次执行会从2020年起补齐两融汇总。",
                     ),
                 ),
             ),

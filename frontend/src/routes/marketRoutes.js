@@ -14,6 +14,7 @@ export const marketRouteDescriptors = [
   { path: '/market/alerts', Component: Market, props: { initialTab: 'alerts' } },
   { path: '/market/industry', Component: Market, props: { initialTab: 'industry' } },
   { path: '/market/fund-flow', Component: Market, props: { initialTab: 'fund-flow' } },
+  { path: '/market/margin-leverage', Component: Market, props: { initialTab: 'margin-leverage' } },
   { path: '/market/earnings-gap', Component: Market, props: { initialTab: 'earnings-gap' } },
   { path: '/market/xueqiu-holdings', Component: Market, props: { initialTab: 'xueqiu-holdings' } },
   { path: '/market/eastmoney-holdings', Component: Market, props: { initialTab: 'eastmoney-holdings' } },

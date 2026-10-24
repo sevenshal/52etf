@@ -435,6 +435,19 @@
   font-size: 12px;
 }
 
+.margin-leverage__stats,
+.margin-leverage__charts {
+  margin-top: 12px;
+}
+
+.margin-leverage__interpretation {
+  margin-top: 12px;
+}
+
+.margin-leverage__interpretation > div {
+  margin-top: 8px;
+}
+
 @media (max-width: 640px) {
   .market-page {
     padding: 10px;

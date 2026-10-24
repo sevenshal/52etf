@@ -67,6 +67,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "chan_scan_run",
         "chan_scan_signal",
         "a_stock_fund_flow_daily",
+        "a_stock_margin_daily",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
         "a_stock_chinabond_yield_curve_defs",
@@ -500,6 +501,22 @@ class AStockFundFlowDaily(AnalyticsBase):
     source = Column(String(32), default="eastmoney_push2", nullable=False)
     source_updated_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockMarginDaily(AnalyticsBase):
+    """Tushare 融资融券交易所汇总；一日一交易所，供全 A 杠杆看板使用。"""
+    __tablename__ = "a_stock_margin_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    exchange_id = Column(String(8), primary_key=True)
+    rzye = Column(Float)       # 融资余额（元）
+    rzmre = Column(Float)      # 融资买入额（元）
+    rzche = Column(Float)      # 融资偿还额（元）
+    rqye = Column(Float)       # 融券余额（元）
+    rqmcl = Column(Float)
+    rzrqye = Column(Float)     # 两融余额（元）
+    rqyl = Column(Float)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -1114,6 +1131,7 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_market_daily_date_circmv ON a_stock_market_daily(trade_date, circ_mv)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_symbol_date ON a_stock_fund_flow_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_date_main ON a_stock_fund_flow_daily(trade_date, main_net)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_margin_daily_date ON a_stock_margin_daily(trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_symbol_date ON a_stock_adj_factor(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_date_symbol ON a_stock_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_basic_name ON a_stock_fund_basic(name)",

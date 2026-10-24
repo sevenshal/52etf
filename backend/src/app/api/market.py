@@ -31,10 +31,23 @@ from ...core.services.market_overview import (
     fetch_index_overview,
 )
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
+from ...core.services.a_stock_margin_dashboard import MarginDashboardDataError, fetch_margin_dashboard
 from .account import ADMIN_ACCOUNT_ID, valid_admin_account, valid_market_viewer
 
 
 router = APIRouter(prefix="/api/market", tags=["Market"])
+
+
+@router.get("/margin-leverage")
+async def get_margin_leverage_dashboard(
+    days: int = Query(1250, ge=20, le=1800),
+    account_id: str = Depends(valid_market_viewer),
+):
+    """全 A 融资、融券和两融杠杆的历史水平与五年分位。"""
+    try:
+        return await run_in_threadpool(fetch_margin_dashboard, days)
+    except MarginDashboardDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @router.get("/intraday-volume")
