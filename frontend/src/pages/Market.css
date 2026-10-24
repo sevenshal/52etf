@@ -448,6 +448,10 @@
   margin-top: 8px;
 }
 
+.margin-leverage__industry {
+  margin-top: 12px;
+}
+
 @media (max-width: 640px) {
   .market-page {
     padding: 10px;

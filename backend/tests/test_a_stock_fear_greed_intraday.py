@@ -121,6 +121,8 @@ def test_iv_replaces_relative_realized_volatility_in_a_share_total():
     assert "market_volatility" not in A_STOCK_DISPLAY_ONLY_COMPONENTS
     assert "junk_bond_demand" not in A_STOCK_COMPONENTS
     assert "junk_bond_demand" in A_STOCK_DISPLAY_ONLY_COMPONENTS
+    assert "margin_leverage" not in A_STOCK_COMPONENTS
+    assert "margin_leverage" in A_STOCK_DISPLAY_ONLY_COMPONENTS
 
 
 def test_calculate_intraday_excludes_display_only_components_from_total():
@@ -147,6 +149,7 @@ def test_calculate_intraday_excludes_display_only_components_from_total():
     assert "market_volatility" not in result["components"]
     assert result["components"]["junk_bond_demand"]["included_in_total"] is False
     assert result["components"]["junk_bond_demand"]["used_in_score"] is False
+    assert result["components"]["margin_leverage"]["included_in_total"] is False
     assert 0.0 <= result["score"] <= 100.0
     assert result["quote_source"] == "rt_idx_k"
     assert result["index_level"] == ctx["intraday"]["level"]

@@ -30,6 +30,7 @@ from ..core.analytics_database import (
     AStockIndexWeight,
     AStockMarketDaily,
     AStockMarginDaily,
+    AStockMarginDetailDaily,
     AStockNameChange,
     AStockOptionBasic,
     AStockOptionDaily,
@@ -1131,6 +1132,60 @@ class AStockBaseDataSyncService:
         replace_frame = pd.DataFrame(rows)
         _insert_or_replace_analytics_frame(AStockMarginDaily.__tablename__, list(replace_frame.columns), replace_frame)
         return {"saved_rows": len(rows), "trade_dates": len({row["trade_date"] for row in rows})}
+
+    def sync_margin_detail_daily(self, start_date: date, end_date: date) -> Dict:
+        """按日同步股票两融明细；用 a_stock_basic 过滤 ETF、债券等非 A 股标的。"""
+        trading_days = self._trading_dates(start_date, end_date)
+        if not trading_days:
+            return {"saved_rows": 0, "trade_dates": 0, "errors": []}
+        stock_codes = {
+            str(row[0]).upper()
+            for row in self.analytics_db.query(AStockBasic.ts_code).all()
+            if row[0]
+        }
+        if not stock_codes:
+            raise ValueError("A股基础信息为空，请先执行 A股基础数据同步")
+        existing_dates = {
+            _parse_date(row[0])
+            for row in self.analytics_db.query(AStockMarginDetailDaily.trade_date).distinct().all()
+            if _parse_date(row[0])
+        }
+        # 已有的日期仍回刷最近三个交易日，修正交易所迟到/修订数据。
+        refresh_dates = set(trading_days[-3:])
+        target_days = [day for day in trading_days if day not in existing_dates or day in refresh_dates]
+        saved_rows = 0
+        errors = []
+        fields = ("rzye", "rqye", "rzmre", "rzche", "rzrqye")
+        for index, trade_day in enumerate(target_days, start=1):
+            try:
+                frame = self.tushare.get_margin_detail_frame(trade_day)
+                rows = []
+                now = datetime.now()
+                for row in frame.itertuples(index=False):
+                    ts_code = str(getattr(row, "ts_code", "") or "").strip().upper()
+                    if ts_code not in stock_codes:
+                        continue
+                    row_day = _parse_date(getattr(row, "trade_date", None))
+                    if not row_day:
+                        continue
+                    item = {"trade_date": row_day, "ts_code": ts_code, "updated_at": now}
+                    item.update({field: _safe_float(getattr(row, field, None)) for field in fields})
+                    rows.append(item)
+                if rows:
+                    replace_frame = pd.DataFrame(rows)
+                    _insert_or_replace_analytics_frame(
+                        AStockMarginDetailDaily.__tablename__, list(replace_frame.columns), replace_frame,
+                    )
+                    saved_rows += len(rows)
+            except Exception as exc:  # 单日异常不阻断后续日期，下一次会从缺失日期续拉
+                errors.append({"trade_date": trade_day.isoformat(), "error": str(exc)})
+                self.logger.warning("A stock margin detail sync failed for %s: %s", trade_day, exc)
+            if index == len(target_days) or index % 10 == 0:
+                self._progress(
+                    f"同步A股两融明细 {index}/{len(target_days)}", 50,
+                    margin_detail_saved_rows=saved_rows, margin_detail_errors=len(errors),
+                )
+        return {"saved_rows": saved_rows, "trade_dates": len(target_days) - len(errors), "errors": errors}
 
     def _option_first_listing_by_exchange(self) -> Dict[str, date]:
         """各交易所最早的期权挂牌日，来自 a_stock_option_basic（每次同步都会先刷新）。"""
@@ -2707,7 +2762,6 @@ class AStockBaseDataSyncService:
             raise ValueError("开始日期不能晚于结束日期")
 
         latest_market_date = _latest_analytics_date(self.analytics_db, AStockMarketDaily, "trade_date")
-        latest_margin_date = _latest_analytics_date(self.analytics_db, AStockMarginDaily, "trade_date")
         latest_option_date = _latest_analytics_date(self.analytics_db, AStockOptionDaily, "trade_date")
         latest_repo_date = _latest_analytics_date(self.analytics_db, AStockRepoDaily, "trade_date")
         latest_chinabond_date = _latest_analytics_date(self.analytics_db, AStockChinaBondYieldCurveDaily, "trade_date")
@@ -2745,11 +2799,6 @@ class AStockBaseDataSyncService:
         trading_dates = self._trading_dates(market_start, end_value)
         if trading_dates:
             self._ensure_market_days(trading_dates, force_refresh=incremental and latest_market_date is not None)
-
-        margin_start = _repair_window_start(DEFAULT_START_DATE, latest_margin_date) if incremental else DEFAULT_START_DATE
-        # 两融自 2010 年开始，但本项目的 A 股流通市值缓存自 2020 年起，因而看板口径从 2020 年可用。
-        self._progress("同步A股两融交易所汇总", 52, start_date=margin_start.isoformat(), end_date=end_value.isoformat())
-        margin_result = self.sync_margin_daily(margin_start, end_value)
 
         self._progress("同步A股股票复权因子", 54, start_date=market_start.isoformat(), end_date=end_value.isoformat())
         market_adj_factor_result = self.sync_market_adj_factor(
@@ -3149,9 +3198,6 @@ class AStockBaseDataSyncService:
             "sw_errors": sw_industry_result.get("errors"),
             "fund_basic_rows": fund_basic_rows,
             "market_start_date": market_start.isoformat(),
-            "margin_start_date": margin_start.isoformat(),
-            "margin_saved_rows": margin_result["saved_rows"],
-            "margin_trade_dates": margin_result["trade_dates"],
             "market_trade_days": len(trading_dates),
             "market_adj_factor_start_date": market_adj_factor_result.get("start_date"),
             "market_adj_factor_end_date": market_adj_factor_result.get("end_date"),
@@ -5474,6 +5520,25 @@ def sync_a_stock_margin_data(
             "mode": "incremental" if incremental and not explicit_start else "backfill",
             **result,
         }
+    finally:
+        service.close()
+
+
+def sync_a_stock_margin_detail_data(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    tushare_service: Optional[TushareService] = None,
+    analytics_db: Optional[Session] = None,
+) -> Dict:
+    """仅回补股票两融明细；默认最近 400 个自然日，覆盖诊断分数最小历史窗口。"""
+    end_value = _parse_date(end_date) or date.today()
+    start_value = _parse_date(start_date) or (end_value - timedelta(days=400))
+    if start_value > end_value:
+        raise ValueError("开始日期不能晚于结束日期")
+    service = AStockBaseDataSyncService(analytics_db=analytics_db, tushare_service=tushare_service)
+    try:
+        result = service.sync_margin_detail_daily(start_value, end_value)
+        return {"start_date": start_value.isoformat(), "end_date": end_value.isoformat(), **result}
     finally:
         service.close()
 

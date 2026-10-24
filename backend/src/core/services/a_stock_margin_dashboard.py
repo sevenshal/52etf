@@ -44,7 +44,9 @@ def _load_rows() -> List[Dict[str, Any]]:
                     SUM(rzye) AS financing_balance_yuan,
                     SUM(rqye) AS short_balance_yuan,
                     SUM(rzrqye) AS margin_balance_yuan,
-                    SUM(rzmre - rzche) AS financing_net_buy_yuan
+                    SUM(rzmre - rzche) AS financing_net_buy_yuan,
+                    MAX(CASE WHEN exchange_id = 'SSE' THEN 1 ELSE 0 END) AS has_sse,
+                    MAX(CASE WHEN exchange_id = 'SZSE' THEN 1 ELSE 0 END) AS has_szse
                 FROM a_stock_margin_daily
                 GROUP BY trade_date
             ), market AS (
@@ -65,6 +67,7 @@ def _load_rows() -> List[Dict[str, Any]]:
                 margin_balance_yuan / NULLIF(float_market_value_yuan, 0) * 100 AS leverage_ratio_pct
             FROM margin
             INNER JOIN market USING (trade_date)
+            WHERE has_sse = 1 AND has_szse = 1
             ORDER BY margin.trade_date
         """, [YI, YI, YI, YI, YI])
     except Exception as exc:  # 表首次随代码启动创建；创建前给页面清晰提示
@@ -72,6 +75,67 @@ def _load_rows() -> List[Dict[str, Any]]:
     finally:
         connection.close()
     return rows
+
+
+def _load_incomplete_margin_dates() -> List[Dict[str, Any]]:
+    """识别沪深任一交易所缺失的日期，绝不让它们参与比例/分位计算。"""
+    connection = connect_analytics_db()
+    try:
+        return duckdb_query_dicts(connection, """
+            SELECT
+                trade_date,
+                STRING_AGG(exchange_id, ', ' ORDER BY exchange_id) AS available_exchanges
+            FROM a_stock_margin_daily
+            GROUP BY trade_date
+            HAVING SUM(CASE WHEN exchange_id = 'SSE' THEN 1 ELSE 0 END) = 0
+                OR SUM(CASE WHEN exchange_id = 'SZSE' THEN 1 ELSE 0 END) = 0
+            ORDER BY trade_date DESC
+            LIMIT 20
+        """)
+    finally:
+        connection.close()
+
+
+def _load_industry_rows() -> Dict[str, Any]:
+    """取有明细的最新交易日，按申万一级行业聚合两融与流通市值。"""
+    connection = connect_analytics_db()
+    try:
+        latest_row = connection.execute("SELECT MAX(trade_date) FROM a_stock_margin_detail_daily").fetchone()
+        latest_date = latest_row[0] if latest_row else None
+        if latest_date is None:
+            return {"trade_date": None, "items": []}
+        items = duckdb_query_dicts(connection, """
+            WITH stocks AS (
+                SELECT
+                    d.ts_code, d.rzye, d.rqye, d.rzmre, d.rzche,
+                    m.circ_mv * 10000.0 AS float_market_value_yuan,
+                    COALESCE(NULLIF(TRIM(sw.l1_name), ''), '未分类') AS industry
+                FROM a_stock_margin_detail_daily d
+                INNER JOIN a_stock_market_daily m
+                    ON m.trade_date = d.trade_date AND m.ts_code = d.ts_code
+                LEFT JOIN a_stock_sw_member sw ON sw.ts_code = d.ts_code
+                WHERE d.trade_date = ?
+            )
+            SELECT
+                industry,
+                COUNT(*) AS stock_count,
+                SUM(rzye) / ? AS financing_balance_yi,
+                SUM(rqye) / ? AS short_balance_yi,
+                SUM(rzmre - rzche) / ? AS financing_net_buy_yi,
+                SUM(float_market_value_yuan) / ? AS float_market_value_yi,
+                SUM(rzye) / NULLIF(SUM(float_market_value_yuan), 0) * 100 AS financing_ratio_pct,
+                SUM(rqye) / NULLIF(SUM(float_market_value_yuan), 0) * 100 AS short_ratio_pct,
+                SUM(rzye + rqye) / NULLIF(SUM(float_market_value_yuan), 0) * 100 AS leverage_ratio_pct
+            FROM stocks
+            GROUP BY industry
+            HAVING SUM(float_market_value_yuan) > 0
+            ORDER BY financing_ratio_pct DESC NULLS LAST, financing_balance_yi DESC
+        """, [latest_date, YI, YI, YI, YI])
+        return {"trade_date": latest_date.isoformat(), "items": items}
+    except Exception as exc:
+        raise MarginDashboardDataError("行业两融明细尚未同步，请运行“A股两融明细同步”任务") from exc
+    finally:
+        connection.close()
 
 
 def fetch_margin_dashboard(days: int = 1250) -> Dict[str, Any]:
@@ -87,10 +151,15 @@ def fetch_margin_dashboard(days: int = 1250) -> Dict[str, Any]:
         "history": visible,
         "available_start_date": rows[0]["trade_date"],
         "available_end_date": latest["trade_date"],
+        "data_quality": {
+            "required_exchanges": ["SSE", "SZSE"],
+            "excluded_incomplete_dates": _load_incomplete_margin_dates(),
+        },
         "methodology": {
             "financing_ratio": "融资余额 ÷ 全A股流通市值",
             "leverage_ratio": "融资融券余额 ÷ 全A股流通市值",
             "percentile": "当前值在过去1250个有效交易日（约5年）中的百分位，含当日",
             "note": "两融余额来自交易所汇总，可能包含少量ETF等非股票融资融券标的；分母为Tushare A股日度流通市值之和。",
         },
+        "industry": _load_industry_rows(),
     }

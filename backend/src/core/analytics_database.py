@@ -68,6 +68,7 @@ ANALYTICS_TABLE_NAMES = frozenset(
         "chan_scan_signal",
         "a_stock_fund_flow_daily",
         "a_stock_margin_daily",
+        "a_stock_margin_detail_daily",
         "a_stock_name_changes",
         "a_stock_chinabond_yield_curve_daily",
         "a_stock_chinabond_yield_curve_defs",
@@ -517,6 +518,20 @@ class AStockMarginDaily(AnalyticsBase):
     rqmcl = Column(Float)
     rzrqye = Column(Float)     # 两融余额（元）
     rqyl = Column(Float)
+    updated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+
+class AStockMarginDetailDaily(AnalyticsBase):
+    """融资融券标的明细（仅存股票代码），用于申万行业/指数成分聚合。"""
+    __tablename__ = "a_stock_margin_detail_daily"
+
+    trade_date = Column(Date, primary_key=True)
+    ts_code = Column(String(16), primary_key=True)
+    rzye = Column(Float)
+    rqye = Column(Float)
+    rzmre = Column(Float)
+    rzche = Column(Float)
+    rzrqye = Column(Float)
     updated_at = Column(DateTime, default=datetime.now, nullable=False)
 
 
@@ -1132,6 +1147,8 @@ def ensure_analytics_schema():
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_symbol_date ON a_stock_fund_flow_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_flow_daily_date_main ON a_stock_fund_flow_daily(trade_date, main_net)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_margin_daily_date ON a_stock_margin_daily(trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_margin_detail_daily_date ON a_stock_margin_detail_daily(trade_date)",
+        "CREATE INDEX IF NOT EXISTS idx_a_stock_margin_detail_daily_symbol_date ON a_stock_margin_detail_daily(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_symbol_date ON a_stock_adj_factor(ts_code, trade_date)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_adj_factor_date_symbol ON a_stock_adj_factor(trade_date, ts_code)",
         "CREATE INDEX IF NOT EXISTS idx_a_stock_fund_basic_name ON a_stock_fund_basic(name)",

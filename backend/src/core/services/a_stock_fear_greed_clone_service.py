@@ -184,6 +184,16 @@ A_STOCK_COMPONENTS: Dict[str, ComponentSpec] = {
 #   但不再驱动总分。
 # 实现波动率相对变化已下线：波动率维度统一由参与总分的期权隐含波动率承担。
 A_STOCK_DISPLAY_ONLY_COMPONENTS: Dict[str, ComponentSpec] = {
+    "margin_leverage": ComponentSpec(
+        key="margin_leverage",
+        name="Constituent Margin Leverage",
+        raw_label="constituent-cap-weighted financing balance / float market value (%)",
+        source="Tushare margin_detail + a_stock_market_daily + historical index constituents",
+        proxy_note=(
+            "融资余额占成分股流通市值比例。较高杠杆通常对应更强风险偏好；"
+            "作为诊断子分数展示，暂不参与贪恐总分。"
+        ),
+    ),
     "junk_bond_demand": ComponentSpec(
         key="junk_bond_demand",
         name="AA/AAA Credit Spread",
@@ -1021,6 +1031,9 @@ class AStockInnovation100FearGreedCloneCalculator:
             start_date, end_date, holdings_by_date, holdings_as_of_by_date,
         ).reindex(index).ffill(limit=3)
         credit_spread = self._load_credit_spread(start_date, end_date).reindex(index).ffill(limit=3)
+        margin_leverage = self._load_constituent_margin_leverage(
+            holdings_by_date, index, start_date, end_date,
+        )
 
         df = pd.DataFrame(index=index)
         df["market_momentum"] = level / level.rolling(125).mean() - 1.0
@@ -1035,6 +1048,7 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["implied_volatility"] = -implied_volatility
         df["safe_haven_demand"] = level.pct_change(20) - bond_close.pct_change(20)
         df["junk_bond_demand"] = -credit_spread
+        df["margin_leverage"] = margin_leverage
         df["etf_open"] = pd.to_numeric(levels["open"], errors="coerce").reindex(index).ffill() if "open" in levels.columns else level
         df["etf_high"] = pd.to_numeric(levels["high"], errors="coerce").reindex(index).ffill() if "high" in levels.columns else level
         df["etf_low"] = pd.to_numeric(levels["low"], errors="coerce").reindex(index).ffill() if "low" in levels.columns else level
@@ -1042,6 +1056,66 @@ class AStockInnovation100FearGreedCloneCalculator:
         df["etf_volume"] = pd.to_numeric(levels["volume"], errors="coerce").reindex(index).ffill() if "volume" in levels.columns else np.nan
         df["etf_turnover"] = pd.to_numeric(levels["turnover"], errors="coerce").reindex(index).ffill() if "turnover" in levels.columns else np.nan
         return df.replace([np.inf, -np.inf], np.nan)
+
+    def _load_constituent_margin_leverage(
+        self,
+        holdings_by_date: Dict[pd.Timestamp, List[Dict[str, Any]]],
+        index: pd.DatetimeIndex,
+        start_date: date,
+        end_date: date,
+    ) -> pd.Series:
+        """按每期成分权重聚合融资余额/流通市值；缺少两融明细的股票视作零融资。"""
+        symbols = sorted({item["symbol"] for rows in holdings_by_date.values() for item in rows})
+        if not symbols:
+            return pd.Series(np.nan, index=index)
+        params: Dict[str, Any] = {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+        placeholders = []
+        for number, symbol in enumerate(symbols):
+            key = f"margin_symbol_{number}"
+            placeholders.append(f":{key}")
+            params[key] = symbol
+        analytics_db = AnalyticsSession()
+        try:
+            rows = analytics_db.execute(text(f"""
+                SELECT
+                    m.trade_date,
+                    m.ts_code,
+                    m.circ_mv * 10000.0 AS float_market_value_yuan,
+                    COALESCE(d.rzye, 0.0) AS financing_balance_yuan
+                FROM a_stock_market_daily m
+                LEFT JOIN a_stock_margin_detail_daily d
+                    ON d.trade_date = m.trade_date AND d.ts_code = m.ts_code
+                WHERE m.trade_date >= :start_date AND m.trade_date <= :end_date
+                  AND m.ts_code IN ({", ".join(placeholders)})
+                  AND m.circ_mv IS NOT NULL AND m.circ_mv > 0
+                ORDER BY m.trade_date, m.ts_code
+            """), params).fetchall()
+        except Exception:
+            # 明细表尚未同步时降级成空诊断项，不能阻断既有贪恐总分。
+            return pd.Series(np.nan, index=index)
+        finally:
+            AnalyticsSession.remove()
+        by_day = {
+            (pd.Timestamp(row[0]), str(row[1]).upper()): (float(row[2]), float(row[3] or 0.0))
+            for row in rows
+            if row[0] and row[1] and row[2] and float(row[2]) > 0
+        }
+        values = []
+        for timestamp in index:
+            weighted_ratio = 0.0
+            available_weight = 0.0
+            for holding in holdings_by_date.get(timestamp, []):
+                value = by_day.get((timestamp, str(holding["symbol"]).upper()))
+                if not value:
+                    continue
+                market_value, financing_balance = value
+                weight = float(holding.get("weight") or 0.0)
+                if weight <= 0:
+                    continue
+                weighted_ratio += weight * financing_balance / market_value * 100.0
+                available_weight += weight
+            values.append(weighted_ratio / available_weight if available_weight > 0 else np.nan)
+        return pd.Series(values, index=index)
 
     def _load_constituent_market_frames(
         self,
@@ -1816,5 +1890,6 @@ class AStockInnovation100FearGreedCloneCalculator:
             option_warning,
             "The implied-volatility component is a settlement-price IV proxy; it replaces relative realized-volatility change in the Fear & Greed total.",
             "The credit-risk component uses ChinaBond 3Y AA-AAA spreads across medium-note, enterprise-bond and urban-investment curves.",
+            "Margin leverage is a display-only constituent financing-balance ratio; it is excluded from the total score.",
             "Safe-haven demand uses H11006.CSI 中证国债 as the bond proxy.",
         ]

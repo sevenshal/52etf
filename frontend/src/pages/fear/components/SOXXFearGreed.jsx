@@ -56,6 +56,7 @@ const COMPONENT_LABELS = {
   short_selling_ratio: '沽空比率',
   cnn_fear_greed: 'CNN 贪恐',
   szdt_fear_greed: '外部来源贪恐',
+  margin_leverage: '融资杠杆',
 };
 
 const COMPONENT_VALUE_META = {
@@ -99,6 +100,10 @@ const COMPONENT_VALUE_META = {
   szdt_fear_greed: {
     label: '外部情绪分',
     description: '外部来源的标的情绪评分，已映射为 0–100 分',
+  },
+  margin_leverage: {
+    label: '融资余额/流通市值（%）',
+    description: '按指数历史成分权重聚合的融资杠杆；杠杆越高通常代表更强风险偏好，仅作诊断，暂未参与总分',
   },
 };
 

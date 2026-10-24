@@ -1619,6 +1619,25 @@ class TushareService(QuoteProvider):
         result["trade_date"] = pd.to_datetime(result["trade_date"], format="%Y%m%d", errors="coerce").dt.date
         return result.dropna(subset=["trade_date", "exchange_id"])
 
+    def get_margin_detail_frame(self, trade_date: date) -> pd.DataFrame:
+        """获取单个交易日两融标的明细（单日请求低于接口 6,000 行上限）。"""
+        trade_value = self._to_date(trade_date)
+        if not trade_value:
+            return pd.DataFrame()
+        fields = "trade_date,ts_code,rzye,rqye,rzmre,rzche,rzrqye"
+        try:
+            frame = self.pro.margin_detail(
+                trade_date=trade_value.strftime("%Y%m%d"), fields=fields,
+            )
+        except Exception as exc:
+            self.logger.warning("Tushare margin_detail fetch failed for %s: %s", trade_value, exc)
+            raise
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.DataFrame()
+        frame = frame.copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+        return frame.dropna(subset=["trade_date", "ts_code"])
+
     @staticmethod
     def _merge_daily_and_basic_frame(daily: pd.DataFrame, daily_basic: pd.DataFrame) -> pd.DataFrame:
         if daily is None or daily.empty:
