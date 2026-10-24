@@ -29,6 +29,41 @@ class AStockBaseDataSyncTest(TestCase):
             except FileNotFoundError:
                 pass
 
+    def test_index_weight_bulk_replace_releases_orm_duckdb_handle(self):
+        """连续历史权重分片写入不能因同进程 DuckDB 句柄冲突而失败。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analytics_path = os.path.join(tmpdir, "analytics.duckdb")
+            code = textwrap.dedent(
+                """
+                from datetime import date
+                import pandas as pd
+                from sqlalchemy import text
+
+                from src.core.analytics_database import AnalyticsSession
+                from src.robot.a_stock_base_data_sync import _bulk_replace_index_weight_frame
+
+                session = AnalyticsSession()
+                frame = pd.DataFrame([{
+                    "index_code": "000001.SH", "con_code": "600000.SH",
+                    "trade_date": date(2024, 1, 31), "weight": 1.0,
+                }])
+                try:
+                    assert _bulk_replace_index_weight_frame(session, frame) == 1
+                    frame.loc[0, "weight"] = 2.0
+                    assert _bulk_replace_index_weight_frame(session, frame) == 1
+                    assert session.execute(text(
+                        "SELECT weight FROM a_stock_index_weight "
+                        "WHERE index_code = '000001.SH'"
+                    )).scalar() == 2.0
+                finally:
+                    session.close()
+                    AnalyticsSession.remove()
+                """
+            )
+            env = os.environ.copy()
+            env["ANALYTICS_DB_PATH"] = analytics_path
+            subprocess.run([sys.executable, "-c", code], env=env, check=True)
+
     def test_sync_ths_board_data_updates_main_catalog_and_duckdb_caches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             analytics_path = os.path.join(tmpdir, "analytics.duckdb")

@@ -3369,7 +3369,11 @@ def _bulk_upsert_statement_frame(
     if normalized.empty:
         return 0
     columns = list(normalized.columns)
+    # DuckDB 不允许同一进程内一个 SQLAlchemy 会话和原生写连接同时持有同一
+    # 文件句柄。这里的批量替换使用原生连接注册 DataFrame，先提交并释放
+    # ORM 会话的连接，避免长历史回补在后续分片报 Unique file handle conflict。
     analytics_db.commit()
+    analytics_db.close()
     # Keep this on the same DuckDB bulk path used by market/index daily:
     # register one DataFrame and let DuckDB execute a set-based INSERT OR REPLACE.
     _insert_or_replace_analytics_frame(table_name, columns, normalized.loc[:, columns])
