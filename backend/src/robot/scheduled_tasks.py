@@ -709,32 +709,42 @@ def _run_a_stock_etf_valuation_index_backfill(
     end_date: Optional[str] = None,
     symbols: Optional[Any] = None,
 ):
-    """仅回补本轮新增 ETF 估值所需的 8 个指数输入。"""
-    from .a_stock_base_data_config import A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS
+    """回补所有 A 股指数估值的日线/历史权重，并立即重算估值快照。"""
+    from .a_stock_base_data_config import A_STOCK_INDEX_FEAR_GREED_TARGETS
     from .a_stock_base_data_sync import sync_a_stock_index_history
+    from ..core.services.a_stock_index_valuation import refresh_a_stock_index_valuations
 
     requested_symbols = set(_parse_optional_symbol_list(symbols) or [])
-    supported_symbols = set(A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS)
+    supported_symbols = {str(item["symbol"]).upper() for item in A_STOCK_INDEX_FEAR_GREED_TARGETS}
     unknown_symbols = sorted(requested_symbols - supported_symbols)
     if unknown_symbols:
-        raise ValueError(f"仅支持本轮新增估值指数: {','.join(unknown_symbols)}")
+        raise ValueError(f"未知A股估值指数: {','.join(unknown_symbols)}")
 
     target_symbols = [
-        symbol for symbol in A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS
-        if not requested_symbols or symbol in requested_symbols
+        str(item["symbol"]).upper()
+        for item in A_STOCK_INDEX_FEAR_GREED_TARGETS
+        if not requested_symbols or str(item["symbol"]).upper() in requested_symbols
     ]
-    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2024, 8, 1)
+    # INNO100.CN / MICRO400.CN 是项目自算指数，日线与成分在主库自己的重建表里，
+    # 没有可向 Tushare 请求的指数代码；仍在下面的估值刷新范围中。
+    synced_symbols = [symbol for symbol in target_symbols if not symbol.endswith(".CN")]
+    # 虽然个股 daily_basic（PE/PB 原始数据）可追溯到 1991 年，但 index_weight
+    # （历史成分权重）对上证综指最早从 2011-05-31 起提供。没有当期成分就不能
+    # 严谨复算指数估值，故统一从 2011 年开始回补，并在前端称为“全可用历史”。
+    start_value = _parse_optional_task_date(start_date, "开始日期") or date(2011, 1, 1)
     end_value = _parse_optional_task_date(end_date, "结束日期") or date.today()
     if start_value > end_value:
         raise ValueError("开始日期不能晚于结束日期")
-    result = sync_a_stock_index_history(target_symbols, start_value, end_value)
+    result = sync_a_stock_index_history(synced_symbols, start_value, end_value)
+    valuation_result = refresh_a_stock_index_valuations(target_symbols)
     daily_result = result["index_daily"]
     weight_result = result["index_weight"]
     return (
-        "A股ETF估值指数定向回补 "
+        "A股指数估值基础数据回补 "
         f"symbols={','.join(target_symbols)} range={result['start_date']}~{result['end_date']} "
         f"daily_saved={daily_result.get('saved_rows', 0)} daily_errors={len(daily_result.get('errors') or [])} "
-        f"weight_saved={weight_result.get('saved_rows', 0)} weight_errors={len(weight_result.get('errors') or [])}"
+        f"weight_saved={weight_result.get('saved_rows', 0)} weight_errors={len(weight_result.get('errors') or [])} "
+        f"valuation_saved={valuation_result.get('saved', 0)} valuation_errors={len(valuation_result.get('errors') or [])}"
     )
 
 
@@ -2052,10 +2062,10 @@ class ScheduledTaskManager:
             ),
             "a_stock_etf_valuation_index_backfill": TaskDefinition(
                 task_key="a_stock_etf_valuation_index_backfill",
-                name="A股ETF估值指数定向回补",
+                name="A股指数估值基础数据回补",
                 description=(
-                    "只回补本轮新增守猪逮兔 A 股 ETF 估值所需的 8 个指数日线和成分权重；"
-                    "不会同步全市场行情、财报、期权或中债数据。"
+                    "回补全部已配置 A 股指数的日线和历史成分权重，并立即重算 PE/PB 历史分位；"
+                    "不依赖贪恐历史，也不会同步全市场行情、财报、期权或中债数据。"
                 ),
                 default_time="18:35",
                 default_enabled=False,
@@ -2066,8 +2076,8 @@ class ScheduledTaskManager:
                         key="start_date",
                         label="开始日期",
                         value_type="string",
-                        default="2024-08-01",
-                        description="YYYY-MM-DD；为空时从 2024-08-01 补至今天。",
+                        default="",
+                        description="YYYY-MM-DD；为空时从历史成分权重可用的 2011-01-01 补至今天。",
                     ),
                     TaskParameterDefinition(
                         key="end_date",
@@ -2081,7 +2091,7 @@ class ScheduledTaskManager:
                         label="指数列表",
                         value_type="string",
                         default="",
-                        description="可选，限本轮新增的 8 个指数；为空时全部回补。",
+                        description="可选，逗号/空格分隔；为空时回补全部已配置指数。",
                     ),
                 ),
             ),

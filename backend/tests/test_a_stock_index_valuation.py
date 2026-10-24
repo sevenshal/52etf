@@ -1,8 +1,10 @@
 from datetime import date
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
+from src.core.services import a_stock_index_valuation as valuation_module
 from src.core.services.a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from src.core.services.a_stock_consensus import load_a_stock_consensus_valuation_map
 from src.core.services.a_stock_index_valuation import (
@@ -161,6 +163,56 @@ def test_weighted_market_multiples_use_harmonic_mean_and_exclude_non_positive_va
 
     assert result["pe_ttm"] == pytest.approx(12.3077)
     assert result["pb"] == pytest.approx(2.4615)
+
+
+def test_index_valuation_uses_index_daily_history_not_fear_greed_history(monkeypatch):
+    dates = [date(2018, 1, 2), date(2018, 1, 3)]
+
+    class FakeCalculator:
+        def __init__(self, _symbol):
+            pass
+
+        def _load_levels(self, _start_date, _end_date):
+            return pd.DataFrame(
+                {"level": [100.0, 101.0]},
+                index=pd.to_datetime(dates),
+            )
+
+        def load_holdings_history(self, _index_levels):
+            rows = {day: [{"symbol": "AAA.SH", "weight": 1.0}] for day in dates}
+            return rows, {day: day for day in dates}
+
+    class FakeAnalyticsSession:
+        def __call__(self):
+            return object()
+
+        @staticmethod
+        def remove():
+            pass
+
+    monkeypatch.setattr(valuation_module, "AStockInnovation100FearGreedCloneCalculator", FakeCalculator)
+    monkeypatch.setattr(valuation_module, "AnalyticsSession", FakeAnalyticsSession())
+    monkeypatch.setattr(
+        valuation_module,
+        "load_a_stock_market_multiple_history_map",
+        lambda _db, _symbols, trade_dates: {
+            day: {"AAA.SH": {"pe_ttm": 10.0 + index, "pb": 2.0}}
+            for index, day in enumerate(trade_dates)
+        },
+    )
+    monkeypatch.setattr(valuation_module, "load_a_stock_consensus_valuation_history_map", lambda *_args: {})
+    monkeypatch.setattr(
+        valuation_module,
+        "Session",
+        lambda: (_ for _ in ()).throw(AssertionError("valuation must not read fear-greed history")),
+    )
+
+    result = valuation_module.calculate_a_stock_index_valuation("000001.SH")
+
+    assert result["status"] == "available"
+    assert result["index_date"] == "2018-01-03"
+    assert result["pe_ttm"] == pytest.approx(11.0)
+    assert result["pe_ttm_history_all_time_days"] == 2
 
 
 def test_market_multiple_positions_expose_all_requested_windows():

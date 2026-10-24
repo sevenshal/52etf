@@ -699,7 +699,7 @@ const SOXXFearGreed = () => {
       const label = valuation?.[`${field}_position_${suffix}_label`];
       const pct = valuation?.[`${field}_position_${suffix}_pct`];
       const days = Number(valuation?.[`${field}_history_${suffix}_days`]) || 0;
-      const windowLabel = window === 'all_time' ? '全周期' : `${window}日`;
+      const windowLabel = window === 'all_time' ? '全可用历史' : `${window}日`;
       return (
         <Tag key={`${field}-${suffix}`} color={valuationColor(label)} title={`有效${days}日`}>
           {windowLabel} {label || '-'} · {isFiniteNumber(pct) ? `${formatNumber(pct, 1)}%` : '样本不足'}
@@ -892,8 +892,8 @@ const SOXXFearGreed = () => {
                   <Tag color={valuationColor(valuation1000Label)} title={`有效${valuation1000Days}日`}>
                     1000日 {valuation1000Label || '-'} · {isFiniteNumber(valuation1000Pct) ? `${formatNumber(valuation1000Pct, 1)}%` : '样本不足'}
                   </Tag>
-                  <Tag color={valuationColor(valuationAllTimeLabel)} title={`有效${valuationAllTimeDays}日`}>
-                    全生命周期 {valuationAllTimeLabel || '-'} · {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%` : '样本不足'}
+                  <Tag color={valuationColor(valuationAllTimeLabel)} title={`可用历史${valuationAllTimeDays}日`}>
+                    全可用历史 {valuationAllTimeLabel || '-'} · {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%` : '样本不足'}
                   </Tag>
                 </Space>
                 <div className="soxx-fear-market-multiple-row">

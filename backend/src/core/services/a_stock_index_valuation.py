@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy import and_, func, text
 
 from ..analytics_database import AnalyticsSession
-from ..database import AStockIndexValuationSnapshot, ETFFearGreedCloneHistory, Session
+from ..database import AStockIndexValuationSnapshot, Session
 from .a_stock_fear_greed_clone_service import AStockInnovation100FearGreedCloneCalculator
 from .a_stock_consensus import load_a_stock_consensus_valuation_history_map
 
@@ -254,26 +254,30 @@ def load_a_stock_market_multiple_history_map(
 
 def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
-    db = Session()
-    try:
-        history_rows = (
-            db.query(ETFFearGreedCloneHistory)
-            .filter(ETFFearGreedCloneHistory.symbol == normalized_symbol)
-            .order_by(ETFFearGreedCloneHistory.date.desc())
-            .all()
-        )
-        if not history_rows:
-            return {"status": "unavailable", "reason": "fear_greed_history_missing"}
-        history_rows.reverse()
-        index_levels = {row.date: row.etf_close for row in history_rows}
-        latest = SimpleNamespace(date=history_rows[-1].date, etf_close=history_rows[-1].etf_close)
-    finally:
-        Session.remove()
-
     calculator = AStockInnovation100FearGreedCloneCalculator(normalized_symbol)
+    # 估值和 PE/PB 历史分位只依赖指数日线、历史成分权重及个股基础数据；不能用
+    # 贪恐历史作日期来源，否则一个较晚接入贪恐的老指数会被错误截短“全周期”。
+    levels = calculator._load_levels(date(1900, 1, 1), date.today())
+    if levels.empty:
+        return {"status": "unavailable", "reason": "index_daily_history_missing"}
+    index_levels = {
+        timestamp.date(): float(row.level)
+        for timestamp, row in levels.iterrows()
+        if _positive_number(row.level) is not None
+    }
+    if not index_levels:
+        return {"status": "unavailable", "reason": "index_daily_history_missing"}
+    latest_date, latest_level = next(reversed(index_levels.items()))
     holdings_history, holdings_as_of_history = calculator.load_holdings_history(index_levels)
-    holding_rows = holdings_history.get(latest.date, [])
-    holdings_as_of = holdings_as_of_history.get(latest.date)
+    # 只有已匹配到当期成分的交易日才能复算估值。保留全部指数日线用来寻找
+    # 历史成分的生效日，但不能让权重缺失的早期日线进入后续估值查询和循环。
+    valuation_index_levels = {
+        trade_day: index_level
+        for trade_day, index_level in index_levels.items()
+        if holdings_history.get(trade_day)
+    }
+    holding_rows = holdings_history.get(latest_date, [])
+    holdings_as_of = holdings_as_of_history.get(latest_date)
     holdings = [SimpleNamespace(holding_symbol=row["symbol"], **row) for row in holding_rows]
     holding_symbols = {
         str(row.get("symbol") or "").strip().upper()
@@ -289,16 +293,17 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
         valuation_history = load_a_stock_consensus_valuation_history_map(
             analytics_db,
             holding_symbols,
-            index_levels,
+            valuation_index_levels,
         )
         market_multiple_history = load_a_stock_market_multiple_history_map(
             analytics_db,
             holding_symbols,
-            index_levels,
+            valuation_index_levels,
         )
         daily_results = []
         daily_market_multiples: Dict[date, Dict[str, Optional[float]]] = {}
-        for trade_day, index_level in index_levels.items():
+        latest_result = None
+        for trade_day, index_level in valuation_index_levels.items():
             day_holdings = [
                 SimpleNamespace(holding_symbol=row["symbol"], **row)
                 for row in holdings_history.get(trade_day, [])
@@ -316,30 +321,36 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
                 holdings=day_holdings,
                 valuations=day_valuations,
             )
+            if trade_day == latest_date:
+                latest_result = day_result
             if day_result.get("status") != "available" or day_result.get("current_gap_pct") is None:
                 continue
             day_result["index_date"] = trade_day.isoformat()
             holdings_day = holdings_as_of_history.get(trade_day)
             day_result["holdings_as_of"] = holdings_day.isoformat() if holdings_day else None
             daily_results.append(day_result)
-        if not daily_results:
-            return {"status": "unavailable", "reason": "valuation_history_missing"}
-        result = daily_results[-1]
+        # 即使当前没有足够的机构一致预期，PE/PB 也仍可由基础数据独立计算和展示。
+        result = latest_result or calculate_weighted_index_valuation(
+            index_level=latest_level,
+            holdings=holdings,
+            valuations={},
+        )
+        result["status"] = "available"
         gaps = [item["current_gap_pct"] for item in daily_results]
-        latest_market_multiples = daily_market_multiples.get(latest.date, {})
+        latest_market_multiples = daily_market_multiples.get(latest_date, {})
         result.update(
-            **_build_valuation_position_fields(gaps, result["current_gap_pct"]),
+            **_build_valuation_position_fields(gaps, result.get("current_gap_pct")),
             **_build_market_multiple_position_fields(
                 daily_market_multiples.values(),
                 latest_market_multiples,
             ),
-            valuation_gap_min=round(min(gaps), 2),
-            valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2),
-            valuation_gap_max=round(max(gaps), 2),
-            method="full_lifecycle_percentile_of_robust_consensus_undervaluation",
+            valuation_gap_min=round(min(gaps), 2) if gaps else None,
+            valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2) if gaps else None,
+            valuation_gap_max=round(max(gaps), 2) if gaps else None,
+            method="base_data_historical_constituent_valuation",
             _history=daily_results,
         )
-        result["index_date"] = latest.date.isoformat()
+        result["index_date"] = latest_date.isoformat()
         result["holdings_as_of"] = holdings_as_of.isoformat() if holdings_as_of else None
         return result
     finally:
@@ -590,8 +601,8 @@ def _percentile_rank(values: Iterable[float], current: float) -> float:
     return round((less + 0.5 * equal) / len(clean) * 100.0, 2)
 
 
-def _build_valuation_position_fields(values: Iterable[float], current: float) -> Dict[str, Any]:
-    """估值点位：当天估值系数（=1−估值偏离）在 252 / 504 / 1000 日及全生命周期里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
+def _build_valuation_position_fields(values: Iterable[float], current: Optional[float]) -> Dict[str, Any]:
+    """估值点位：当天估值系数（=1−估值偏离）在 252 / 504 / 1000 日及全可用历史里的分位，越大越贵（≥80 极度高估，<20 极度低估）。
 
     values / current 传的是估值偏离（current_gap_pct，越大越便宜），这里按相反方向取分位。
     """
@@ -605,7 +616,7 @@ def _build_valuation_position_fields(values: Iterable[float], current: float) ->
     short_values = primary_values[-VALUATION_POSITION_SHORT_WINDOW:]
 
     def build_position(sample: List[float]) -> tuple[Optional[float], str]:
-        if len(sample) < VALUATION_POSITION_MIN_SAMPLES:
+        if current is None or len(sample) < VALUATION_POSITION_MIN_SAMPLES:
             return None, "样本不足"
         # 估值系数 = 1 − 偏离/100，与 −偏离 同序
         position_pct = _percentile_rank([-value for value in sample], -float(current))
