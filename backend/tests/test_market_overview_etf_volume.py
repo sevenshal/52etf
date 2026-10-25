@@ -27,6 +27,8 @@ def test_national_team_etf_volume_aggregates_same_index_before_ratio():
         "159915.SZ": _metric(140, 100),
         "159952.SZ": _metric(140, 100),
         "510880.SH": _metric(140, 100),
+        "515080.SH": _metric(140, 100),
+        "515180.SH": _metric(140, 100),
     }
 
     result = build_national_team_etf_volume_compare(
@@ -53,6 +55,8 @@ def test_national_team_etf_volume_requires_all_groups_ready_and_above_threshold(
         "159915.SZ": _metric(141, 100),
         "159952.SZ": _metric(141, 100),
         "510880.SH": _metric(141, 100),
+        "515080.SH": _metric(141, 100),
+        "515180.SH": _metric(141, 100),
     }
 
     assert build_national_team_etf_volume_compare(metrics, groups=NATIONAL_TEAM_ETF_GROUPS)["triggered"] is True
@@ -74,6 +78,8 @@ def test_national_team_alert_checks_combined_group_ratio_not_every_etf_ratio():
         "159915.SZ": _metric(150, 100),
         "159952.SZ": _metric(150, 100),
         "510880.SH": _metric(150, 100),
+        "515080.SH": _metric(150, 100),
+        "515180.SH": _metric(150, 100),
     }
 
     result = build_national_team_etf_volume_compare(metrics, groups=NATIONAL_TEAM_ETF_GROUPS)
@@ -87,7 +93,7 @@ def test_universe_is_the_5_day_average_net_asset_screened_passive_etfs():
         ("沪深300ETF", ("510300.SH", "510310.SH", "510330.SH", "159919.SZ")),
         ("科创50ETF", ("588000.SH", "588080.SH")),
         ("创业板ETF", ("159915.SZ", "159952.SZ")),
-        ("红利ETF", ("510880.SH",)),
+        ("红利ETF", ("510880.SH", "515080.SH", "515180.SH")),
     )
 
 
