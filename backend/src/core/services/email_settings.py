@@ -111,6 +111,12 @@ EMAIL_SCENARIOS = [
         "category": "提醒",
         "description": "自算贪恐日更完成后，指数触发顶或底信号时发送提醒。",
     },
+    {
+        "key": "market_etf_volume_bottom_alert",
+        "name": "宽基ETF同步放量抄底提醒",
+        "category": "提醒",
+        "description": "上证50、沪深300、科创50、创业板和红利ETF均较20日同刻累计均量放大1.4倍时发送提醒。",
+    },
 ]
 
 EMAIL_SCENARIO_BY_KEY = {item["key"]: item for item in EMAIL_SCENARIOS}

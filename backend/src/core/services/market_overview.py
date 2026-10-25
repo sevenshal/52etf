@@ -19,7 +19,12 @@ import pandas as pd
 
 from .duckdb_analytics import connect_analytics_db, safe_float
 from .market_volume import SH_TS_CODE, SZ_TS_CODE, YI, fetch_intraday_volume_compare
+from .national_team_etf_volume import get_national_team_etf_groups, get_national_team_etf_symbols
+from ..read_only_mode import is_read_only
+from .szdt_etf_volume import get_a_share_etf_volume_metrics
 from .tushare import TushareService
+from ..database import MarketEtfVolumeAlertNotification, Session
+from ..utils import send_configured_email
 
 
 logger = logging.getLogger(__name__)
@@ -52,8 +57,12 @@ INDEX_CACHE_TTL_SECONDS = 30
 DIST_SNAPSHOT_CACHE_TTL_SECONDS = 300
 DIST_REALTIME_CACHE_TTL_SECONDS = 60
 DAILY_CACHE_TTL_SECONDS = 60
+ETF_VOLUME_CACHE_TTL_SECONDS = 30
 # index_daily 的 amount 单位是千元
 INDEX_DAILY_AMOUNT_TO_YI = 1e3 / YI
+
+ETF_VOLUME_ALERT_RATIO = 1.4
+ETF_VOLUME_ALERT_SCENARIO = "market_etf_volume_bottom_alert"
 
 _cache: Dict[str, Tuple[float, Any]] = {}
 
@@ -432,3 +441,97 @@ def _load_daily_amount(days: int, today: Optional[date] = None) -> Dict[str, Any
 def fetch_daily_amount(days: int = 120) -> Dict[str, Any]:
     normalized = max(20, min(int(days or 120), DAILY_AMOUNT_MAX_DAYS))
     return _cached(f"daily_amount:{normalized}", DAILY_CACHE_TTL_SECONDS, lambda: _load_daily_amount(normalized))
+
+
+def build_national_team_etf_volume_compare(
+    metrics: Dict[str, Dict[str, Any]],
+    trade_date: Optional[date] = None,
+    groups: Optional[Tuple[Tuple[str, Tuple[str, ...]], ...]] = None,
+) -> Dict[str, Any]:
+    """把同指数 ETF 的当前累计量和同刻20日基准分别加总后再计算量比。"""
+    group_definitions = groups or get_national_team_etf_groups()
+    group_results: List[Dict[str, Any]] = []
+    all_ready = True
+    for name, symbols in group_definitions:
+        rows = [metrics.get(symbol, {}) for symbol in symbols]
+        volumes = [safe_float(row.get("volume")) for row in rows]
+        baselines = [safe_float(row.get("volume_baseline_20d")) for row in rows]
+        ready = all(value is not None and value >= 0 for value in [*volumes, *baselines]) and all(value > 0 for value in baselines)
+        current = sum(volumes) if ready else None
+        baseline = sum(baselines) if ready else None
+        ratio = round(current / baseline, 3) if baseline else None
+        group = {
+            "name": name,
+            "symbols": list(symbols),
+            "current_volume": current,
+            "baseline_volume": baseline,
+            "volume_ratio": ratio,
+            "volume_ratio_mode": rows[0].get("volume_ratio_mode") if rows else None,
+            "ready": ready,
+        }
+        group_results.append(group)
+        all_ready = all_ready and ready
+
+    # 触发单位是五个指数分组。组内 ETF 允许有涨有跌，只要其合并累计量比达标即可；
+    # 不能误写成“每一只 ETF 都超过阈值”。
+    triggered = bool(all_ready and all((item["volume_ratio"] or 0) > ETF_VOLUME_ALERT_RATIO for item in group_results))
+    return {
+        "trade_date": (trade_date or date.today()).isoformat(),
+        "baseline_days": 20,
+        "threshold": ETF_VOLUME_ALERT_RATIO,
+        "groups": group_results,
+        "all_ready": all_ready,
+        "triggered": triggered,
+    }
+
+
+def _reserve_etf_volume_alert(alert_date: date) -> bool:
+    """同一自然日只保留一次提醒资格，供邮件和浏览器通知共同使用。"""
+    if is_read_only():
+        logger.warning("只读模式：跳过宽基 ETF 同步放量邮件提醒")
+        return False
+    db = Session()
+    try:
+        if db.get(MarketEtfVolumeAlertNotification, alert_date):
+            return False
+        db.add(MarketEtfVolumeAlertNotification(alert_date=alert_date))
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        logger.exception("登记宽基 ETF 放量提醒失败")
+        return False
+    finally:
+        Session.remove()
+
+
+def _send_etf_volume_alert(data: Dict[str, Any]) -> None:
+    ratios = "\n".join(
+        f"- {item['name']}：{item['volume_ratio']:.2f} 倍（累计 {item['current_volume']:.0f} 股，20日同刻均量 {item['baseline_volume']:.0f} 股）"
+        for item in data["groups"]
+    )
+    send_configured_email(
+        ETF_VOLUME_ALERT_SCENARIO,
+        f"[52etf] 宽基ETF同步放量抄底提醒 {data['trade_date']}",
+        "以下国家队常用宽基 ETF 均已超过过去20日同刻累计均量的 1.4 倍，关注抄底机会：\n\n" + ratios,
+    )
+
+
+def _load_national_team_etf_volume_compare() -> Dict[str, Any]:
+    groups = get_national_team_etf_groups()
+    data = build_national_team_etf_volume_compare(
+        get_a_share_etf_volume_metrics(get_national_team_etf_symbols()),
+        groups=groups,
+    )
+    if data["triggered"] and _reserve_etf_volume_alert(date.fromisoformat(data["trade_date"])):
+        _send_etf_volume_alert(data)
+    return data
+
+
+def fetch_national_team_etf_volume_compare() -> Dict[str, Any]:
+    """国家队宽基 ETF 聚合累计量比及每日一次同步放量提醒。"""
+    return _cached(
+        "national_team_etf_volume_compare",
+        ETF_VOLUME_CACHE_TTL_SECONDS,
+        _load_national_team_etf_volume_compare,
+    )

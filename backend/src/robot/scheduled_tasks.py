@@ -843,6 +843,7 @@ def _run_market_alert_scan(
     _legacy 吞掉已下线的参数（strong_volume_ratio：强势改成「累计量 ≥ 前 8 日最大量」后不再需要）。
     """
     from ..core.services.market_alerts import AlertThresholds, run_alert_scan
+    from ..core.services.market_overview import fetch_national_team_etf_volume_compare
 
     thresholds = AlertThresholds(
         min_amount_yuan=float(min_amount_yi) * 1e8,
@@ -851,8 +852,14 @@ def _run_market_alert_scan(
     result = run_alert_scan(thresholds=thresholds)
     if result.get("skipped"):
         return f"跳过：{result['skipped']}"
+    try:
+        etf_volume = fetch_national_team_etf_volume_compare()
+        etf_volume_suffix = " · 宽基ETF同步放量" if etf_volume.get("triggered") else ""
+    except Exception as exc:  # noqa: BLE001  宽基提醒失败不影响提示看板主扫描
+        logger.warning("宽基 ETF 同步放量检查失败: %s", exc)
+        etf_volume_suffix = " · 宽基ETF量能检查失败"
     return (f"{result.get('minute')} 扫描 {result.get('scanned')} 只 · "
-            f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}")
+            f"命中 {result.get('hits')} · 新记录 {result.get('recorded')}{etf_volume_suffix}")
 
 
 def _run_market_alert_replay(

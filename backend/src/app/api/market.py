@@ -29,6 +29,7 @@ from ...core.services.market_overview import (
     fetch_breadth_distribution,
     fetch_daily_amount,
     fetch_index_overview,
+    fetch_national_team_etf_volume_compare,
 )
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
 from ...core.services.a_stock_margin_dashboard import MarginDashboardDataError, fetch_margin_dashboard
@@ -106,6 +107,15 @@ async def get_daily_amount(
         return await run_in_threadpool(fetch_daily_amount, days)
     except MarketOverviewDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/national-team-etf-volume")
+async def get_national_team_etf_volume(account_id: str = Depends(valid_market_viewer)):
+    """国家队常用宽基 ETF 的合并累计成交量与20日同刻基准对比。"""
+    try:
+        return await run_in_threadpool(fetch_national_team_etf_volume_compare)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"加载宽基ETF累计成交量失败: {exc}") from exc
 
 
 @router.get("/alerts")

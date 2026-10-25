@@ -13,6 +13,11 @@ const formatErrorMessage = (error, fallback) => {
 };
 
 const fmtYi = value => (value === null || value === undefined ? '-' : `${Number(value).toFixed(1)}亿`);
+const fmtVolume = value => {
+  if (value === null || value === undefined) return '-';
+  const number = Number(value);
+  return number >= 1e8 ? `${(number / 1e8).toFixed(2)}亿股` : `${(number / 1e4).toFixed(0)}万股`;
+};
 const fmtPct = (value, digits = 2) => (value === null || value === undefined ? '-' : `${Number(value).toFixed(digits)}%`);
 const signedClass = value => (value > 0 ? 'is-up' : value < 0 ? 'is-down' : '');
 
@@ -510,6 +515,94 @@ const DailyAmountCard = ({ todayAmount }) => {
   );
 };
 
+/* ---------- 国家队宽基 ETF 同步量能 ---------- */
+const ETF_VOLUME_BROWSER_NOTICE_KEY = 'market-national-team-etf-volume-notice-date';
+
+const NationalTeamEtfVolumeCard = () => {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [notificationPermission, setNotificationPermission] = useState(() => (
+    typeof window !== 'undefined' && 'Notification' in window ? window.Notification.permission : 'unsupported'
+  ));
+
+  const load = useCallback(() => {
+    request.get('/api/market/national-team-etf-volume')
+      .then(response => { setData(response.data); setError(''); })
+      .catch(err => setError(formatErrorMessage(err, '加载宽基ETF累计成交量失败')));
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  useEffect(() => {
+    if (!data?.triggered || notificationPermission !== 'granted' || typeof window === 'undefined') return;
+    // 浏览器本地按交易日去重；不同设备各自提醒一次，邮件则由服务端统一去重。
+    if (window.localStorage.getItem(ETF_VOLUME_BROWSER_NOTICE_KEY) === data.trade_date) return;
+    const summary = data.groups.map(item => `${item.name} ${Number(item.volume_ratio).toFixed(2)}倍`).join('；');
+    new window.Notification('宽基ETF同步放量：关注抄底机会', {
+      body: `全部超过 ${data.threshold} 倍同刻均量。${summary}`,
+      tag: `national-team-etf-volume-${data.trade_date}`,
+    });
+    window.localStorage.setItem(ETF_VOLUME_BROWSER_NOTICE_KEY, data.trade_date);
+  }, [data, notificationPermission]);
+
+  const enableBrowserNotice = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    const permission = await window.Notification.requestPermission();
+    setNotificationPermission(permission);
+  };
+
+  return (
+    <Card
+      size="small"
+      className="market-etf-volume-card"
+      title="国家队宽基ETF累计成交对比"
+      extra={(
+        <Space size={8} wrap>
+          <Text type="secondary">累计成交量 ÷ 过去 {data?.baseline_days || 20} 日同刻累计均量</Text>
+          {notificationPermission === 'granted' ? <Tag color="success">浏览器告警已开启</Tag> : (
+            <Button size="small" onClick={enableBrowserNotice} disabled={notificationPermission === 'denied'}>
+              {notificationPermission === 'denied' ? '浏览器通知已被拒绝' : '开启浏览器告警'}
+            </Button>
+          )}
+        </Space>
+      )}
+    >
+      {error && <Alert type="warning" showIcon message={error} />}
+      {data?.triggered && (
+        <Alert
+          className="market-alert"
+          type="error"
+          showIcon
+          message={`全部宽基ETF同步放量超过 ${data.threshold} 倍：关注抄底机会（邮件提醒每天最多一次）`}
+        />
+      )}
+      {data ? (
+        <Row gutter={[10, 10]}>
+          {data.groups.map(item => (
+            <Col xs={24} sm={12} xl={data.groups.length === 5 ? 4 : 6} key={item.name}>
+              <div className="market-etf-volume-card__item">
+                <Space size={6}>
+                  <Text strong>{item.name}</Text>
+                  <Tag color={item.volume_ratio > data.threshold ? 'red' : 'default'}>
+                    {item.volume_ratio === null ? '基准不足' : `${item.volume_ratio.toFixed(2)}倍`}
+                  </Tag>
+                </Space>
+                <div className="market-etf-volume-card__value">{fmtVolume(item.current_volume)}</div>
+                <Text type="secondary">20日同刻 {fmtVolume(item.baseline_volume)}</Text>
+                {item.symbols.length > 1 && <Text className="market-etf-volume-card__symbols" type="secondary">合并 {item.symbols.join(' + ')}</Text>}
+              </div>
+            </Col>
+          ))}
+        </Row>
+      ) : !error && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+    </Card>
+  );
+};
+
 const MarketOverview = () => {
   const [amountData, setAmountData] = useState(null);
   const handleVolumeData = useCallback(data => setAmountData(data), []);
@@ -520,6 +613,7 @@ const MarketOverview = () => {
       <IndexStrip amountData={amountData} />
       <VolumeCompare onData={handleVolumeData} />
       <Row gutter={[12, 12]} className="market-overview__lower">
+        <Col span={24}><NationalTeamEtfVolumeCard /></Col>
         <Col xs={24} xl={12}><DistributionCard /></Col>
         <Col xs={24} xl={12}><DailyAmountCard todayAmount={todayAmount} /></Col>
       </Row>

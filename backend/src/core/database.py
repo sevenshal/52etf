@@ -418,6 +418,15 @@ class ETFFearGreedSignalNotification(Base):
     sent_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
 
+
+class MarketEtfVolumeAlertNotification(Base):
+    """宽基 ETF 同步放量提醒的每日去重记录。"""
+    __tablename__ = "market_etf_volume_alert_notifications"
+
+    alert_date = Column(Date, primary_key=True)
+    notified_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class ETFFearGreedCloneHolding(Base):
     """ETF恐贪复刻指数使用的每日持仓快照"""
     __tablename__ = 'etf_fear_greed_clone_holdings'

@@ -169,6 +169,28 @@
   margin-top: 12px;
 }
 
+.market-etf-volume-card__item {
+  min-height: 88px;
+  padding: 9px 10px;
+  border: 1px solid #edf0f5;
+  border-radius: 6px;
+  background: #fafcff;
+}
+
+.market-etf-volume-card__value {
+  margin-top: 5px;
+  color: #172033;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.market-etf-volume-card__symbols {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  word-break: break-all;
+}
+
 .market-alerts__stats {
   margin-bottom: 12px;
 }

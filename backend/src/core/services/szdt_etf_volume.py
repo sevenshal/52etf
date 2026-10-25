@@ -13,6 +13,7 @@ import pandas as pd
 from .chan_minute_data import upsert_minute_frame
 from .duckdb_analytics import connect_analytics_db
 from .market_alerts import get_persisted_etf_intraday_volume_baseline
+from .national_team_etf_volume import get_national_team_etf_symbols
 from .tushare import TushareService
 
 
@@ -162,7 +163,12 @@ def sync_registered_etf_minutes() -> Dict[str, Any]:
         ).fetchall()
     finally:
         connection.close()
-    symbols = [str(row[0]).upper() for row in rows]
+    # 除已有分钟缓存外，国家队宽基监测的 ETF 也需要被主动注册；否则新标的要等用户
+    # 先打开页面才异步补历史，09:15 的盘前量比基准会漏掉它。
+    symbols = list(dict.fromkeys([
+        *(str(row[0]).upper() for row in rows),
+        *get_national_team_etf_symbols(),
+    ]))
     return _sync_symbols(_missing_history_symbols(symbols, datetime.now().date()))
 
 
