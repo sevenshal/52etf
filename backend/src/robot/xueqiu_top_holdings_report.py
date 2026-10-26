@@ -4882,6 +4882,58 @@ async def fetch_stock_metadata_map(
     return result
 
 
+def load_cached_stock_metadata_map(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Load stable stock IDs from previously saved Xueqiu holdings snapshots.
+
+    ``stock_id`` is an instrument identifier, not a quote-time value.  Reusing a
+    verified ID from a prior snapshot avoids making one rate-limited search
+    request per holding during a rebalance.  The live search remains the
+    fallback for symbols that have never appeared in a saved snapshot.
+    """
+    raw_symbols = sorted({
+        raw_symbol
+        for symbol in symbols
+        if (raw_symbol := to_raw_xueqiu_symbol(symbol))
+    })
+    if not raw_symbols:
+        return {}
+
+    connection = None
+    try:
+        connection = connect_duckdb(ANALYTICS_DB_PATH, prefer_read_only=True)
+        if not _duckdb_table_exists(connection, XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE):
+            return {}
+        placeholders = ", ".join("?" for _ in raw_symbols)
+        rows = connection.execute(
+            f"""
+            SELECT raw_stock_symbol, stock_id, stock_name, segment_name
+            FROM {_quote_duckdb_identifier(XUEQIU_CUBE_HOLDINGS_SNAPSHOT_TABLE)}
+            WHERE raw_stock_symbol IN ({placeholders})
+              AND stock_id > 0
+            ORDER BY snapshot_at DESC, updated_at DESC
+            """,
+            raw_symbols,
+        ).fetchall()
+        result: Dict[str, Dict[str, Any]] = {}
+        for raw_symbol, stock_id, stock_name, segment_name in rows:
+            normalized = to_raw_xueqiu_symbol(raw_symbol)
+            if normalized and normalized not in result:
+                result[normalized] = {
+                    "stock_id": safe_int(stock_id),
+                    "stock_name": str(stock_name or ""),
+                    "segment_name": str(segment_name or ""),
+                }
+        return result
+    except Exception as exc:  # noqa: BLE001
+        # Snapshot caching is an availability optimization.  A missing or locked
+        # analytics DB must not prevent the guarded live lookup from running.
+        logger.warning("Failed to load cached Xueqiu stock metadata: %s", exc)
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 async def resolve_target_cube_id(
     *,
     cookie: str,
@@ -4933,7 +4985,25 @@ async def build_rebalance_payload(
     rebalance_items = rounded_rebalance_weights(top_items)
     symbols = [item["stock_symbol"] for item in rebalance_items]
     quotes = await fetch_batch_quotes(cookie=cookie, symbols=symbols, timeout=timeout)
-    metadata_map = await fetch_stock_metadata_map(cookie=cookie, symbols=symbols, timeout=timeout)
+    # Search is aggressively throttled by Xueqiu (HTTP 200 / code 400016).
+    # Prefer stock IDs already observed in our frozen holdings snapshots, then
+    # use the search endpoint only for genuinely unseen symbols.
+    metadata_map = load_cached_stock_metadata_map(symbols)
+    unresolved_symbols = [
+        symbol for symbol in symbols
+        if not (safe_int((metadata_map.get(to_raw_xueqiu_symbol(symbol)) or {}).get("stock_id")) or 0) > 0
+    ]
+    if unresolved_symbols:
+        fetched_metadata = await fetch_stock_metadata_map(
+            cookie=cookie,
+            symbols=unresolved_symbols,
+            timeout=timeout,
+        )
+        metadata_map.update({
+            raw_symbol: metadata
+            for raw_symbol, metadata in fetched_metadata.items()
+            if (safe_int(metadata.get("stock_id")) or 0) > 0
+        })
 
     holdings: List[Dict[str, Any]] = []
     skipped_items: List[Dict[str, Any]] = []

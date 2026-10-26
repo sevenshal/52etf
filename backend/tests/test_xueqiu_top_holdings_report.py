@@ -41,6 +41,7 @@ from src.robot.xueqiu_top_holdings_report import (
     fetch_stock_metadata,
     fetch_stock_metadata_map,
     latest_manager_rebalance_from_events,
+    load_cached_stock_metadata_map,
     load_cached_cube_activity,
     load_or_refresh_year_top_cubes,
     load_cached_year_top_cubes,
@@ -2918,6 +2919,89 @@ class FetchStockMetadataThrottleTest(TestCase):
 
 
 class BuildRebalancePayloadStockIdGuardTest(TestCase):
+    def test_loads_newest_snapshot_stock_id(self):
+        fd, path = tempfile.mkstemp(suffix=".duckdb")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            connection = duckdb.connect(path)
+            connection.execute(
+                """
+                CREATE TABLE xueqiu_cube_holdings_snapshots (
+                    raw_stock_symbol VARCHAR, stock_id BIGINT, stock_name VARCHAR,
+                    segment_name VARCHAR, snapshot_at TIMESTAMP, updated_at TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO xueqiu_cube_holdings_snapshots VALUES
+                ('SZ000426', 100, '旧名称', '旧行业', '2026-01-01', '2026-01-01'),
+                ('SZ000426', 200, '兴业银锡', '有色金属', '2026-01-02', '2026-01-02')
+                """
+            )
+            connection.close()
+
+            with patch("src.robot.xueqiu_top_holdings_report.ANALYTICS_DB_PATH", path):
+                metadata = load_cached_stock_metadata_map(["SZ.000426"])
+
+            self.assertEqual({
+                "SZ000426": {
+                    "stock_id": 200,
+                    "stock_name": "兴业银锡",
+                    "segment_name": "有色金属",
+                }
+            }, metadata)
+        finally:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def test_uses_snapshot_stock_id_without_rate_limited_search(self):
+        top_items = [{
+            "stock_symbol": "SZ.000426",
+            "stock_name": "兴业银锡",
+            "rebalance_weight_pct": 100.0,
+        }]
+        quotes = {
+            "SZ000426": {
+                "price": 10.0,
+                "name": "兴业银锡",
+                "quote": {"symbol": "SZ000426", "current": 10.0, "type": 11, "status": 1},
+            }
+        }
+        live_lookup = AsyncMock()
+
+        with patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_batch_quotes",
+            new=AsyncMock(return_value=quotes),
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.load_cached_stock_metadata_map",
+            return_value={
+                "SZ000426": {
+                    "stock_id": 1000123,
+                    "stock_name": "兴业银锡",
+                    "segment_name": "有色金属",
+                }
+            },
+        ), patch(
+            "src.robot.xueqiu_top_holdings_report.fetch_stock_metadata_map",
+            new=live_lookup,
+        ):
+            payload = asyncio.run(
+                build_rebalance_payload(
+                    cookie="xq_a_token=test;",
+                    target_cube_symbol="ZH3630096",
+                    target_cube_id=3664154,
+                    top_items=top_items,
+                )
+            )
+
+        live_lookup.assert_not_awaited()
+        self.assertEqual(1000123, payload["holdings"][0]["stock_id"])
+        self.assertEqual("有色金属", payload["holdings"][0]["segment_name"])
+
     def test_raises_when_stock_id_unresolved(self):
         top_items = [
             {
