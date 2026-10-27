@@ -177,6 +177,16 @@ def _optional_float(value) -> Optional[float]:
     return float(value) if value is not None else None
 
 
+def _greed_threshold_for_leg(config: Any, leg: str) -> float:
+    """Return the configured take-profit fear/greed threshold for one rotation leg."""
+    field = "greed_threshold" if leg == "main" else f"{leg}_greed_threshold"
+    value = getattr(config, field, None)
+    if value is None:
+        # 兼容尚未补列的旧配置快照：候补继续沿用原统一阈值。
+        value = getattr(config, "greed_threshold", 70.0)
+    return float(value)
+
+
 def _resolve_fear_score(
     fear_map: Dict[date, float],
     signal_date: date,
@@ -752,6 +762,9 @@ class AStockFearStrategyTrader:
                 if persisted_config:
                     config.buy_threshold = float(persisted_config.buy_threshold)
                     config.greed_threshold = float(persisted_config.greed_threshold)
+                    config.sub_greed_threshold = _greed_threshold_for_leg(persisted_config, "sub")
+                    config.sub2_greed_threshold = _greed_threshold_for_leg(persisted_config, "sub2")
+                    config.sub3_greed_threshold = _greed_threshold_for_leg(persisted_config, "sub3")
                     config.volume_ratio_threshold = float(persisted_config.volume_ratio_threshold)
                     config.volume_z_threshold = (
                         float(persisted_config.volume_z_threshold)
@@ -1056,7 +1069,7 @@ class AStockFearStrategyTrader:
                         day_high = float(row["high"]) if np.isfinite(row["high"]) else None
                         if day_fear is None or day_high is None:
                             continue
-                        if day_fear >= float(config.greed_threshold):
+                        if day_fear >= _greed_threshold_for_leg(config, holding):
                             state.greed_peak_price = max(float(state.greed_peak_price or day_high), day_high)
                         else:
                             state.greed_peak_price = None
@@ -1072,7 +1085,7 @@ class AStockFearStrategyTrader:
                 signal_day_high = float(signal_day_bars.iloc[0]["high"]) if np.isfinite(signal_day_bars.iloc[0]["high"]) else None
             if shares > 0 and holding:
                 holding_fear = float(holding_fear_map.get(signal_date) or 0.0) if holding_fear_map.get(signal_date) is not None else None
-                if holding_fear is not None and holding_fear >= float(config.greed_threshold):
+                if holding_fear is not None and holding_fear >= _greed_threshold_for_leg(config, holding):
                     state.greed_peak_price = max(float(state.greed_peak_price or signal_day_high or current_price), signal_day_high or current_price)
                 else:
                     state.greed_peak_price = None
@@ -1088,7 +1101,7 @@ class AStockFearStrategyTrader:
                 fear_score <= float(config.buy_threshold)
                 and main_vol_ok
             )
-            main_greedy = fear_score >= float(config.greed_threshold)
+            main_greedy = fear_score >= _greed_threshold_for_leg(config, "main")
             sub_vol_ok = False
             if sub_symbol is not None and sub_volume_ratio is not None:
                 if use_log_z:
@@ -1101,7 +1114,7 @@ class AStockFearStrategyTrader:
                 and sub_fear_score <= float(getattr(config, "sub_buy_threshold", 25.0) or 25.0)
                 and sub_vol_ok
             )
-            sub_greedy = sub_symbol is not None and sub_fear_score is not None and sub_fear_score >= float(config.greed_threshold)
+            sub_greedy = sub_symbol is not None and sub_fear_score is not None and sub_fear_score >= _greed_threshold_for_leg(config, "sub")
             # 第二候补信号（三标的轮动）
             sub2_vol_ok = False
             if sub2_symbol is not None and sub2_volume_ratio is not None:
@@ -1115,7 +1128,7 @@ class AStockFearStrategyTrader:
                 and sub2_fear_score <= float(getattr(config, "sub2_buy_threshold", 20.0) or 20.0)
                 and sub2_vol_ok
             )
-            sub2_greedy = sub2_symbol is not None and sub2_fear_score is not None and sub2_fear_score >= float(config.greed_threshold)
+            sub2_greedy = sub2_symbol is not None and sub2_fear_score is not None and sub2_fear_score >= _greed_threshold_for_leg(config, "sub2")
             # 第三候补信号（四标的轮动）
             sub3_vol_ok = False
             if sub3_symbol is not None and sub3_volume_ratio is not None:
@@ -1129,7 +1142,7 @@ class AStockFearStrategyTrader:
                 and sub3_fear_score <= float(getattr(config, "sub3_buy_threshold", 20.0) or 20.0)
                 and sub3_vol_ok
             )
-            sub3_greedy = sub3_symbol is not None and sub3_fear_score is not None and sub3_fear_score >= float(config.greed_threshold)
+            sub3_greedy = sub3_symbol is not None and sub3_fear_score is not None and sub3_fear_score >= _greed_threshold_for_leg(config, "sub3")
             # 估值点位闸门：买入需足够低估；卖出需足够高估（贪恐达到兜底阈值不看估值）
             raw_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal, "sub3": sub3_signal}
             raw_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy, "sub3": sub3_greedy}

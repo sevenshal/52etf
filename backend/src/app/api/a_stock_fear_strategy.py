@@ -93,7 +93,11 @@ class AStockFearStrategyConfigPayload(BaseModel):
     live_sub_account_id: Optional[int] = None
     run_time: str = "09:30"
     buy_threshold: float = 30.0
+    # 主标的（红利ETF）沿用 greed_threshold；候补分别配置止盈阈值。
     greed_threshold: float = 70.0
+    sub_greed_threshold: float = 80.0
+    sub2_greed_threshold: float = 80.0
+    sub3_greed_threshold: float = 75.0
     volume_ratio_threshold: float = 1.3
     volume_z_threshold: Optional[float] = 1.25
     sell_shrink_z: float = -1.0
@@ -318,7 +322,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
             raise ValueError("sell_reduction_basis 仅支持 portfolio 或 holdings")
         return value
 
-    @validator("buy_threshold", "greed_threshold")
+    @validator("buy_threshold", "greed_threshold", "sub_greed_threshold", "sub2_greed_threshold", "sub3_greed_threshold")
     def validate_threshold(cls, value):
         if value < 0 or value > 100:
             raise ValueError("恐贪阈值必须在 0 到 100 之间")
@@ -479,6 +483,9 @@ CONFIG_FIELDS = [
     "run_time",
     "buy_threshold",
     "greed_threshold",
+    "sub_greed_threshold",
+    "sub2_greed_threshold",
+    "sub3_greed_threshold",
     "volume_ratio_threshold",
     "volume_z_threshold",
     "sell_shrink_z",
@@ -835,6 +842,9 @@ def get_a_stock_fear_strategy_options(account_id: str = Depends(valid_admin_acco
             "run_time": "09:30",
             "buy_threshold": 30.0,
             "greed_threshold": 70.0,
+            "sub_greed_threshold": 80.0,
+            "sub2_greed_threshold": 80.0,
+            "sub3_greed_threshold": 75.0,
             "volume_ratio_threshold": 1.3,
             "volume_z_threshold": 1.25,
             "sell_shrink_z": -1.0,

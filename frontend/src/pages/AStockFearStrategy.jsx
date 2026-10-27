@@ -6,6 +6,7 @@ import {
   Col,
   DatePicker,
   Descriptions,
+  Divider,
   Form,
   InputNumber,
   Popconfirm,
@@ -65,6 +66,9 @@ const defaultValues = {
   run_time: dayjs('09:30', 'HH:mm'),
   buy_threshold: 35,
   greed_threshold: 70,
+  sub_greed_threshold: 80,
+  sub2_greed_threshold: 80,
+  sub3_greed_threshold: 75,
   volume_ratio_threshold: 1.6,
   // 留空 = 旧量比逻辑（回测最优用的就是量比阈值）
   volume_z_threshold: null,
@@ -121,16 +125,19 @@ const normalizeConfig = (config) => ({
   sub_volume_signal_symbol: config?.sub_volume_signal_symbol ?? undefined,
   sub_buy_threshold: config?.sub_buy_threshold ?? 25,
   sub_volume_ratio_threshold: config?.sub_volume_ratio_threshold ?? 1.6,
+  sub_greed_threshold: config?.sub_greed_threshold ?? 80,
   sub2_symbol: config?.sub2_symbol ?? undefined,
   sub2_fear_source: config?.sub2_fear_source ?? 'qqq_clone',
   sub2_volume_signal_symbol: config?.sub2_volume_signal_symbol ?? undefined,
   sub2_buy_threshold: config?.sub2_buy_threshold ?? 20,
   sub2_volume_ratio_threshold: config?.sub2_volume_ratio_threshold ?? 1.3,
+  sub2_greed_threshold: config?.sub2_greed_threshold ?? 80,
   sub3_symbol: config?.sub3_symbol ?? undefined,
   sub3_fear_source: config?.sub3_fear_source ?? 'a_stock_930851_csi',
   sub3_volume_signal_symbol: config?.sub3_volume_signal_symbol ?? undefined,
   sub3_buy_threshold: config?.sub3_buy_threshold ?? 20,
   sub3_volume_ratio_threshold: config?.sub3_volume_ratio_threshold ?? 1.3,
+  sub3_greed_threshold: config?.sub3_greed_threshold ?? 75,
   sell_ma5_confirm: config?.sell_ma5_confirm ?? 'off',
   swap_threshold: config?.swap_threshold ?? null,
   // 存量配置没有估值闸门（NULL=关闭），不能被默认值覆盖
@@ -406,16 +413,19 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub_volume_signal_symbol: values.sub_volume_signal_symbol || undefined,
     sub_buy_threshold: values.sub_buy_threshold ?? 25,
     sub_volume_ratio_threshold: values.sub_volume_ratio_threshold ?? 1.6,
+    sub_greed_threshold: values.sub_greed_threshold ?? 80,
     sub2_symbol: values.sub2_symbol || undefined,
     sub2_fear_source: values.sub2_fear_source || 'qqq_clone',
     sub2_volume_signal_symbol: values.sub2_volume_signal_symbol || undefined,
     sub2_buy_threshold: values.sub2_buy_threshold ?? 20,
     sub2_volume_ratio_threshold: values.sub2_volume_ratio_threshold ?? 1.3,
+    sub2_greed_threshold: values.sub2_greed_threshold ?? 80,
     sub3_symbol: values.sub3_symbol || undefined,
     sub3_fear_source: values.sub3_fear_source || 'a_stock_930851_csi',
     sub3_volume_signal_symbol: values.sub3_volume_signal_symbol || undefined,
     sub3_buy_threshold: values.sub3_buy_threshold ?? 20,
     sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
+    sub3_greed_threshold: values.sub3_greed_threshold ?? 75,
     sell_ma5_confirm: values.sell_ma5_confirm || 'off',
     swap_threshold: values.swap_threshold ?? null,
     volume_z_threshold: values.volume_z_threshold ?? null,
@@ -452,6 +462,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
           date_range: ['2023-03-22', dayjs().format('YYYY-MM-DD')],
           buy_threshold_values: String(values.buy_threshold ?? defaultValues.buy_threshold),
           greed_threshold_values: String(values.greed_threshold ?? defaultValues.greed_threshold),
+          sub_greed_threshold_values: String(values.sub_greed_threshold ?? defaultValues.sub_greed_threshold),
+          sub2_greed_threshold_values: String(values.sub2_greed_threshold ?? defaultValues.sub2_greed_threshold),
+          sub3_greed_threshold_values: String(values.sub3_greed_threshold ?? defaultValues.sub3_greed_threshold),
           volume_ratio_threshold_values: String(values.volume_ratio_threshold ?? defaultValues.volume_ratio_threshold),
           volume_ratio_consecutive_days_values: '1',
           buy_position_pct_values: String(values.buy_position_pct ?? defaultValues.buy_position_pct),
@@ -706,7 +719,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
       render: (value, record) => value || `${record.external_trading_account_id || '-'} / 子账户: ${record.live_sub_account_id || '-'}`,
     },
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
-    { title: '贪恐卖出阈值', dataIndex: 'greed_threshold', width: 110 },
+    { title: '止盈区阈值', width: 180, render: (_, record) => `红利 ${record.greed_threshold} / 科创 ${record.sub_greed_threshold} / 纳指 ${record.sub2_greed_threshold} / 云 ${record.sub3_greed_threshold}` },
     { title: '量比阈值', dataIndex: 'volume_ratio_threshold', width: 90 },
     {
       title: '移动止盈%',
@@ -898,6 +911,23 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             )}
                           </Card>
                         </Col>
+                        <Col span={24}><Divider orientation="left">通用执行与风控</Divider></Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="run_time" label="每日触发时间(Shanghai)" rules={[{ required: true, message: '请选择触发时间' }]}>
+                            <TimePicker format="HH:mm" minuteStep={5} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={6}>
+                          <Form.Item name="external_trading_account_id" label="外部交易账户(A股)" rules={[{ required: true, message: '请选择 A 股外部交易账户' }]}>
+                            <Select options={externalAccountOptions} placeholder="仅显示 A 股账户" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={6}>
+                          <Form.Item name="live_sub_account_id" label="虚拟子账户" rules={[{ required: true, message: '请选择虚拟子账户' }]}>
+                            <Select options={liveSubAccountOptions} placeholder="选择空闲或已绑定本策略的子账户" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={24}><Divider orientation="left">主标的（红利ETF）</Divider></Col>
                         <Col xs={24} md={8}>
                           <Form.Item name="preset_pair" label="A股指数ETF预设组合">
                             <Select
@@ -916,34 +946,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="volume_signal_symbol" label="量比来源标的">
-                            <Select
-                              allowClear
-                              showSearch
-                              optionFilterProp="label"
-                              placeholder="默认使用标的自身"
-                              options={targetOptions}
-                            />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={4}>
                           <Form.Item name="fear_source" label="恐贪来源" rules={[{ required: true, message: '请选择恐贪来源' }]}>
                             <Select showSearch optionFilterProp="label" options={fearSourceOptions} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="run_time" label="每日触发时间(Shanghai)" rules={[{ required: true, message: '请选择触发时间' }]}>
-                            <TimePicker format="HH:mm" minuteStep={5} style={{ width: '100%' }} />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={6}>
-                          <Form.Item name="external_trading_account_id" label="外部交易账户(A股)" rules={[{ required: true, message: '请选择 A 股外部交易账户' }]}>
-                            <Select options={externalAccountOptions} placeholder="仅显示 A 股账户" />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={6}>
-                          <Form.Item name="live_sub_account_id" label="虚拟子账户" rules={[{ required: true, message: '请选择虚拟子账户' }]}>
-                            <Select options={liveSubAccountOptions} placeholder="选择空闲或已绑定本策略的子账户" />
+                          <Form.Item name="volume_signal_symbol" label="量比来源标的">
+                            <Select allowClear showSearch optionFilterProp="label" placeholder="默认使用标的自身" options={targetOptions} />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
@@ -952,15 +961,16 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
-                          <Form.Item name="greed_threshold" label="贪恐卖出阈值(>=)">
-                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={4}>
                           <Form.Item name="volume_ratio_threshold" label="买入量比阈值(>=)">
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="greed_threshold" label="红利ETF止盈区贪恐阈值(>=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col span={24}><Divider orientation="left">通用信号、仓位与退出规则</Divider></Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="volume_z_threshold" label="放量标准差(log-z)" tooltip="统一 log(成交量) 放量阈值：log(vol) 相对前20日均值放大该标准差即放量（如 1.25）；留空=用旧量比阈值（回测最优）">
                             <InputNumber min={0} max={5} step={0.05} style={{ width: '100%' }} placeholder="留空=旧量比" />
@@ -1016,12 +1026,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             <InputNumber min={0} max={100} step={0.5} style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
+                        <Col span={24}><Divider orientation="left">候选标的 1：科创50（可选）</Divider></Col>
                         <Col xs={24} md={24}>
                           <Alert
                             type="info"
                             showIcon
                             style={{ marginBottom: 12 }}
-                            message="跷跷板候补 / 对称双轮动（可选）"
+                            message="候选标的 1：科创50（可选）"
                             description="留空候补标的 = 单标的模式。填写候补标的：若「换仓阈值」留空 = 主辅跷跷板（主标的优先，空仓时才买候补，主标的出信号换回）；若填了换仓阈值 = 对称双轮动（任一标的极恐放量都买、都触发买更恐慌的；持有 X 时若 X 恐贪超过换仓阈值且另一标的有买入信号则换仓；恐贪≥贪恐卖出阈值则卖出）。"
                           />
                         </Col>
@@ -1046,6 +1057,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
+                          <Form.Item name="sub_greed_threshold" label="科创50止盈区贪恐阈值(>=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
                           <Form.Item name="sub_volume_ratio_threshold" label="候补量比阈值(>=)"
                             tooltip={logZVolumeEnabled ? '已启用统一放量标准差(log-z)，候补放量统一用该标准差，此阈值被忽略' : '候补放量量比阈值'}
                           >
@@ -1057,12 +1073,13 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             <InputNumber min={0} max={100} step={1} placeholder="留空关闭" style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
+                        <Col span={24}><Divider orientation="left">候选标的 2：纳指科技（可选）</Divider></Col>
                         <Col xs={24} md={24}>
                           <Alert
                             type="info"
                             showIcon
                             style={{ marginBottom: 12 }}
-                            message="第二候补（三标的轮动，可选）"
+                            message="候选标的 2 配置说明"
                             description="再填一个候补可做三标的对称轮动（需换仓阈值非空）：空仓时任一标的极恐放量都买（都触发买恐贪最低的）；持有 X 时 X 恐贪超过换仓阈值且任一其他标的有信号则换仓。例如纳指ETF 159941.SZ 配 QQQ 自算贪恐（美股恐贪上海凌晨已算出）。"
                           />
                         </Col>
@@ -1087,18 +1104,24 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
+                          <Form.Item name="sub2_greed_threshold" label="纳指科技止盈区贪恐阈值(>=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
                           <Form.Item name="sub2_volume_ratio_threshold" label="第二候补量比阈值(>=)"
                             tooltip={logZVolumeEnabled ? '已启用统一放量标准差(log-z)，第二候补放量统一用该标准差，此阈值被忽略' : '第二候补放量量比阈值'}
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
                         </Col>
+                        <Col span={24}><Divider orientation="left">候选标的 3：云计算（可选）</Divider></Col>
                         <Col xs={24} md={24}>
                           <Alert
                             type="info"
                             showIcon
                             style={{ marginBottom: 12 }}
-                            message="第三候补（四标的轮动，可选）"
+                            message="候选标的 3 配置说明"
                             description="再填一个候补即四标的轮动，规则与第二候补一致。默认给的是云计算ETF 516510.SH 配云计算指数贪恐。注意：回测里云计算在 2023-03 至今只触发过 1 次买入信号（2024-02），分段验证显示它在 2025 年之后没有贡献，加进来主要是多一个观察腿。"
                           />
                         </Col>
@@ -1119,6 +1142,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
                         </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="sub3_buy_threshold" label="第三候补恐慌阈值(<=)">
+                            <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={4}>
+                          <Form.Item name="sub3_greed_threshold" label="云计算止盈区贪恐阈值(>=)">
                             <InputNumber min={0} max={100} step={1} style={{ width: '100%' }} />
                           </Form.Item>
                         </Col>
@@ -1266,6 +1294,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                 <Descriptions.Item label="信号日">前一交易日恐贪 + 量比，触发时开盘成交</Descriptions.Item>
                 <Descriptions.Item label="移动止盈">
                   {Number(selectedConfig.trailing_stop_pct) === 0 ? '0 = 到达贪恐阈值即卖' : `${selectedConfig.trailing_stop_pct}% 回撤触发`}
+                </Descriptions.Item>
+                <Descriptions.Item label="各标的止盈区阈值">
+                  红利 {selectedConfig.greed_threshold} / 科创50 {selectedConfig.sub_greed_threshold} / 纳指科技 {selectedConfig.sub2_greed_threshold} / 云计算 {selectedConfig.sub3_greed_threshold}
                 </Descriptions.Item>
                 <Descriptions.Item label="估值闸门">{formatValuationGate(selectedConfig)}</Descriptions.Item>
                 {selectedConfig.sub_symbol && (

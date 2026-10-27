@@ -155,6 +155,10 @@ TARGET_OPTIONS = [*US_TARGET_OPTIONS, *A_STOCK_TARGET_OPTIONS]
 class SOXLFearStrategyParams(BaseModel):
     buy_threshold: float = 40.0
     greed_threshold: float = 41.0
+    # A 股多标的轮动可为每条候补腿独立设置止盈区贪恐阈值；SOXL 单标的忽略这些字段。
+    sub_greed_threshold: float = 70.0
+    sub2_greed_threshold: float = 70.0
+    sub3_greed_threshold: float = 70.0
     volume_ratio_threshold: float = 1.38
     volume_ratio_consecutive_days: int = 1
     # 统一对数放量阈值（log-z）：None=用旧 volume_ratio_threshold；有值=log(vol) 相对前20日均值放大该标准差视为放量
@@ -399,7 +403,7 @@ class SOXLFearStrategyParams(BaseModel):
             raise ValueError("冷却天数不能小于 0")
         return value
 
-    @validator("buy_threshold", "greed_threshold")
+    @validator("buy_threshold", "greed_threshold", "sub_greed_threshold", "sub2_greed_threshold", "sub3_greed_threshold")
     def validate_threshold(cls, value):
         if value < 0 or value > 100:
             raise ValueError("阈值必须在 0 到 100 之间")
@@ -474,7 +478,10 @@ class SOXLFearSearchParams(BaseModel):
         return value
 
     buy_threshold_values: List[float] = Field(default_factory=lambda: [35.0, 40.0, 45.0])
-    greed_threshold_values: List[float] = Field(default_factory=lambda: [40.0, 41.0, 42.0])
+    greed_threshold_values: List[float] = Field(default_factory=lambda: [70.0])
+    sub_greed_threshold_values: List[float] = Field(default_factory=lambda: [80.0])
+    sub2_greed_threshold_values: List[float] = Field(default_factory=lambda: [80.0])
+    sub3_greed_threshold_values: List[float] = Field(default_factory=lambda: [75.0])
     volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3, 1.38, 1.45])
     volume_ratio_consecutive_days_values: List[int] = Field(default_factory=lambda: [1])
     buy_position_pct_values: List[float] = Field(default_factory=lambda: [50.0, 60.0, 70.0])
@@ -537,6 +544,13 @@ class SOXLFearSearchParams(BaseModel):
         normalized = list(dict.fromkeys(value or []))
         if not normalized:
             raise ValueError("第三候补阈值候选至少一个值")
+        return normalized
+
+    @validator("greed_threshold_values", "sub_greed_threshold_values", "sub2_greed_threshold_values", "sub3_greed_threshold_values")
+    def validate_greed_threshold_values(cls, value):
+        normalized = list(dict.fromkeys(value or []))
+        if not normalized or any(item < 0 or item > 100 for item in normalized):
+            raise ValueError("止盈区贪恐阈值候选必须在 0 到 100 之间")
         return normalized
 
     @validator("sub3_volume_ratio_threshold_values")
@@ -2770,7 +2784,7 @@ def _run_seesaw_backtest(
             np.isfinite(sub_fear) and sub_fear <= float(params.sub_buy_threshold)
             and sub_vol_ok
         )
-        sub_greedy = np.isfinite(sub_fear) and sub_fear >= float(params.greed_threshold)
+        sub_greedy = np.isfinite(sub_fear) and sub_fear >= float(params.sub_greed_threshold)
         if sub_info and params.buy_turn_signal_mode != "legacy":
             sub_signal = _turn_signal_matches(params.buy_turn_signal_mode, sub_info["volume_bottom"], sub_info["ma5_bottom"])
         if sub_info and params.sell_turn_signal_mode != "legacy":
@@ -2800,7 +2814,14 @@ def _run_seesaw_backtest(
             "sub": {"fear": sub_fear, "vr": sub_vr, "symbol": sub_symbol, "label": sub_fear_label,
                     "signal": sub_signal, "greedy": sub_greedy, "valuation": sub_valuation},
         }
-        def _candidate_signal(holder, holder_symbol: str, label: str, buy_threshold: float, vr_threshold: float) -> Dict:
+        def _candidate_signal(
+            holder,
+            holder_symbol: str,
+            label: str,
+            buy_threshold: float,
+            vr_threshold: float,
+            greed_threshold: float,
+        ) -> Dict:
             """候补标的（sub2/sub3）的当日信号，与主/候补一腿同口径。"""
             info = holder["by_date"].get(day_text) if holder is not None else None
             fear = float(info["fear"]) if info else np.nan
@@ -2811,7 +2832,7 @@ def _run_seesaw_backtest(
             else:
                 vol_ok = np.isfinite(vr) and vr >= float(vr_threshold)
             signal = np.isfinite(fear) and fear <= float(buy_threshold) and vol_ok
-            greedy = np.isfinite(fear) and fear >= float(params.greed_threshold)
+            greedy = np.isfinite(fear) and fear >= float(greed_threshold)
             if info and params.buy_turn_signal_mode != "legacy":
                 signal = _turn_signal_matches(params.buy_turn_signal_mode, info["volume_bottom"], info["ma5_bottom"])
             if info and params.sell_turn_signal_mode != "legacy":
@@ -2828,13 +2849,13 @@ def _run_seesaw_backtest(
         if sub2 is not None:
             sig["sub2"] = _candidate_signal(
                 sub2, sub2_symbol, sub2_fear_label,
-                params.sub2_buy_threshold, params.sub2_volume_ratio_threshold,
+                params.sub2_buy_threshold, params.sub2_volume_ratio_threshold, params.sub2_greed_threshold,
             )
         sub3_info = sub3["by_date"].get(day_text) if sub3 is not None else None
         if sub3 is not None:
             sig["sub3"] = _candidate_signal(
                 sub3, sub3_symbol, sub3_fear_label,
-                params.sub3_buy_threshold, params.sub3_volume_ratio_threshold,
+                params.sub3_buy_threshold, params.sub3_volume_ratio_threshold, params.sub3_greed_threshold,
             )
 
         def _sell_held():
@@ -3076,6 +3097,9 @@ def _search_value_groups(payload: SOXLFearSearchParams) -> Tuple[List[Any], ...]
     return (
         payload.buy_threshold_values,
         payload.greed_threshold_values,
+        payload.sub_greed_threshold_values,
+        payload.sub2_greed_threshold_values,
+        payload.sub3_greed_threshold_values,
         payload.volume_ratio_threshold_values,
         payload.volume_ratio_consecutive_days_values,
         payload.buy_position_pct_values,
@@ -3352,6 +3376,9 @@ def _evaluate_search_batch(
             (
                 buy_threshold,
                 greed_threshold,
+                sub_greed_threshold,
+                sub2_greed_threshold,
+                sub3_greed_threshold,
                 volume_ratio_threshold,
                 volume_ratio_consecutive_days,
                 buy_position_pct,
@@ -3390,6 +3417,9 @@ def _evaluate_search_batch(
             params = SOXLFearStrategyParams(
                 buy_threshold=float(buy_threshold),
                 greed_threshold=float(greed_threshold),
+                sub_greed_threshold=float(sub_greed_threshold),
+                sub2_greed_threshold=float(sub2_greed_threshold),
+                sub3_greed_threshold=float(sub3_greed_threshold),
                 volume_ratio_threshold=float(volume_ratio_threshold),
                 volume_ratio_consecutive_days=int(volume_ratio_consecutive_days),
                 buy_position_pct=float(buy_position_pct),

@@ -276,6 +276,8 @@ def test_sub3_thresholds_join_the_search_grid():
     # 网格里的取值要如实落到回测参数上（防止元组顺序错位）
     values = next(iter(product(
         payload.buy_threshold_values, payload.greed_threshold_values,
+        payload.sub_greed_threshold_values, payload.sub2_greed_threshold_values,
+        payload.sub3_greed_threshold_values,
         payload.volume_ratio_threshold_values, payload.volume_ratio_consecutive_days_values,
         payload.buy_position_pct_values, payload.cooldown_days_values,
         payload.trailing_stop_pct_values, payload.sell_position_pct_values,
@@ -311,6 +313,9 @@ def test_sub3_thresholds_join_the_search_grid():
         )
     assert captured["params"].sub3_buy_threshold == 25.0
     assert captured["params"].sub3_volume_ratio_threshold == 1.6
+    assert captured["params"].sub_greed_threshold == 80.0
+    assert captured["params"].sub2_greed_threshold == 80.0
+    assert captured["params"].sub3_greed_threshold == 75.0
 
 
 def test_seesaw_trailing_stop_tracks_greed_peak():

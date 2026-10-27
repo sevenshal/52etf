@@ -211,13 +211,15 @@ def test_schema_upgrade_adds_sub3_and_sell_ma5_columns(tmp_path):
         config_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_configs)"))}
         state_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(a_stock_fear_strategy_states)"))}
         row = conn.execute(text(
-            "SELECT sub3_symbol, sub3_buy_threshold, sub3_volume_ratio_threshold, sell_ma5_confirm "
+            "SELECT sub3_symbol, sub3_buy_threshold, sub3_volume_ratio_threshold, "
+            "sub_greed_threshold, sub2_greed_threshold, sub3_greed_threshold, sell_ma5_confirm "
             "FROM a_stock_fear_strategy_configs WHERE id = 1"
         )).one()
     assert {
         "sub3_symbol", "sub3_fear_source", "sub3_volume_signal_symbol",
-        "sub3_buy_threshold", "sub3_volume_ratio_threshold", "sell_ma5_confirm",
+        "sub3_buy_threshold", "sub3_volume_ratio_threshold",
+        "sub_greed_threshold", "sub2_greed_threshold", "sub3_greed_threshold", "sell_ma5_confirm",
     } <= config_columns
     assert "pending_sell_signal_date" in state_columns
     # 存量配置补列后行为不变：没有第三候补，卖出不等 MA5
-    assert tuple(row) == (None, 20.0, 1.3, "off")
+    assert tuple(row) == (None, 20.0, 1.3, 80.0, 80.0, 75.0, "off")

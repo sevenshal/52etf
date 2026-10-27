@@ -6,6 +6,7 @@ import {
   Col,
   DatePicker,
   Descriptions,
+  Divider,
   Form,
   Input,
   InputNumber,
@@ -366,6 +367,9 @@ const SoxlFearBacktest = () => {
       turn_signal_cooldown_days_values: parseNumberList(values.turn_signal_cooldown_days_values, true),
       buy_threshold_values: parseNumberList(values.buy_threshold_values),
       greed_threshold_values: parseNumberList(values.greed_threshold_values),
+      sub_greed_threshold_values: parseNumberList(values.sub_greed_threshold_values),
+      sub2_greed_threshold_values: parseNumberList(values.sub2_greed_threshold_values),
+      sub3_greed_threshold_values: parseNumberList(values.sub3_greed_threshold_values),
       volume_ratio_threshold_values: parseNumberList(values.volume_ratio_threshold_values),
       volume_ratio_consecutive_days_values: parseNumberList(values.volume_ratio_consecutive_days_values, true),
       buy_position_pct_values: parseNumberList(values.buy_position_pct_values),
@@ -429,6 +433,9 @@ const SoxlFearBacktest = () => {
         // SOXL 模式不依赖页面上隐藏的 A 股/顶底信号候选，全部固定为一组有效值。
         buy_threshold_values: soxlBuyThresholdValues.length ? soxlBuyThresholdValues : [40],
         greed_threshold_values: soxlGreedThresholdValues.length ? soxlGreedThresholdValues : [41],
+        sub_greed_threshold_values: [70],
+        sub2_greed_threshold_values: [70],
+        sub3_greed_threshold_values: [70],
         volume_ratio_threshold_values: soxlVolumeRatioThresholdValues.length ? soxlVolumeRatioThresholdValues : [1.37],
         volume_ratio_consecutive_days_values: [1],
         buy_position_pct_values: soxlBuyPositionValues.length ? soxlBuyPositionValues : [50],
@@ -473,17 +480,20 @@ const SoxlFearBacktest = () => {
       sub_volume_signal_symbol,
       sub_buy_threshold_values,
       sub_volume_ratio_threshold_values,
+      sub_greed_threshold_values,
       swap_threshold_values,
       sub2_symbol,
       sub2_fear_source,
       sub2_volume_signal_symbol,
       sub2_buy_threshold_values,
       sub2_volume_ratio_threshold_values,
+      sub2_greed_threshold_values,
       sub3_symbol,
       sub3_fear_source,
       sub3_volume_signal_symbol,
       sub3_buy_threshold_values,
       sub3_volume_ratio_threshold_values,
+      sub3_greed_threshold_values,
       buy_turn_signal_mode_values,
       sell_turn_signal_mode_values,
       ma5_bottom_score_values,
@@ -503,6 +513,9 @@ const SoxlFearBacktest = () => {
   const buildParamsFromRecord = (record) => ({
     buy_threshold: record.buy_threshold,
     greed_threshold: record.greed_threshold,
+    sub_greed_threshold: record.sub_greed_threshold ?? record.greed_threshold,
+    sub2_greed_threshold: record.sub2_greed_threshold ?? record.greed_threshold,
+    sub3_greed_threshold: record.sub3_greed_threshold ?? record.greed_threshold,
     volume_ratio_threshold: record.volume_ratio_threshold,
     // 搜索结果里的 null 明确代表旧量比逻辑。详情回放必须原样带回，不能把
     // 缺省值替换为 1.25 而意外切换到 log-z 策略。
@@ -772,7 +785,14 @@ const SoxlFearBacktest = () => {
     { title: '买入阈值', dataIndex: 'buy_threshold', width: 90 },
     { title: '买入顶底信号', dataIndex: 'buy_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
     { title: '卖出顶底信号', dataIndex: 'sell_turn_signal_mode', width: 150, render: getTurnSignalModeLabel },
-    { title: '进入止盈区阈值(>=)', dataIndex: 'greed_threshold', width: 130 },
+    {
+      title: '止盈区阈值(红利/科创/纳指/云)',
+      dataIndex: 'greed_threshold',
+      width: 200,
+      render: (value, record) => isSoxlMode
+        ? value
+        : `${value} / ${record.sub_greed_threshold} / ${record.sub2_greed_threshold} / ${record.sub3_greed_threshold}`,
+    },
     { title: '买入估值上限(≤)', dataIndex: 'valuation_buy_max', width: 125, render: value => value == null ? '关闭' : value },
     {
       title: '卖出估值下限(≥)',
@@ -1424,6 +1444,9 @@ const SoxlFearBacktest = () => {
             date_range: [dayjs('2023-03-22'), dayjs()],
             buy_threshold_values: '35',
             greed_threshold_values: '70',
+            sub_greed_threshold_values: '80',
+            sub2_greed_threshold_values: '80',
+            sub3_greed_threshold_values: '75',
             volume_ratio_threshold_values: '1.6',
             volume_ratio_consecutive_days_values: '1',
             buy_position_pct_values: '100',
@@ -1464,6 +1487,34 @@ const SoxlFearBacktest = () => {
           }}
         >
           <Row gutter={16}>
+            <Col span={24}><Divider orientation="left">通用回测与搜索设置</Divider></Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="date_range" label="回测区间" rules={[{ required: true, message: '请选择回测区间' }]}>
+                <RangePicker style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="initial_capital" label="初始资金"><InputNumber min={1000} step={1000} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="top_n" label="返回前N组"><InputNumber min={1} max={500} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="objective" label="搜索目标"><Select options={objectiveOptions} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="eval_workers" label="并发进程数"><InputNumber min={1} max={16} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="fit_rebalance_threshold_pct" label="调仓阈值%"><InputNumber min={0.1} max={100} step={0.1} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="slippage_pct" label="滑点%(-2=最乐观/-1=最悲观)"><InputNumber min={-2} max={10} step={0.1} placeholder="0=无滑点；-1=买最高卖最低" style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="stamp_duty_pct" label="印花税%(卖出收取)"><InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col span={24}><Divider orientation="left">主标的与主标的信号</Divider></Col>
             {!isSoxlMode && (
               <Col xs={24} md={6}>
                 <Form.Item name="a_stock_pair" label="A股指数ETF组合">
@@ -1507,31 +1558,6 @@ const SoxlFearBacktest = () => {
                 </Form.Item>
               </Col>
             )}
-            <Col xs={24} md={4}>
-              <Form.Item name="date_range" label="回测区间" rules={[{ required: true, message: '请选择回测区间' }]}>
-                <RangePicker style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="initial_capital" label="初始资金">
-                <InputNumber min={1000} step={1000} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="top_n" label="返回前N组">
-                <InputNumber min={1} max={500} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="objective" label="搜索目标">
-                <Select options={objectiveOptions} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="eval_workers" label="并发进程数">
-                <InputNumber min={1} max={16} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
             {!isSoxlMode && (
               <Col xs={24} md={4}>
                 <Form.Item name="fear_source_values" label="贪恐来源候选">
@@ -1562,7 +1588,7 @@ const SoxlFearBacktest = () => {
               </Col>
             )}
             <Col xs={24} md={4}>
-              <Form.Item name="greed_threshold_values" label="止盈区贪恐阈值(>=) 候选">
+              <Form.Item name="greed_threshold_values" label={isSoxlMode ? '止盈区贪恐阈值(>=) 候选' : '红利ETF止盈区贪恐阈值(>=) 候选'}>
                 <Input placeholder="例如 40,41,42" />
               </Form.Item>
             </Col>
@@ -1606,21 +1632,6 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 10,20" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="fit_rebalance_threshold_pct" label="调仓阈值%">
-                <InputNumber min={0.1} max={100} step={0.1} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="slippage_pct" label="滑点%(-2=最乐观/-1=最悲观)">
-                <InputNumber min={-2} max={10} step={0.1} placeholder="0=无滑点；-1=买最高卖最低；-2=买最低卖最高" style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="stamp_duty_pct" label="印花税%(卖出收取)">
-                <InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} />
-              </Form.Item>
-            </Col>
             {!isSoxlMode && (<>
             <Col xs={24} md={4}>
               <Form.Item name="volume_z_threshold_values" label="放量标准差(log-z)候选" tooltip="逗号分隔；none=旧量比逻辑；数值=log(成交量)相对前20日均值的标准差倍数，默认 1.25">
@@ -1655,12 +1666,13 @@ const SoxlFearBacktest = () => {
             <Col xs={24} md={3}><Form.Item name="volume_shrink_std_values" label="量能顶缩量σ"><Input /></Form.Item></Col>
             </>)}
             {!isSoxlMode && (<>
+            <Col span={24}><Divider orientation="left">候选标的 1：科创50（可选）</Divider></Col>
             <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="跷跷板候补 / 对称双轮动（可选）"
+                message="候选标的 1 配置说明"
                 description="留空候补标的 = 单标的模式。填写候补标的：若「换仓阈值」留空 = 主辅跷跷板（主标的优先，空仓时才买候补，主标的出信号换回）；若填了换仓阈值 = 对称双轮动（任一标的极恐放量都买、都触发买更恐慌的；持有 X 时若 X 恐贪超过换仓阈值且另一标的有买入信号则换仓；恐贪≥贪恐卖出阈值则卖出）。"
               />
             </Col>
@@ -1692,16 +1704,24 @@ const SoxlFearBacktest = () => {
               </Form.Item>
             </Col>
             <Col xs={24} md={4}>
+              <Form.Item name="sub_greed_threshold_values" label="科创50止盈区贪恐阈值(>=)候选">
+                <Input placeholder="例如 70,75,80" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
               <Form.Item name="swap_threshold_values" label="换仓阈值候选(none=关闭)">
                 <Input placeholder="例如 none,45,55（none=主辅跷跷板）" />
               </Form.Item>
+            </Col>
+            <Col span={24}>
+              <Divider orientation="left">候选标的 2：纳指科技（可选）</Divider>
             </Col>
             <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="第二候补（三标的轮动，可选）"
+                message="候选标的 2 配置说明"
                 description="再填一个候补可做三标的对称轮动（需换仓阈值非空）：空仓时任一标的极恐放量都买（都触发买恐贪最低的）；持有 X 时 X 恐贪超过换仓阈值且任一其他标的有信号则换仓。例如纳指ETF 159941.SZ 配 QQQ 自算贪恐（美股恐贪上海凌晨已算出，信号日与 A股对齐）。"
               />
             </Col>
@@ -1732,16 +1752,21 @@ const SoxlFearBacktest = () => {
                 <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
               </Form.Item>
             </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub2_greed_threshold_values" label="纳指科技止盈区贪恐阈值(>=)候选">
+                <Input placeholder="例如 75,80,85" />
+              </Form.Item>
+            </Col>
             </>)}
             <Col xs={24} md={24}>
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message={isSoxlMode ? 'SOXL 卖出规则' : '第三候补 + 卖出跌破MA5确认（可选）'}
+                message={isSoxlMode ? 'SOXL 卖出规则' : '卖出跌破MA5确认（通用规则，可选）'}
                 description={isSoxlMode
                   ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；成交口径按上方开关执行。'
-                  : '第三候补即四标的轮动，规则与第二候补一致（例如云计算ETF 516510.SH 配云计算指数贪恐），阈值同样填候选列表参与组合搜索。卖出跌破MA5确认（不参与网格）：恐贪到达卖出阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
+                  : '卖出跌破MA5确认（不参与网格）：恐贪到达各标的止盈阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
               />
             </Col>
             {isSoxlMode && (
@@ -1789,6 +1814,7 @@ const SoxlFearBacktest = () => {
               </>
             )}
             {!isSoxlMode && (<>
+            <Col span={24}><Divider orientation="left">候选标的 3：云计算（可选）</Divider></Col>
             <Col xs={24} md={4}>
               <Form.Item name="sub3_symbol" label="第三候补标的">
                 <Select allowClear showSearch optionFilterProp="label" placeholder="留空=不启用" options={symbolOptions} />
@@ -1814,6 +1840,11 @@ const SoxlFearBacktest = () => {
                 tooltip={sub2RatioDisabled ? '已启用统一放量标准差(log-z)，第三候补放量统一用该标准差，此阈值被忽略' : '第三候补放量量比阈值'}
               >
                 <Input placeholder="例如 1.3,1.6" disabled={sub2RatioDisabled} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="sub3_greed_threshold_values" label="云计算止盈区贪恐阈值(>=)候选">
+                <Input placeholder="例如 70,75,80" />
               </Form.Item>
             </Col>
             </>)}
@@ -1911,7 +1942,7 @@ const SoxlFearBacktest = () => {
           <Table
             dataSource={searchResults}
             columns={displayedResultColumns}
-            rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}-${record.swap_threshold}-${record.valuation_window}-${record.valuation_buy_max}-${record.valuation_sell_min}-${record.valuation_force_sell_greed}`}
+            rowKey={(record) => `${record.fear_source}-${record.buy_turn_signal_mode}-${record.sell_turn_signal_mode}-${record.buy_threshold}-${record.greed_threshold}-${record.sub_greed_threshold}-${record.sub2_greed_threshold}-${record.sub3_greed_threshold}-${record.volume_ratio_threshold}-${record.volume_ratio_consecutive_days}-${record.buy_position_pct}-${record.cooldown_days}-${record.trailing_stop_pct}-${record.sell_position_pct}-${record.sell_reduction_basis}-${record.sell_price_above_avg_cost}-${record.max_take_profit_sells_per_cycle}-${record.min_position_pct_after_take_profit}-${record.execute_next_open}-${record.swap_threshold}-${record.valuation_window}-${record.valuation_buy_max}-${record.valuation_sell_min}-${record.valuation_force_sell_greed}`}
             pagination={{ defaultPageSize: 10 }}
             scroll={{ x: 2210 }}
             onRow={(record) => ({
@@ -1975,7 +2006,11 @@ const SoxlFearBacktest = () => {
                 <Descriptions.Item label="MA5回看天数">{detailedResult.params?.ma5_lookback_days}</Descriptions.Item>
                 <Descriptions.Item label="顶底信号冷却天数">{detailedResult.params?.turn_signal_cooldown_days}</Descriptions.Item>
               </>}
-              <Descriptions.Item label="进入止盈区阈值(>=)">{detailedResult.params?.greed_threshold}</Descriptions.Item>
+              <Descriptions.Item label={isSoxlMode ? '进入止盈区阈值(>=)' : '止盈区阈值(红利/科创/纳指/云)'}>
+                {isSoxlMode
+                  ? detailedResult.params?.greed_threshold
+                  : `${detailedResult.params?.greed_threshold} / ${detailedResult.params?.sub_greed_threshold} / ${detailedResult.params?.sub2_greed_threshold} / ${detailedResult.params?.sub3_greed_threshold}`}
+              </Descriptions.Item>
               <Descriptions.Item label="量比阈值">{detailedResult.params?.volume_ratio_threshold}</Descriptions.Item>
               {!isSoxlMode && <>
                 <Descriptions.Item label="放量标准差(log-z)">{detailedResult.params?.volume_z_threshold ?? '旧量比逻辑'}</Descriptions.Item>

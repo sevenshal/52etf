@@ -1226,7 +1226,11 @@ class AStockFearStrategyConfig(Base):
     # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
     swap_threshold = Column(Float, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=30.0)
+    # 主标的使用既有 greed_threshold；候补各自使用独立的止盈区贪恐阈值。
     greed_threshold = Column(Float, nullable=False, default=70.0)
+    sub_greed_threshold = Column(Float, nullable=False, default=80.0)
+    sub2_greed_threshold = Column(Float, nullable=False, default=80.0)
+    sub3_greed_threshold = Column(Float, nullable=False, default=75.0)
     volume_ratio_threshold = Column(Float, nullable=False, default=1.3)
     # 统一对数放量阈值（log-z）：NULL=旧量比逻辑；有值=log(vol) 相对前20日均值放大该标准差视为放量（默认 1.25）
     volume_z_threshold = Column(Float, nullable=True)
@@ -2740,13 +2744,17 @@ def ensure_a_stock_fear_strategy_schema():
                     f"WHERE {legacy_column} IS NOT NULL"
                 ))
 
-        # 第三候补 + 卖出跌破MA5确认（老库补列，默认值保持原有行为：无第三候补、不等 MA5）
+        # 候补止盈区阈值按生产推荐默认值补齐：科创50 80、纳指科技 80、云计算 75。
+        # 主标的继续使用既有 greed_threshold（红利默认 70）。
         config_additions = [
             ("sub3_symbol", "VARCHAR"),
             ("sub3_fear_source", "VARCHAR"),
             ("sub3_volume_signal_symbol", "VARCHAR"),
             ("sub3_buy_threshold", "FLOAT NOT NULL DEFAULT 20.0"),
             ("sub3_volume_ratio_threshold", "FLOAT NOT NULL DEFAULT 1.3"),
+            ("sub_greed_threshold", "FLOAT NOT NULL DEFAULT 80.0"),
+            ("sub2_greed_threshold", "FLOAT NOT NULL DEFAULT 80.0"),
+            ("sub3_greed_threshold", "FLOAT NOT NULL DEFAULT 75.0"),
             ("sell_ma5_confirm", "VARCHAR(16) NOT NULL DEFAULT 'off'"),
         ]
         for column_name, column_type in config_additions:
