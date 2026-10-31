@@ -1223,6 +1223,8 @@ class AStockFearStrategyConfig(Base):
     # 卖出跌破MA5确认（与回测 sell_ma5_confirm 同口径）：off=贪婪即卖；all=都等跌破5日均线；
     # non_main=只有候补等，主标的照旧。等待期间卖出信号一直挂着，且不发起换仓。
     sell_ma5_confirm = Column(String(16), nullable=False, default="off")
+    # 买入确认：恐慌放量后，含信号日在内连续两日收盘均高于4日前收盘才在下一日买入/换仓。
+    entry_two_close_confirm = Column(Boolean, nullable=False, default=True)
     # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
     swap_threshold = Column(Float, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=30.0)
@@ -1277,6 +1279,9 @@ class AStockFearStrategyState(Base):
     take_profit_cycle_sell_count = Column(Integer, nullable=False, default=0)
     # 卖出信号已成立、等待跌破 MA5 确认的信号日；NULL = 没有挂起的卖出信号
     pending_sell_signal_date = Column(Date)
+    # 已选中的买入/换仓目标，等待两日收盘确认；避免重启后丢失挂单。
+    pending_entry_target = Column(String(16))
+    pending_entry_signal_date = Column(Date)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -2756,6 +2761,7 @@ def ensure_a_stock_fear_strategy_schema():
             ("sub2_greed_threshold", "FLOAT NOT NULL DEFAULT 80.0"),
             ("sub3_greed_threshold", "FLOAT NOT NULL DEFAULT 75.0"),
             ("sell_ma5_confirm", "VARCHAR(16) NOT NULL DEFAULT 'off'"),
+            ("entry_two_close_confirm", "BOOLEAN NOT NULL DEFAULT 1"),
         ]
         for column_name, column_type in config_additions:
             if column_name in columns:
@@ -2772,6 +2778,14 @@ def ensure_a_stock_fear_strategy_schema():
             conn.execute(text(
                 "ALTER TABLE a_stock_fear_strategy_states ADD COLUMN pending_sell_signal_date DATE"
             ))
+        for column_name, column_type in [
+            ("pending_entry_target", "VARCHAR(16)"),
+            ("pending_entry_signal_date", "DATE"),
+        ]:
+            if state_columns and column_name not in state_columns:
+                conn.execute(text(
+                    f"ALTER TABLE a_stock_fear_strategy_states ADD COLUMN {column_name} {column_type}"
+                ))
 
 ensure_a_stock_fear_strategy_schema()
 

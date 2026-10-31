@@ -102,6 +102,7 @@ const defaultValues = {
   sub3_volume_ratio_threshold: 1.3,
   // 卖出跌破MA5确认：off=贪婪即卖（默认，与现有实盘一致）
   sell_ma5_confirm: 'off',
+  entry_two_close_confirm: true,
   // 换仓阈值：对称轮动 45
   swap_threshold: 45,
   // 估值点位闸门：卖出需近一年估值点位≥80（极度高估），恐贪≥90 不看估值直接卖；买入不设估值闸门
@@ -139,6 +140,7 @@ const normalizeConfig = (config) => ({
   sub3_volume_ratio_threshold: config?.sub3_volume_ratio_threshold ?? 1.3,
   sub3_greed_threshold: config?.sub3_greed_threshold ?? 75,
   sell_ma5_confirm: config?.sell_ma5_confirm ?? 'off',
+  entry_two_close_confirm: config?.entry_two_close_confirm ?? true,
   swap_threshold: config?.swap_threshold ?? null,
   // 存量配置没有估值闸门（NULL=关闭），不能被默认值覆盖
   valuation_window: config?.valuation_window ?? 252,
@@ -427,6 +429,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
     sub3_greed_threshold: values.sub3_greed_threshold ?? 75,
     sell_ma5_confirm: values.sell_ma5_confirm || 'off',
+    entry_two_close_confirm: values.entry_two_close_confirm ?? true,
     swap_threshold: values.swap_threshold ?? null,
     volume_z_threshold: values.volume_z_threshold ?? null,
     sell_shrink_z: values.sell_shrink_z ?? -1,
@@ -501,6 +504,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub3_buy_threshold_values: String(values.sub3_buy_threshold ?? 20),
           sub3_volume_ratio_threshold_values: String(values.sub3_volume_ratio_threshold ?? 1.3),
           sell_ma5_confirm: values.sell_ma5_confirm || 'off',
+          entry_two_close_confirm: values.entry_two_close_confirm ?? true,
           // 估值点位闸门按实盘配置原样传过去（留空=关闭 → none）
           valuation_window_values: [values.valuation_window ?? 252],
           valuation_buy_max_values: formatOptionalCandidate(values.valuation_buy_max),
@@ -823,7 +827,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
             showIcon
             style={{ marginBottom: 16 }}
             message="策略说明"
-            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日的恐贪分数和 20 日量比判断信号，下市价单在开盘成交。买入：恐贪 ≤ 买入阈值 且 量比 ≥ 阈值；卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
+            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日数据判断。买入/换仓：恐慌放量先锁定候选，含信号日在内连续两日收盘均高于各自4日前收盘，才在下一交易日下单；挂起换仓不会先卖原持仓。卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
           />
           <Table
             rowKey="id"

@@ -93,6 +93,29 @@ def test_sell_ma5_off_sells_on_greed_day():
     assert _sell_dates(result) == ["2025-03-07"]
 
 
+def test_entry_two_close_confirmation_buys_after_second_confirmed_close():
+    """极恐放量后，须等两根收盘均高于各自 4 日前才进入既有买入状态机。"""
+    fear = [50.0, 20.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0]
+    # 第 3、4 个交易日虽反弹但不满足 4 日比较；第 6、7 个交易日连续满足，故第 7 日买入。
+    close = [10.0, 10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 14.0]
+    result = _run_backtest(
+        _frame(fear, close), _params(entry_two_close_confirm=True), 100000.0, detailed=True,
+    )
+    buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
+    assert buys == ["2025-03-11"]
+
+
+def test_entry_two_close_confirmation_allows_signal_day_as_second_close():
+    """恐慌放量日就是高二时，仍然只在下一交易日成交。"""
+    fear = [50.0, 50.0, 50.0, 50.0, 50.0, 20.0, 50.0, 50.0]
+    close = [10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+    result = _run_backtest(
+        _frame(fear, close), _params(entry_two_close_confirm=True, execute_next_open=True), 100000.0, detailed=True,
+    )
+    buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
+    assert buys == ["2025-03-11"]
+
+
 def test_sell_ma5_all_waits_for_ma5_break():
     result = _run_backtest(
         _frame(FEAR, CLOSE), _params(sell_ma5_confirm=SELL_MA5_CONFIRM_ALL), 100000.0, detailed=True,

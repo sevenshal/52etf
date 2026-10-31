@@ -401,6 +401,7 @@ const SoxlFearBacktest = () => {
       sub3_buy_threshold_values: parseNumberList(values.sub3_buy_threshold_values),
       sub3_volume_ratio_threshold_values: parseNumberList(values.sub3_volume_ratio_threshold_values),
       sell_ma5_confirm: values.sell_ma5_confirm || 'off',
+      entry_two_close_confirm: !isSoxlMode,
       // 估值点位闸门（参与组合搜索；none=关闭）
       valuation_window_values: values.valuation_window_values?.length ? values.valuation_window_values : [252],
       valuation_buy_max_values: parseOptionalThresholdList(values.valuation_buy_max_values),
@@ -1763,10 +1764,10 @@ const SoxlFearBacktest = () => {
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message={isSoxlMode ? 'SOXL 卖出规则' : '卖出跌破MA5确认（通用规则，可选）'}
+                message={isSoxlMode ? 'SOXL 卖出规则' : 'A股买入确认与卖出MA5确认'}
                 description={isSoxlMode
                   ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；成交口径按上方开关执行。'
-                  : '卖出跌破MA5确认（不参与网格）：恐贪到达各标的止盈阈值（且过估值闸门）后不立刻卖，挂着等该标的量比来源收盘跌破 5 日均线那天才卖，挂单期间不换仓。'}
+                  : '买入/换仓固定启用两日收盘确认：恐慌放量后锁定候选，含信号日在内连续两日收盘均高于该交易ETF各自4日前收盘，下一交易日才按成交价口径买入或换仓；挂起换仓不先卖原标的。卖出MA5确认仍可选且不参与网格。'}
               />
             </Col>
             {isSoxlMode && (

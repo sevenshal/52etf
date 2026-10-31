@@ -384,6 +384,19 @@ class AStockFearStrategyTrader:
         return bool(close_value < float(closes.mean()))
 
     @staticmethod
+    def _two_close_confirmation_ready(bars: Optional[pd.DataFrame], signal_date: date, pending_signal_date: date) -> bool:
+        """连续两日收盘均高于各自4日前收盘；信号日可作第二根确认K线。"""
+        if bars is None or bars.empty:
+            return False
+        frame = bars.sort_values("trade_date").reset_index(drop=True)
+        current = frame.index[frame["trade_date"] == signal_date]
+        pending = frame.index[frame["trade_date"] == pending_signal_date]
+        if len(current) != 1 or len(pending) != 1 or int(current[0]) < int(pending[0]) or int(current[0]) < 5:
+            return False
+        return all(float(frame.iloc[index]["close"]) > float(frame.iloc[index - 4]["close"])
+                   for index in (int(current[0]) - 1, int(current[0])))
+
+    @staticmethod
     def _volume_ratio_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
         """信号日量比 = 当日成交量 / 前 20 日均量（shift(1) 语义，与回测一致）。"""
         if bars is None or bars.empty:
@@ -654,6 +667,8 @@ class AStockFearStrategyTrader:
                 state.greed_peak_price = state_values.greed_peak_price
                 state.take_profit_cycle_sell_count = int(state_values.take_profit_cycle_sell_count or 0)
                 state.pending_sell_signal_date = getattr(state_values, "pending_sell_signal_date", None)
+                state.pending_entry_target = getattr(state_values, "pending_entry_target", None)
+                state.pending_entry_signal_date = getattr(state_values, "pending_entry_signal_date", None)
 
                 db.add(
                     AStockFearStrategyLog(
@@ -792,6 +807,9 @@ class AStockFearStrategyTrader:
                     config.sell_ma5_confirm = (
                         getattr(persisted_config, "sell_ma5_confirm", None) or SELL_MA5_CONFIRM_OFF
                     )
+                    config.entry_two_close_confirm = bool(
+                        getattr(persisted_config, "entry_two_close_confirm", True)
+                    )
 
                 state_row = db.query(AStockFearStrategyState).filter(
                     AStockFearStrategyState.config_id == config_id
@@ -805,6 +823,8 @@ class AStockFearStrategyTrader:
                     greed_peak_price=getattr(state_row, "greed_peak_price", None),
                     take_profit_cycle_sell_count=int(getattr(state_row, "take_profit_cycle_sell_count", 0) or 0),
                     pending_sell_signal_date=getattr(state_row, "pending_sell_signal_date", None),
+                    pending_entry_target=getattr(state_row, "pending_entry_target", None),
+                    pending_entry_signal_date=getattr(state_row, "pending_entry_signal_date", None),
                 )
 
             # 已完成数据：恐贪 + ETF 日线（含量比）
@@ -1253,6 +1273,68 @@ class AStockFearStrategyTrader:
                     candidates.append(("sub3", sub3_symbol, sub3_price, sub3_fear_label, sub3_fear_score))
                 return min(candidates, key=lambda c: c[4]) if candidates else None
 
+            entry_wait_message = ""
+            if bool(getattr(config, "entry_two_close_confirm", True)) and log_action != "SKIP" and can_trade:
+                # 确认K线始终使用实际交易 ETF 自身的收盘价；量比来源可以是不同 ETF。
+                entry_price_bars = {
+                    "main": (
+                        bars if volume_symbol == symbol
+                        else self._fetch_etf_bars(symbol, lookback_start, signal_date)
+                    ),
+                }
+                for leg, leg_symbol, volume_source, loaded_bars in (
+                    ("sub", sub_symbol, getattr(config, "sub_volume_signal_symbol", None), sub_bars),
+                    ("sub2", sub2_symbol, getattr(config, "sub2_volume_signal_symbol", None), sub2_bars),
+                    ("sub3", sub3_symbol, getattr(config, "sub3_volume_signal_symbol", None), sub3_bars),
+                ):
+                    if not leg_symbol:
+                        entry_price_bars[leg] = None
+                        continue
+                    normalized_volume_source = normalize_external_symbol(volume_source or leg_symbol) or leg_symbol
+                    entry_price_bars[leg] = (
+                        loaded_bars if normalized_volume_source == leg_symbol
+                        else self._fetch_etf_bars(leg_symbol, lookback_start, signal_date)
+                    )
+                pending_target = getattr(state, "pending_entry_target", None)
+                confirmed_target = None
+                if pending_target and getattr(state, "pending_entry_signal_date", None):
+                    if self._two_close_confirmation_ready(entry_price_bars.get(pending_target), signal_date, state.pending_entry_signal_date):
+                        confirmed_target = pending_target
+                        state.pending_entry_target = None
+                        state.pending_entry_signal_date = None
+                    else:
+                        entry_wait_message = f"买入/换仓信号已挂起（{state.pending_entry_signal_date}），等待连续两日收盘高于4日前收盘"
+                else:
+                    target = None
+                    if shares <= 0:
+                        candidates = [("main", fear_score)] if main_signal else []
+                        candidates += [("sub", sub_fear_score)] if sub_signal else []
+                        candidates += [("sub2", sub2_fear_score)] if sub2_signal else []
+                        candidates += [("sub3", sub3_fear_score)] if sub3_signal else []
+                        if candidates:
+                            target = min(candidates, key=lambda value: value[1])[0] if use_swap else ("main" if main_signal else candidates[0][0])
+                    elif use_swap and holding:
+                        held_fear = {"main": fear_score, "sub": sub_fear_score, "sub2": sub2_fear_score, "sub3": sub3_fear_score}.get(holding)
+                        if held_fear is not None and held_fear > swap_value:
+                            picked = _pick_swap_target(holding)
+                            target = picked[0] if picked else None
+                    elif not use_swap and holding == "sub" and main_signal:
+                        target = "main"
+                    if target:
+                        if self._two_close_confirmation_ready(entry_price_bars.get(target), signal_date, signal_date):
+                            confirmed_target = target
+                            state.pending_entry_target = None
+                            state.pending_entry_signal_date = None
+                        else:
+                            state.pending_entry_target = target
+                            state.pending_entry_signal_date = signal_date
+                            entry_wait_message = "恐慌放量信号已挂起，等待连续两日收盘高于4日前收盘"
+                # 只有确认的原目标可以进入既有买入/换仓状态机。
+                main_signal = confirmed_target == "main"
+                sub_signal = confirmed_target == "sub"
+                sub2_signal = confirmed_target == "sub2"
+                sub3_signal = confirmed_target == "sub3"
+
             # ---- 状态机：持有主/持有候补/空仓（use_swap=对称双轮动，否则主辅跷跷板） ----
             if log_action != "SKIP" and can_trade and shares > 0 and holding:
                 # 缩量卖出确认（仅贪即卖 trailing=0 路径生效）：sell_shrink_z>0 时需持仓标的前一交易日缩量
@@ -1536,6 +1618,8 @@ class AStockFearStrategyTrader:
             if log_action != "SKIP" and not order_action and sell_ma5_wait_message:
                 # 挂起的卖出信号优先说明，避免被"处于止盈区未触发"这类兜底文案盖掉
                 trade_message = sell_ma5_wait_message
+            if log_action != "SKIP" and not order_action and entry_wait_message:
+                trade_message = entry_wait_message
             if log_action != "SKIP" and not order_action and not trade_message:
                 if not can_trade:
                     trade_message = f"处于冷却期，剩余 {state.cooldown_remaining_days} 个交易日"
@@ -1556,6 +1640,10 @@ class AStockFearStrategyTrader:
                     trade_message = "当前无买卖信号"
 
             if order_action:
+                # 卖出（包括换仓的卖腿）使未确认的旧买入意图失效，避免之后触发陈旧挂单。
+                if order_action in {"SELL", "SELL_AND_BUY"}:
+                    state.pending_entry_target = None
+                    state.pending_entry_signal_date = None
                 if order_action == "SELL_AND_BUY":
                     # 换仓：先同步卖出当前持仓 + 买入目标（不触发），再统一触发一次 executor
                     # （避免卖出未成交时第二次 executor 因资金不足被拒；executor 按目标仓位先卖后买，T+0 资金衔接）

@@ -264,6 +264,9 @@ class SOXLFearStrategyParams(BaseModel):
     # any=MA5 跌破或移动止盈任一满足即可卖（SOXL 专用）。
     # 卖出信号一旦出现会一直挂着，直到跌破 MA5 成交；挂单期间不再发起换仓。
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
+    # A股：恐慌放量后，含信号日在内两日 Close > Close[-4]，下一交易日才成交。
+    # SOXL 保持关闭，避免改变其既有策略口径。
+    entry_two_close_confirm: bool = False
     # 卖出 MA5 确认的独立来源。默认沿用量比来源，SOXL 专用策略设为 SOXX.US。
     sell_ma5_signal_symbol: Optional[str] = None
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
@@ -515,6 +518,7 @@ class SOXLFearSearchParams(BaseModel):
     sub3_volume_ratio_threshold_values: List[float] = Field(default_factory=lambda: [1.3])
     # 卖出跌破 MA5 确认（不参与网格）
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
+    entry_two_close_confirm: bool = False
     sell_ma5_signal_symbol: Optional[str] = None
     # 估值点位闸门候选（参与组合搜索；None=关闭）
     valuation_window_values: List[int] = Field(default_factory=lambda: [VALUATION_POSITION_SHORT_WINDOW])
@@ -1984,6 +1988,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
     pending_sell_valuation = None
     pending_sell_signal_date = None
     pending_sell_fear = None
+    pending_entry_signal_index = None
 
     cash = float(initial_capital)
     shares = 0
@@ -2078,6 +2083,37 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         # 函数视为“不设估值限制”；实盘则在 trader 中严格阻止这种交易。
         is_fear = is_fear and _valuation_buy_allowed(params, valuation)
         is_greedy = is_greedy and _valuation_sell_allowed(params, valuation, fear_score)
+        if params.entry_two_close_confirm:
+            raw_signal_index = index - 1 if use_next_open else index
+            if pending_entry_signal_index is not None:
+                ready = (
+                    raw_signal_index >= pending_entry_signal_index
+                    and raw_signal_index >= 5
+                    and np.isfinite(close_prices[raw_signal_index])
+                    and np.isfinite(close_prices[raw_signal_index - 4])
+                    and np.isfinite(close_prices[raw_signal_index - 1])
+                    and np.isfinite(close_prices[raw_signal_index - 5])
+                    and close_prices[raw_signal_index] > close_prices[raw_signal_index - 4]
+                    and close_prices[raw_signal_index - 1] > close_prices[raw_signal_index - 5]
+                )
+                is_fear = bool(ready)
+                if ready:
+                    pending_entry_signal_index = None
+            elif is_fear:
+                # 信号日可正好是第二根确认K线；信号日收盘确认，下一交易日成交。
+                ready_on_signal_day = (
+                    raw_signal_index >= 5
+                    and np.isfinite(close_prices[raw_signal_index])
+                    and np.isfinite(close_prices[raw_signal_index - 4])
+                    and np.isfinite(close_prices[raw_signal_index - 1])
+                    and np.isfinite(close_prices[raw_signal_index - 5])
+                    and close_prices[raw_signal_index] > close_prices[raw_signal_index - 4]
+                    and close_prices[raw_signal_index - 1] > close_prices[raw_signal_index - 5]
+                )
+                if not ready_on_signal_day:
+                    # 锁定信号日，之后的买入由两根确认K线决定，不用新的恐贪信号重置计时。
+                    pending_entry_signal_index = raw_signal_index
+                    is_fear = False
         # 跌破 MA5 确认：卖出信号成立后挂起，等量比来源标的收盘跌破 5 日均线再卖
         sell_ma5_ok = True
         if ma5_confirm_active:
@@ -2522,7 +2558,7 @@ def _run_seesaw_backtest(
                 "below_ma5": bool(d_below_ma5[index]),
                 "valuation": float(d_valuation[index]),
             }
-        return {"dates": dates, "date_texts": date_texts, "by_date": by_date}
+        return {"dates": dates, "date_texts": date_texts, "by_date": by_date, "raw_close": close_p}
 
     main = _frame_arrays(base_df)
     sub = _frame_arrays(sub_base_df)
@@ -2550,6 +2586,8 @@ def _run_seesaw_backtest(
     greed_peak_price = None
     take_profit_cycle_sell_count = 0
     pending_sell = False  # 卖出信号已成立、等待跌破 MA5 确认
+    pending_entry_target = None
+    pending_entry_signal_index = None
     trades: List[Dict] = []
     equity_curve: List[Dict] = []
     daily_data: List[Dict] = []
@@ -2618,7 +2656,7 @@ def _run_seesaw_backtest(
         return bool(info and info["below_ma5"])
 
     def do_sell(day_text: str) -> Optional[Dict]:
-        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count, pending_sell
+        nonlocal cash, shares, avg_cost, position_symbol, greed_peak_price, take_profit_cycle_sell_count, cooldown_remaining, closed_trade_count, winning_trade_count, pending_sell, pending_entry_target, pending_entry_signal_index
         which = position_symbol
         symbol = _holder_symbol(which) if which else ""
         exec_price = fill_price(day_text, which, "sell") if which else 0.0
@@ -2649,6 +2687,8 @@ def _run_seesaw_backtest(
             greed_peak_price = None
             take_profit_cycle_sell_count = 0
             pending_sell = False
+            pending_entry_target = None
+            pending_entry_signal_index = None
         else:
             greed_peak_price = current_close(day_text)
             take_profit_cycle_sell_count += 1
@@ -2857,6 +2897,58 @@ def _run_seesaw_backtest(
                 sub3, sub3_symbol, sub3_fear_label,
                 params.sub3_buy_threshold, params.sub3_volume_ratio_threshold, params.sub3_greed_threshold,
             )
+
+        # A股两日收盘确认：保留原信号选出的目标，含信号日在内连续两天
+        # Close[t] > Close[t-4] 才在下一交易日（本循环）执行买入/换仓。
+        if params.entry_two_close_confirm:
+            raw_signal_index = index - 1 if use_next_open else index
+
+            def _two_close_ready(which: str, signal_index: int) -> bool:
+                closes = _holder(which)["raw_close"]
+                # 信号日也可作为第二根确认K线；信号在收盘后成立，仍在下一交易日成交。
+                if raw_signal_index < signal_index or raw_signal_index < 5:
+                    return False
+                return bool(
+                    np.isfinite(closes[raw_signal_index])
+                    and np.isfinite(closes[raw_signal_index - 4])
+                    and np.isfinite(closes[raw_signal_index - 1])
+                    and np.isfinite(closes[raw_signal_index - 5])
+                    and closes[raw_signal_index] > closes[raw_signal_index - 4]
+                    and closes[raw_signal_index - 1] > closes[raw_signal_index - 5]
+                )
+
+            chosen_target = None
+            if pending_entry_target is not None:
+                if _two_close_ready(pending_entry_target, int(pending_entry_signal_index)):
+                    chosen_target = pending_entry_target
+                    pending_entry_target = None
+                    pending_entry_signal_index = None
+                # 挂单期间不重复选标的，也不触发原始买/换仓。
+                for item in sig.values():
+                    item["signal"] = False
+                if chosen_target is not None:
+                    sig[chosen_target]["signal"] = True
+            else:
+                if position_symbol is None:
+                    candidates = [key for key, item in sig.items() if item["signal"] and np.isfinite(item["fear"])]
+                    if candidates:
+                        chosen_target = min(candidates, key=lambda key: sig[key]["fear"]) if use_swap else (
+                            "main" if sig["main"]["signal"] else "sub"
+                        )
+                elif use_swap and np.isfinite(sig[position_symbol]["fear"]) and sig[position_symbol]["fear"] > swap_value:
+                    candidates = [key for key, item in sig.items() if key != position_symbol and item["signal"] and np.isfinite(item["fear"])]
+                    if candidates:
+                        chosen_target = min(candidates, key=lambda key: sig[key]["fear"])
+                elif not use_swap and position_symbol == "sub" and sig["main"]["signal"]:
+                    chosen_target = "main"
+                if chosen_target is not None:
+                    for item in sig.values():
+                        item["signal"] = False
+                    if _two_close_ready(chosen_target, raw_signal_index):
+                        sig[chosen_target]["signal"] = True
+                    else:
+                        pending_entry_target = chosen_target
+                        pending_entry_signal_index = raw_signal_index
 
         def _sell_held():
             """持有标的贪恐卖出（trailing 支持；trailing=0 贪即卖时 sell_shrink_z>0 需当日缩量确认）。"""
@@ -3303,6 +3395,7 @@ def _evaluate_search_candidates(
                 payload.sub3_volume_signal_symbol,
                 payload.sell_ma5_confirm,
                 payload.sell_ma5_signal_symbol,
+                payload.entry_two_close_confirm,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -3366,6 +3459,7 @@ def _evaluate_search_batch(
     sub3_volume_signal_symbol: Optional[str] = None,
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF,
     sell_ma5_signal_symbol: Optional[str] = None,
+    entry_two_close_confirm: bool = False,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -3452,6 +3546,7 @@ def _evaluate_search_batch(
                 sub3_volume_ratio_threshold=float(sub3_volume_ratio_threshold if sub3_volume_ratio_threshold is not None else 1.3),
                 sell_ma5_confirm=str(sell_ma5_confirm or SELL_MA5_CONFIRM_OFF),
                 sell_ma5_signal_symbol=sell_ma5_signal_symbol,
+                entry_two_close_confirm=bool(entry_two_close_confirm),
                 volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
                 sell_shrink_z=float(sell_shrink_z),
                 buy_turn_signal_mode=str(buy_turn_signal_mode),

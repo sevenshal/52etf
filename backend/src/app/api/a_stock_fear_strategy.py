@@ -88,6 +88,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub3_volume_ratio_threshold: float = 1.3
     # 卖出跌破MA5确认：off=贪婪即卖（默认，保持原行为）；all=都等；non_main=只有候补等
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
+    entry_two_close_confirm: bool = True
     swap_threshold: Optional[float] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
@@ -410,6 +411,8 @@ class AStockFearStrategyStatePayload(BaseModel):
     take_profit_cycle_sell_count: int = 0
     # 卖出信号已成立、等待跌破 MA5 确认的信号日；None = 没有挂起的卖出信号
     pending_sell_signal_date: Optional[date] = None
+    pending_entry_target: Optional[str] = None
+    pending_entry_signal_date: Optional[date] = None
 
     @validator("cooldown_remaining_days")
     def validate_cooldown_remaining_days(cls, value):
@@ -477,6 +480,7 @@ CONFIG_FIELDS = [
     "sub3_buy_threshold",
     "sub3_volume_ratio_threshold",
     "sell_ma5_confirm",
+    "entry_two_close_confirm",
     "swap_threshold",
     "external_trading_account_id",
     "live_sub_account_id",
@@ -718,6 +722,8 @@ def _state_response(
         greed_peak_price=getattr(state, "greed_peak_price", None),
         take_profit_cycle_sell_count=int(getattr(state, "take_profit_cycle_sell_count", 0) or 0),
         pending_sell_signal_date=getattr(state, "pending_sell_signal_date", None),
+        pending_entry_target=getattr(state, "pending_entry_target", None),
+        pending_entry_signal_date=getattr(state, "pending_entry_signal_date", None),
         updated_at=getattr(state, "updated_at", None),
         has_state=bool(state),
     )
@@ -742,6 +748,7 @@ def _backtest_params_from_config(config: Any):
         execute_next_open=True,
         slippage_pct=-1.0,
         stamp_duty_pct=0.0,
+        entry_two_close_confirm=bool(getattr(config, "entry_two_close_confirm", True)),
         buy_turn_signal_mode="legacy",
         sell_turn_signal_mode="legacy",
     )
