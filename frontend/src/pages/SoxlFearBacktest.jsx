@@ -15,6 +15,7 @@ import {
   Select,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   message,
@@ -401,7 +402,11 @@ const SoxlFearBacktest = () => {
       sub3_buy_threshold_values: parseNumberList(values.sub3_buy_threshold_values),
       sub3_volume_ratio_threshold_values: parseNumberList(values.sub3_volume_ratio_threshold_values),
       sell_ma5_confirm: values.sell_ma5_confirm || 'off',
-      entry_two_close_confirm: !isSoxlMode,
+      entry_two_close_confirm: false,
+      entry_two_close_confirm_main: !isSoxlMode && Boolean(values.entry_two_close_confirm_main),
+      entry_two_close_confirm_sub: !isSoxlMode && Boolean(values.entry_two_close_confirm_sub),
+      entry_two_close_confirm_sub2: !isSoxlMode && Boolean(values.entry_two_close_confirm_sub2),
+      entry_two_close_confirm_sub3: !isSoxlMode && Boolean(values.entry_two_close_confirm_sub3),
       // 估值点位闸门（参与组合搜索；none=关闭）
       valuation_window_values: values.valuation_window_values?.length ? values.valuation_window_values : [252],
       valuation_buy_max_values: parseOptionalThresholdList(values.valuation_buy_max_values),
@@ -1476,6 +1481,10 @@ const SoxlFearBacktest = () => {
             sub3_buy_threshold_values: '20',
             sub3_volume_ratio_threshold_values: '1.3',
             sell_ma5_confirm: 'off',
+            entry_two_close_confirm_main: false,
+            entry_two_close_confirm_sub: true,
+            entry_two_close_confirm_sub2: false,
+            entry_two_close_confirm_sub3: false,
             soxl_sell_mode: 'valuation_ma5',
             soxl_fear_source: 'cnn',
             soxl_valuation_window: 252,
@@ -1516,6 +1525,16 @@ const SoxlFearBacktest = () => {
               <Form.Item name="stamp_duty_pct" label="印花税%(卖出收取)"><InputNumber min={0} max={10} step={0.05} style={{ width: '100%' }} /></Form.Item>
             </Col>
             <Col span={24}><Divider orientation="left">主标的与主标的信号</Divider></Col>
+            {!isSoxlMode && <>
+              <Col xs={24} md={24}>
+                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="右侧两日收盘确认"
+                  description="开启的标的在恐慌放量后，含信号日在内连续两日收盘高于各自4日前收盘，才在下一交易日买入或换仓；未开启的标的保持原逻辑。默认仅科创50开启。" />
+              </Col>
+              <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_main" label="红利ETF" valuePropName="checked"><Switch /></Form.Item></Col>
+              <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_sub" label="科创50" valuePropName="checked"><Switch /></Form.Item></Col>
+              <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_sub2" label="纳指科技" valuePropName="checked"><Switch /></Form.Item></Col>
+              <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_sub3" label="云计算" valuePropName="checked"><Switch /></Form.Item></Col>
+            </>}
             {!isSoxlMode && (
               <Col xs={24} md={6}>
                 <Form.Item name="a_stock_pair" label="A股指数ETF组合">
@@ -1767,7 +1786,7 @@ const SoxlFearBacktest = () => {
                 message={isSoxlMode ? 'SOXL 卖出规则' : 'A股买入确认与卖出MA5确认'}
                 description={isSoxlMode
                   ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；成交口径按上方开关执行。'
-                  : '买入/换仓固定启用两日收盘确认：恐慌放量后锁定候选，含信号日在内连续两日收盘均高于该交易ETF各自4日前收盘，下一交易日才按成交价口径买入或换仓；挂起换仓不先卖原标的。卖出MA5确认仍可选且不参与网格。'}
+                  : '买入/换仓的右侧两日确认可按标的独立开启（默认仅科创50）：恐慌放量后锁定候选，含信号日在内连续两日收盘均高于该交易ETF各自4日前收盘，下一交易日才按成交价口径买入或换仓；未开启标的保持原逻辑，挂起换仓不先卖原标的。卖出MA5确认仍可选且不参与网格。'}
               />
             </Col>
             {isSoxlMode && (

@@ -74,6 +74,8 @@ def _params(**overrides):
         sell_position_pct=100, sell_reduction_basis="holdings", sell_price_above_avg_cost=False,
         min_position_pct_after_take_profit=0, rebalance_threshold_pct=0,
         execute_next_open=False, slippage_pct=0,
+        # 本组历史基准专门覆盖未启用右侧确认时的原有交易口径。
+        entry_two_close_confirm_sub=False,
     )
     values.update(overrides)
     return SOXLFearStrategyParams(**values)
@@ -99,7 +101,7 @@ def test_entry_two_close_confirmation_buys_after_second_confirmed_close():
     # 第 3、4 个交易日虽反弹但不满足 4 日比较；第 6、7 个交易日连续满足，故第 7 日买入。
     close = [10.0, 10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 14.0]
     result = _run_backtest(
-        _frame(fear, close), _params(entry_two_close_confirm=True), 100000.0, detailed=True,
+        _frame(fear, close), _params(entry_two_close_confirm_main=True), 100000.0, detailed=True,
     )
     buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
     assert buys == ["2025-03-11"]
@@ -110,7 +112,7 @@ def test_entry_two_close_confirmation_allows_signal_day_as_second_close():
     fear = [50.0, 50.0, 50.0, 50.0, 50.0, 20.0, 50.0, 50.0]
     close = [10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 13.0, 14.0]
     result = _run_backtest(
-        _frame(fear, close), _params(entry_two_close_confirm=True, execute_next_open=True), 100000.0, detailed=True,
+        _frame(fear, close), _params(entry_two_close_confirm_main=True, execute_next_open=True), 100000.0, detailed=True,
     )
     buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
     assert buys == ["2025-03-11"]

@@ -1223,8 +1223,12 @@ class AStockFearStrategyConfig(Base):
     # 卖出跌破MA5确认（与回测 sell_ma5_confirm 同口径）：off=贪婪即卖；all=都等跌破5日均线；
     # non_main=只有候补等，主标的照旧。等待期间卖出信号一直挂着，且不发起换仓。
     sell_ma5_confirm = Column(String(16), nullable=False, default="off")
-    # 买入确认：恐慌放量后，含信号日在内连续两日收盘均高于4日前收盘才在下一日买入/换仓。
-    entry_two_close_confirm = Column(Boolean, nullable=False, default=True)
+    # 买入确认：各标的独立开关；默认仅科创50候补开启。
+    entry_two_close_confirm = Column(Boolean, nullable=False, default=False)
+    entry_two_close_confirm_main = Column(Boolean, nullable=False, default=False)
+    entry_two_close_confirm_sub = Column(Boolean, nullable=False, default=True)
+    entry_two_close_confirm_sub2 = Column(Boolean, nullable=False, default=False)
+    entry_two_close_confirm_sub3 = Column(Boolean, nullable=False, default=False)
     # 换仓阈值：NULL=主辅跷跷板；有值=对称双轮动（恐贪超过阈值且另一标的有信号则换仓）
     swap_threshold = Column(Float, nullable=True)
     buy_threshold = Column(Float, nullable=False, default=30.0)
@@ -2761,7 +2765,11 @@ def ensure_a_stock_fear_strategy_schema():
             ("sub2_greed_threshold", "FLOAT NOT NULL DEFAULT 80.0"),
             ("sub3_greed_threshold", "FLOAT NOT NULL DEFAULT 75.0"),
             ("sell_ma5_confirm", "VARCHAR(16) NOT NULL DEFAULT 'off'"),
-            ("entry_two_close_confirm", "BOOLEAN NOT NULL DEFAULT 1"),
+            ("entry_two_close_confirm", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("entry_two_close_confirm_main", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("entry_two_close_confirm_sub", "BOOLEAN NOT NULL DEFAULT 1"),
+            ("entry_two_close_confirm_sub2", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("entry_two_close_confirm_sub3", "BOOLEAN NOT NULL DEFAULT 0"),
         ]
         for column_name, column_type in config_additions:
             if column_name in columns:

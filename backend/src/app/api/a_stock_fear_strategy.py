@@ -88,7 +88,12 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub3_volume_ratio_threshold: float = 1.3
     # 卖出跌破MA5确认：off=贪婪即卖（默认，保持原行为）；all=都等；non_main=只有候补等
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
-    entry_two_close_confirm: bool = True
+    # 右侧两日收盘确认按标的独立配置；默认只给科创50候补开启。
+    entry_two_close_confirm: bool = False  # 旧字段保留兼容，不再控制策略。
+    entry_two_close_confirm_main: bool = False
+    entry_two_close_confirm_sub: bool = True
+    entry_two_close_confirm_sub2: bool = False
+    entry_two_close_confirm_sub3: bool = False
     swap_threshold: Optional[float] = None
     external_trading_account_id: Optional[int] = None
     live_sub_account_id: Optional[int] = None
@@ -481,6 +486,10 @@ CONFIG_FIELDS = [
     "sub3_volume_ratio_threshold",
     "sell_ma5_confirm",
     "entry_two_close_confirm",
+    "entry_two_close_confirm_main",
+    "entry_two_close_confirm_sub",
+    "entry_two_close_confirm_sub2",
+    "entry_two_close_confirm_sub3",
     "swap_threshold",
     "external_trading_account_id",
     "live_sub_account_id",
@@ -748,7 +757,10 @@ def _backtest_params_from_config(config: Any):
         execute_next_open=True,
         slippage_pct=-1.0,
         stamp_duty_pct=0.0,
-        entry_two_close_confirm=bool(getattr(config, "entry_two_close_confirm", True)),
+        entry_two_close_confirm_main=bool(getattr(config, "entry_two_close_confirm_main", False)),
+        entry_two_close_confirm_sub=bool(getattr(config, "entry_two_close_confirm_sub", True)),
+        entry_two_close_confirm_sub2=bool(getattr(config, "entry_two_close_confirm_sub2", False)),
+        entry_two_close_confirm_sub3=bool(getattr(config, "entry_two_close_confirm_sub3", False)),
         buy_turn_signal_mode="legacy",
         sell_turn_signal_mode="legacy",
     )

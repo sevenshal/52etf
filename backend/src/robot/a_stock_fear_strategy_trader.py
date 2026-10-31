@@ -829,8 +829,17 @@ class AStockFearStrategyTrader:
                     config.sell_ma5_confirm = (
                         getattr(persisted_config, "sell_ma5_confirm", None) or SELL_MA5_CONFIRM_OFF
                     )
-                    config.entry_two_close_confirm = bool(
-                        getattr(persisted_config, "entry_two_close_confirm", True)
+                    config.entry_two_close_confirm_main = bool(
+                        getattr(persisted_config, "entry_two_close_confirm_main", False)
+                    )
+                    config.entry_two_close_confirm_sub = bool(
+                        getattr(persisted_config, "entry_two_close_confirm_sub", True)
+                    )
+                    config.entry_two_close_confirm_sub2 = bool(
+                        getattr(persisted_config, "entry_two_close_confirm_sub2", False)
+                    )
+                    config.entry_two_close_confirm_sub3 = bool(
+                        getattr(persisted_config, "entry_two_close_confirm_sub3", False)
                     )
 
                 state_row = db.query(AStockFearStrategyState).filter(
@@ -1299,7 +1308,12 @@ class AStockFearStrategyTrader:
             entry_fear_volume_date = signal_date
             entry_price_bars: Dict[str, Optional[pd.DataFrame]] = {}
             entry_wait_message = ""
-            if bool(getattr(config, "entry_two_close_confirm", True)) and log_action != "SKIP" and can_trade:
+            def _entry_confirmation_enabled(leg: str) -> bool:
+                return bool(getattr(config, f"entry_two_close_confirm_{leg}", leg == "sub"))
+
+            if log_action != "SKIP" and can_trade and any(
+                _entry_confirmation_enabled(leg) for leg in ("main", "sub", "sub2", "sub3")
+            ):
                 # 确认K线始终使用实际交易 ETF 自身的收盘价；量比来源可以是不同 ETF。
                 entry_price_bars = {
                     "main": (
@@ -1324,7 +1338,9 @@ class AStockFearStrategyTrader:
                 confirmed_target = None
                 if pending_target and getattr(state, "pending_entry_signal_date", None):
                     pending_entry_signal_date = state.pending_entry_signal_date
-                    if self._two_close_confirmation_ready(entry_price_bars.get(pending_target), signal_date, pending_entry_signal_date):
+                    if (not _entry_confirmation_enabled(pending_target)) or self._two_close_confirmation_ready(
+                        entry_price_bars.get(pending_target), signal_date, pending_entry_signal_date
+                    ):
                         confirmed_target = pending_target
                         entry_fear_volume_date = pending_entry_signal_date
                         state.pending_entry_target = None
@@ -1348,7 +1364,9 @@ class AStockFearStrategyTrader:
                     elif not use_swap and holding == "sub" and main_signal:
                         target = "main"
                     if target:
-                        if self._two_close_confirmation_ready(entry_price_bars.get(target), signal_date, signal_date):
+                        if not _entry_confirmation_enabled(target):
+                            confirmed_target = target
+                        elif self._two_close_confirmation_ready(entry_price_bars.get(target), signal_date, signal_date):
                             confirmed_target = target
                             state.pending_entry_target = None
                             state.pending_entry_signal_date = None

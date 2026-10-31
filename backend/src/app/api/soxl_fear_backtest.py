@@ -267,6 +267,10 @@ class SOXLFearStrategyParams(BaseModel):
     # A股：恐慌放量后，含信号日在内两日 Close > Close[-4]，下一交易日才成交。
     # SOXL 保持关闭，避免改变其既有策略口径。
     entry_two_close_confirm: bool = False
+    entry_two_close_confirm_main: bool = False
+    entry_two_close_confirm_sub: bool = True
+    entry_two_close_confirm_sub2: bool = False
+    entry_two_close_confirm_sub3: bool = False
     # 卖出 MA5 确认的独立来源。默认沿用量比来源，SOXL 专用策略设为 SOXX.US。
     sell_ma5_signal_symbol: Optional[str] = None
     # 换仓阈值（可选）：None=主辅跷跷板模式；有值=对称双轮动（多标的）——
@@ -519,6 +523,10 @@ class SOXLFearSearchParams(BaseModel):
     # 卖出跌破 MA5 确认（不参与网格）
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
     entry_two_close_confirm: bool = False
+    entry_two_close_confirm_main: bool = False
+    entry_two_close_confirm_sub: bool = True
+    entry_two_close_confirm_sub2: bool = False
+    entry_two_close_confirm_sub3: bool = False
     sell_ma5_signal_symbol: Optional[str] = None
     # 估值点位闸门候选（参与组合搜索；None=关闭）
     valuation_window_values: List[int] = Field(default_factory=lambda: [VALUATION_POSITION_SHORT_WINDOW])
@@ -2083,7 +2091,7 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
         # 函数视为“不设估值限制”；实盘则在 trader 中严格阻止这种交易。
         is_fear = is_fear and _valuation_buy_allowed(params, valuation)
         is_greedy = is_greedy and _valuation_sell_allowed(params, valuation, fear_score)
-        if params.entry_two_close_confirm:
+        if bool(getattr(params, "entry_two_close_confirm_main", False)):
             raw_signal_index = index - 1 if use_next_open else index
             if pending_entry_signal_index is not None:
                 ready = (
@@ -2900,7 +2908,10 @@ def _run_seesaw_backtest(
 
         # A股两日收盘确认：保留原信号选出的目标，含信号日在内连续两天
         # Close[t] > Close[t-4] 才在下一交易日（本循环）执行买入/换仓。
-        if params.entry_two_close_confirm:
+        def _entry_confirmation_enabled(which: str) -> bool:
+            return bool(getattr(params, f"entry_two_close_confirm_{which}", False))
+
+        if any(_entry_confirmation_enabled(which) for which in ("main", "sub", "sub2", "sub3")):
             raw_signal_index = index - 1 if use_next_open else index
 
             def _two_close_ready(which: str, signal_index: int) -> bool:
@@ -2919,7 +2930,9 @@ def _run_seesaw_backtest(
 
             chosen_target = None
             if pending_entry_target is not None:
-                if _two_close_ready(pending_entry_target, int(pending_entry_signal_index)):
+                if (not _entry_confirmation_enabled(pending_entry_target)) or _two_close_ready(
+                    pending_entry_target, int(pending_entry_signal_index)
+                ):
                     chosen_target = pending_entry_target
                     pending_entry_target = None
                     pending_entry_signal_index = None
@@ -2942,13 +2955,17 @@ def _run_seesaw_backtest(
                 elif not use_swap and position_symbol == "sub" and sig["main"]["signal"]:
                     chosen_target = "main"
                 if chosen_target is not None:
-                    for item in sig.values():
-                        item["signal"] = False
-                    if _two_close_ready(chosen_target, raw_signal_index):
-                        sig[chosen_target]["signal"] = True
+                    if not _entry_confirmation_enabled(chosen_target):
+                        # 未开启右侧确认的标的沿用原信号日后下一交易日成交。
+                        pass
                     else:
-                        pending_entry_target = chosen_target
-                        pending_entry_signal_index = raw_signal_index
+                        for item in sig.values():
+                            item["signal"] = False
+                        if _two_close_ready(chosen_target, raw_signal_index):
+                            sig[chosen_target]["signal"] = True
+                        else:
+                            pending_entry_target = chosen_target
+                            pending_entry_signal_index = raw_signal_index
 
         def _sell_held():
             """持有标的贪恐卖出（trailing 支持；trailing=0 贪即卖时 sell_shrink_z>0 需当日缩量确认）。"""
@@ -3395,7 +3412,10 @@ def _evaluate_search_candidates(
                 payload.sub3_volume_signal_symbol,
                 payload.sell_ma5_confirm,
                 payload.sell_ma5_signal_symbol,
-                payload.entry_two_close_confirm,
+                payload.entry_two_close_confirm_main,
+                payload.entry_two_close_confirm_sub,
+                payload.entry_two_close_confirm_sub2,
+                payload.entry_two_close_confirm_sub3,
             )
             futures_map[future] = {
                 "start_index": batch[0][0],
@@ -3459,7 +3479,10 @@ def _evaluate_search_batch(
     sub3_volume_signal_symbol: Optional[str] = None,
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF,
     sell_ma5_signal_symbol: Optional[str] = None,
-    entry_two_close_confirm: bool = False,
+    entry_two_close_confirm_main: bool = False,
+    entry_two_close_confirm_sub: bool = False,
+    entry_two_close_confirm_sub2: bool = False,
+    entry_two_close_confirm_sub3: bool = False,
 ) -> Dict:
     results = []
     skipped_combinations = 0
@@ -3546,7 +3569,10 @@ def _evaluate_search_batch(
                 sub3_volume_ratio_threshold=float(sub3_volume_ratio_threshold if sub3_volume_ratio_threshold is not None else 1.3),
                 sell_ma5_confirm=str(sell_ma5_confirm or SELL_MA5_CONFIRM_OFF),
                 sell_ma5_signal_symbol=sell_ma5_signal_symbol,
-                entry_two_close_confirm=bool(entry_two_close_confirm),
+                entry_two_close_confirm_main=bool(entry_two_close_confirm_main),
+                entry_two_close_confirm_sub=bool(entry_two_close_confirm_sub),
+                entry_two_close_confirm_sub2=bool(entry_two_close_confirm_sub2),
+                entry_two_close_confirm_sub3=bool(entry_two_close_confirm_sub3),
                 volume_z_threshold=float(volume_z_threshold) if volume_z_threshold is not None else None,
                 sell_shrink_z=float(sell_shrink_z),
                 buy_turn_signal_mode=str(buy_turn_signal_mode),

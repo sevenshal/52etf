@@ -102,7 +102,11 @@ const defaultValues = {
   sub3_volume_ratio_threshold: 1.3,
   // 卖出跌破MA5确认：off=贪婪即卖（默认，与现有实盘一致）
   sell_ma5_confirm: 'off',
-  entry_two_close_confirm: true,
+  entry_two_close_confirm: false,
+  entry_two_close_confirm_main: false,
+  entry_two_close_confirm_sub: true,
+  entry_two_close_confirm_sub2: false,
+  entry_two_close_confirm_sub3: false,
   // 换仓阈值：对称轮动 45
   swap_threshold: 45,
   // 估值点位闸门：卖出需近一年估值点位≥80（极度高估），恐贪≥90 不看估值直接卖；买入不设估值闸门
@@ -140,7 +144,11 @@ const normalizeConfig = (config) => ({
   sub3_volume_ratio_threshold: config?.sub3_volume_ratio_threshold ?? 1.3,
   sub3_greed_threshold: config?.sub3_greed_threshold ?? 75,
   sell_ma5_confirm: config?.sell_ma5_confirm ?? 'off',
-  entry_two_close_confirm: config?.entry_two_close_confirm ?? true,
+  entry_two_close_confirm: false,
+  entry_two_close_confirm_main: config?.entry_two_close_confirm_main ?? false,
+  entry_two_close_confirm_sub: config?.entry_two_close_confirm_sub ?? true,
+  entry_two_close_confirm_sub2: config?.entry_two_close_confirm_sub2 ?? false,
+  entry_two_close_confirm_sub3: config?.entry_two_close_confirm_sub3 ?? false,
   swap_threshold: config?.swap_threshold ?? null,
   // 存量配置没有估值闸门（NULL=关闭），不能被默认值覆盖
   valuation_window: config?.valuation_window ?? 252,
@@ -429,7 +437,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
     sub3_volume_ratio_threshold: values.sub3_volume_ratio_threshold ?? 1.3,
     sub3_greed_threshold: values.sub3_greed_threshold ?? 75,
     sell_ma5_confirm: values.sell_ma5_confirm || 'off',
-    entry_two_close_confirm: values.entry_two_close_confirm ?? true,
+    entry_two_close_confirm: false,
+    entry_two_close_confirm_main: values.entry_two_close_confirm_main ?? false,
+    entry_two_close_confirm_sub: values.entry_two_close_confirm_sub ?? true,
+    entry_two_close_confirm_sub2: values.entry_two_close_confirm_sub2 ?? false,
+    entry_two_close_confirm_sub3: values.entry_two_close_confirm_sub3 ?? false,
     swap_threshold: values.swap_threshold ?? null,
     volume_z_threshold: values.volume_z_threshold ?? null,
     sell_shrink_z: values.sell_shrink_z ?? -1,
@@ -504,7 +516,11 @@ const AStockFearStrategy = ({ embedded = false }) => {
           sub3_buy_threshold_values: String(values.sub3_buy_threshold ?? 20),
           sub3_volume_ratio_threshold_values: String(values.sub3_volume_ratio_threshold ?? 1.3),
           sell_ma5_confirm: values.sell_ma5_confirm || 'off',
-          entry_two_close_confirm: values.entry_two_close_confirm ?? true,
+          entry_two_close_confirm: false,
+          entry_two_close_confirm_main: values.entry_two_close_confirm_main ?? false,
+          entry_two_close_confirm_sub: values.entry_two_close_confirm_sub ?? true,
+          entry_two_close_confirm_sub2: values.entry_two_close_confirm_sub2 ?? false,
+          entry_two_close_confirm_sub3: values.entry_two_close_confirm_sub3 ?? false,
           // 估值点位闸门按实盘配置原样传过去（留空=关闭 → none）
           valuation_window_values: [values.valuation_window ?? 252],
           valuation_buy_max_values: formatOptionalCandidate(values.valuation_buy_max),
@@ -827,7 +843,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
             showIcon
             style={{ marginBottom: 16 }}
             message="策略说明"
-            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日数据判断。买入/换仓：恐慌放量先锁定候选，含信号日在内连续两日收盘均高于各自4日前收盘，才在下一交易日下单；挂起换仓不会先卖原持仓。卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
+            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日数据判断。右侧两日确认可按标的独立开启（默认仅科创50）：恐慌放量先锁定候选，含信号日在内连续两日收盘均高于各自4日前收盘，才在下一交易日下单；未开启标的保持原逻辑，挂起换仓不会先卖原持仓。卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
           />
           <Table
             rowKey="id"
@@ -968,6 +984,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           <Form.Item name="volume_ratio_threshold" label="买入量比阈值(>=)">
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
                           </Form.Item>
+                          <Form.Item name="entry_two_close_confirm_main" label="红利右侧两日确认" valuePropName="checked">
+                            <Switch />
+                          </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="greed_threshold" label="红利ETF止盈区贪恐阈值(>=)">
@@ -1071,6 +1090,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
+                          <Form.Item name="entry_two_close_confirm_sub" label="科创50右侧两日确认" valuePropName="checked">
+                            <Switch />
+                          </Form.Item>
                         </Col>
                         <Col xs={24} md={4}>
                           <Form.Item name="swap_threshold" label="换仓阈值(留空=主辅跷跷板)">
@@ -1118,6 +1140,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
+                          <Form.Item name="entry_two_close_confirm_sub2" label="纳指科技右侧两日确认" valuePropName="checked">
+                            <Switch />
+                          </Form.Item>
                         </Col>
                         <Col span={24}><Divider orientation="left">候选标的 3：云计算（可选）</Divider></Col>
                         <Col xs={24} md={24}>
@@ -1159,6 +1184,9 @@ const AStockFearStrategy = ({ embedded = false }) => {
                             tooltip={logZVolumeEnabled ? '已启用统一放量标准差(log-z)，第三候补放量统一用该标准差，此阈值被忽略' : '第三候补放量量比阈值'}
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
+                          </Form.Item>
+                          <Form.Item name="entry_two_close_confirm_sub3" label="云计算右侧两日确认" valuePropName="checked">
+                            <Switch />
                           </Form.Item>
                         </Col>
                         <Col xs={24} md={24}>
