@@ -70,6 +70,12 @@ EMAIL_SCENARIOS = [
         "description": "SOXL 情绪量能策略产生买入或卖出调仓动作。",
     },
     {
+        "key": "a_stock_fear_strategy_rebalance_signal",
+        "name": "A股 ETF 情绪量能策略调仓提醒",
+        "category": "交易",
+        "description": "A股 ETF 情绪量能实盘策略实际产生买入、卖出或换仓订单后发送的提醒。",
+    },
+    {
         "key": "factor_live_trading_error",
         "name": "因子线上交易异常",
         "category": "交易",

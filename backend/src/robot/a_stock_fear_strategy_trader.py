@@ -413,6 +413,17 @@ class AStockFearStrategyTrader:
         return volume / prior
 
     @staticmethod
+    def _close_at(bars: Optional[pd.DataFrame], trade_date: date) -> Optional[float]:
+        """取得标的在指定交易日的收盘价。"""
+        if bars is None or bars.empty:
+            return None
+        rows = bars[bars["trade_date"] == trade_date]
+        if rows.empty:
+            return None
+        value = pd.to_numeric(rows.iloc[-1].get("close"), errors="coerce")
+        return float(value) if pd.notna(value) else None
+
+    @staticmethod
     def _log_z_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
         """信号日对数放量 z 值：(log(vol) - 前20日log均值) / 前20日log标准差（与回测一致）。"""
         if bars is None or bars.empty:
@@ -710,12 +721,15 @@ class AStockFearStrategyTrader:
         fear_score: float,
         fear_label: str,
         signal_date: date,
-        volume_ratio: float,
+        volume_ratio: Optional[float],
+        fear_volume_date: Optional[date],
+        fear_volume_symbol: Optional[str],
+        signal_close: Optional[float],
         trade_message: str,
     ):
         action_label = "买入" if action == "BUY" else "卖出"
         amount = float(quantity or 0) * float(price or 0)
-        body = "\n".join([
+        body_lines = [
             "A股情绪量能策略已产生调仓动作。",
             "",
             f"配置ID: {config_id}",
@@ -726,14 +740,22 @@ class AStockFearStrategyTrader:
             f"参考价格: {price:.4f}",
             f"估算金额: {amount:.2f}",
             f"仓位变化: {position_ratio_before:.2f}% -> {position_ratio_after:.2f}%",
-            f"恐贪分数（{signal_date}）: {fear_score:.2f}",
             f"恐贪来源: {fear_label}",
-            f"量比（{signal_date}）: {volume_ratio:.4f}",
+            f"恐贪分数: {fear_score:.2f}",
+            f"信号日: {signal_date}",
+            f"信号日收盘价: {signal_close:.4f}" if signal_close is not None else "信号日收盘价: -",
             f"触发来源: {trigger_source}",
             "",
-            f"执行信息: {trade_message}",
+            f"调仓原因: {trade_message}",
             f"通知时间: {datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')} (Asia/Shanghai)",
-        ])
+        ]
+        if fear_volume_date is not None:
+            body_lines.insert(11, f"恐慌放量标的: {fear_volume_symbol or symbol}")
+            body_lines.insert(12, f"恐慌放量日: {fear_volume_date.isoformat()}")
+            body_lines.insert(13, f"恐慌放量日量能（量比）: {volume_ratio:.4f}" if volume_ratio is not None else "恐慌放量日量能（量比）: -")
+        elif volume_ratio is not None:
+            body_lines.insert(11, f"信号日量能（量比）: {volume_ratio:.4f}")
+        body = "\n".join(body_lines)
         send_configured_email(
             "a_stock_fear_strategy_rebalance_signal",
             f"A股情绪量能策略调仓提醒: {action_label} {symbol} {masked_account_id}#{config_id}",
@@ -1273,6 +1295,9 @@ class AStockFearStrategyTrader:
                     candidates.append(("sub3", sub3_symbol, sub3_price, sub3_fear_label, sub3_fear_score))
                 return min(candidates, key=lambda c: c[4]) if candidates else None
 
+            # 买入/换仓在二次收盘确认后才执行时，保留最初的恐慌放量触发日用于邮件说明。
+            entry_fear_volume_date = signal_date
+            entry_price_bars: Dict[str, Optional[pd.DataFrame]] = {}
             entry_wait_message = ""
             if bool(getattr(config, "entry_two_close_confirm", True)) and log_action != "SKIP" and can_trade:
                 # 确认K线始终使用实际交易 ETF 自身的收盘价；量比来源可以是不同 ETF。
@@ -1298,8 +1323,10 @@ class AStockFearStrategyTrader:
                 pending_target = getattr(state, "pending_entry_target", None)
                 confirmed_target = None
                 if pending_target and getattr(state, "pending_entry_signal_date", None):
-                    if self._two_close_confirmation_ready(entry_price_bars.get(pending_target), signal_date, state.pending_entry_signal_date):
+                    pending_entry_signal_date = state.pending_entry_signal_date
+                    if self._two_close_confirmation_ready(entry_price_bars.get(pending_target), signal_date, pending_entry_signal_date):
                         confirmed_target = pending_target
+                        entry_fear_volume_date = pending_entry_signal_date
                         state.pending_entry_target = None
                         state.pending_entry_signal_date = None
                     else:
@@ -1738,6 +1765,46 @@ class AStockFearStrategyTrader:
                 trade_vr = volume_ratio
                 trade_fear_label = fear_label
 
+            # 邮件中的恐慌放量日按实际买入/换仓目标的原始触发日展示；
+            # 卖出没有“恐慌放量”触发，仍展示本次信号日量能与收盘价。
+            notification_symbol = order_target_symbol if order_action == "SELL_AND_BUY" else order_symbol
+            notification_bars = None
+            notification_price_bars = None
+            if notification_symbol == symbol:
+                notification_bars = bars
+                notification_price_bars = entry_price_bars.get("main")
+                if notification_price_bars is None:
+                    notification_price_bars = (
+                        bars if volume_symbol == symbol
+                        else self._fetch_etf_bars(symbol, lookback_start, signal_date)
+                    )
+            elif notification_symbol == sub_symbol:
+                notification_bars = sub_bars
+                notification_price_bars = entry_price_bars.get("sub")
+                if notification_price_bars is None:
+                    notification_price_bars = sub_bars
+            elif notification_symbol == sub2_symbol:
+                notification_bars = sub2_bars
+                notification_price_bars = entry_price_bars.get("sub2")
+                if notification_price_bars is None:
+                    notification_price_bars = sub2_bars
+            elif notification_symbol == sub3_symbol:
+                notification_bars = sub3_bars
+                notification_price_bars = entry_price_bars.get("sub3")
+                if notification_price_bars is None:
+                    notification_price_bars = sub3_bars
+            else:
+                notification_price_bars = holding_bars
+
+            is_entry_rebalance = order_action in {"BUY", "SELL_AND_BUY"}
+            notification_fear_volume_date = entry_fear_volume_date if is_entry_rebalance else None
+            notification_volume_ratio = (
+                self._volume_ratio_at(notification_bars, entry_fear_volume_date)
+                if is_entry_rebalance and notification_bars is not None
+                else trade_vr
+            )
+            notification_signal_close = self._close_at(notification_price_bars, signal_date)
+
             log_message = (
                 f"{trade_message} | fear_score={trade_fear:.2f} | fear_date={signal_date}"
                 f" | volume_ratio={trade_vr:.4f} | price={current_price:.4f} | symbol={trade_symbol}"
@@ -1783,7 +1850,10 @@ class AStockFearStrategyTrader:
                     fear_score=trade_fear,
                     fear_label=trade_fear_label,
                     signal_date=signal_date,
-                    volume_ratio=trade_vr,
+                    volume_ratio=notification_volume_ratio,
+                    fear_volume_date=notification_fear_volume_date,
+                    fear_volume_symbol=notification_symbol if is_entry_rebalance else None,
+                    signal_close=notification_signal_close,
                     trade_message=trade_message,
                 )
         except Exception as exc:
