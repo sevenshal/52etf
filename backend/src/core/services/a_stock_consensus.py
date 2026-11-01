@@ -1335,7 +1335,19 @@ def load_a_stock_consensus_detail(db: Any, symbol: str, *, use_pe_band: bool = F
     return payload
 
 
-def _index_valuation_payload(symbol: str, aggregate: Mapping[str, Any]) -> Dict[str, Any]:
+def _forward_pe_from_price(close: Any, eps: Any) -> Optional[float]:
+    """按估值日收盘价和当期一致预期 EPS 计算前瞻 PE。"""
+    price = _positive_float(close)
+    forecast_eps = _positive_float(eps)
+    return round(price / forecast_eps, 4) if price is not None and forecast_eps is not None else None
+
+
+def _index_valuation_payload(
+    symbol: str,
+    aggregate: Mapping[str, Any],
+    *,
+    last_price: Any = None,
+) -> Dict[str, Any]:
     """指数估值用的成分股估值：下限 / 中枢 / 上限 = 各机构最低 / 中位 / 最高。"""
     current, following, _ = aggregate["horizons"]
     return {
@@ -1347,9 +1359,12 @@ def _index_valuation_payload(symbol: str, aggregate: Mapping[str, Any]) -> Dict[
         "forward_next_fy_lo": following["lo"],
         "forward_next_fy_mid": following["median"],
         "forward_next_fy_hi": following["hi"],
-        # 当前/下一财年一致预期 PE；指数估值服务会按历史成分权重做加权调和聚合。
-        "forward_pe_current_fy": aggregate["consensus_pe"],
-        "forward_pe_next_fy": aggregate["next_consensus_pe"],
+        # 前瞻 PE 必须使用估值日收盘价 ÷ 当日可见的一致预期 EPS，不能直接采用
+        # 研报行自带的 pe（它是研报发表时的价格口径，之后股价变化不会更新）。
+        "forward_eps_current_fy": aggregate["consensus_eps"],
+        "forward_eps_next_fy": aggregate["next_consensus_eps"],
+        "forward_pe_current_fy": _forward_pe_from_price(last_price, aggregate["consensus_eps"]),
+        "forward_pe_next_fy": _forward_pe_from_price(last_price, aggregate["next_consensus_eps"]),
         "growth_pct": aggregate.get("growth_pct"),
         "report_count": aggregate.get("report_count"),
         "target_report_count": aggregate.get("target_report_count"),
@@ -1362,6 +1377,7 @@ def _index_valuation_payload(symbol: str, aggregate: Mapping[str, Any]) -> Dict[
 _INDEX_PRICE_FIELDS = (
     "fair_value_lo", "fair_value_mid", "fair_value_hi",
     "forward_next_fy_lo", "forward_next_fy_mid", "forward_next_fy_hi",
+    "forward_eps_current_fy", "forward_eps_next_fy",
 )
 
 
@@ -1475,7 +1491,10 @@ def load_a_stock_consensus_valuation_map(
         )
         if aggregate is None or close is None:
             continue
-        result[symbol] = {**_index_valuation_payload(symbol, aggregate), "last_price": close}
+        result[symbol] = {
+            **_index_valuation_payload(symbol, aggregate, last_price=close),
+            "last_price": close,
+        }
     return result
 
 
@@ -1578,6 +1597,12 @@ def load_a_stock_consensus_valuation_history_map(
                 continue
             result[trade_day][symbol] = {
                 **payload,
+                "forward_pe_current_fy": _forward_pe_from_price(
+                    close, payload.get("forward_eps_current_fy")
+                ),
+                "forward_pe_next_fy": _forward_pe_from_price(
+                    close, payload.get("forward_eps_next_fy")
+                ),
                 "last_price": close,
                 "is_ffilled": is_ffilled,
                 "is_stale": bool(payload.get("is_stale")) or is_ffilled,

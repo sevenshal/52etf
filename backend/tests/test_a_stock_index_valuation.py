@@ -365,6 +365,9 @@ def test_load_a_stock_consensus_valuation_map_builds_forward_range():
     assert valuation["forward_next_fy_mid"] == pytest.approx(156)
     assert valuation["forward_next_fy_hi"] == pytest.approx(168)
     assert valuation["last_price"] == 100
+    # 不能用研报行中发表当日的 pe=20；估值日应为当日价格 ÷ 当年 EPS。
+    assert valuation["forward_pe_current_fy"] == pytest.approx(10)
+    assert valuation["forward_pe_next_fy"] == pytest.approx(8.3333)
     # T 池(一季报 04-25 之后)只有一家机构，退到 T-1 池。
     assert valuation["pool"] == "T-1"
     assert valuation["is_stale"] is True

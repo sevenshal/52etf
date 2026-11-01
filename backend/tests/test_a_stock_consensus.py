@@ -441,6 +441,9 @@ def test_valuation_history_map_forward_fills_missing_days_up_to_365_days():
         (date(2026, 8, 27), date(2026, 6, 30)),
     ]
     report_rows = _report("机构A", date(2025, 5, 10), 30.0, {2025: 1.0, 2026: 1.2}, symbol="600519.SH")
+    # 研报行 pe 是研报发表时口径，历史前瞻 PE 必须按每个交易日收盘价 / EPS 重算。
+    for row in report_rows:
+        row["pe"] = 99.0
     requested = [date(2025, 6, 2), date(2025, 9, 1), date(2025, 11, 3), date(2026, 10, 29), date(2026, 11, 2)]
     market_rows = [
         {"ts_code": "600519.SH", "trade_date": day, "close": 20.0}
@@ -460,6 +463,7 @@ def test_valuation_history_map_forward_fills_missing_days_up_to_365_days():
 
     first = history[date(2025, 6, 2)]["600519.SH"]
     assert first["fair_value_lo"] == 30.0
+    assert first["forward_pe_current_fy"] == pytest.approx(20.0)
     assert first["is_ffilled"] is False
     assert first["is_stale"] is True  # 只有一家机构，走的 T-1 池
     assert history[date(2025, 9, 1)]["600519.SH"]["is_ffilled"] is False
