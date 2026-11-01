@@ -433,18 +433,18 @@ const SOXXFearGreed = () => {
     const netShareFlowAmounts = filteredData.map(item => shareFlowByDate.get(item.date)?.estimated_flow_amount_yi ?? null);
     const showShareFlow = netShareFlowAmounts.some(isFiniteNumber);
     const volumeYAxisIndex = showShareFlow ? 3 : 2;
-    const valuationYAxisIndex = showShareFlow ? 4 : 3;
+    const forwardPeYAxisIndex = showShareFlow ? 4 : 3;
     const valuationHistoryByDate = new Map(
       (expandedDetail?.valuation_history || []).map(item => [item.date, item])
     );
-    const valuationRatios = filteredData.map(item => (
-      valuationHistoryByDate.get(item.date)?.valuation_ratio ?? null
+    const currentForwardPes = filteredData.map(item => (
+      valuationHistoryByDate.get(item.date)?.forward_pe_current_fy ?? null
     ));
-    const showValuationRatio = valuationRatios.some(isFiniteNumber);
+    const showCurrentForwardPe = currentForwardPes.some(isFiniteNumber);
     // 历史详情用了 proxy_etf 价格/成交量时，价格曲线名改为「指数名ETF价格」
     const priceSeriesName = expandedDetail?.proxy_etf ? `${ticker}ETF价格` : `${ticker}价格`;
     const priceAxisRange = getFocusedAxisRange(prices);
-    const valuationAxisRange = getFocusedAxisRange(valuationRatios);
+    const forwardPeAxisRange = getFocusedAxisRange(currentForwardPes);
 
     // 选中的子分项：得分曲线画在同一个 0-100 轴上，便于和总分对照
     const activeComponentSample = activeComponentKey
@@ -475,16 +475,16 @@ const SOXXFearGreed = () => {
           '贪恐5日均线',
           ...(activeComponentName ? [activeComponentName] : []),
           priceSeriesName,
-          ...(showValuationRatio ? ['估值系数'] : []),
+          ...(showCurrentForwardPe ? ['当前财年前瞻PE'] : []),
           '成交量',
           ...(showShareFlow ? ['当日净申赎额'] : []),
         ],
         top: 0,
       },
       grid: [
-        { left: 56, right: showValuationRatio ? 112 : 64, top: 48, height: showShareFlow ? '46%' : '57%' },
-        { left: 56, right: showValuationRatio ? 112 : 64, top: showShareFlow ? '60%' : '72%', height: showShareFlow ? '12%' : undefined, bottom: showShareFlow ? undefined : 58 },
-        ...(showShareFlow ? [{ left: 56, right: showValuationRatio ? 112 : 64, top: '79%', bottom: 58 }] : []),
+        { left: 56, right: showCurrentForwardPe ? 112 : 64, top: 48, height: showShareFlow ? '46%' : '57%' },
+        { left: 56, right: showCurrentForwardPe ? 112 : 64, top: showShareFlow ? '60%' : '72%', height: showShareFlow ? '12%' : undefined, bottom: showShareFlow ? undefined : 58 },
+        ...(showShareFlow ? [{ left: 56, right: showCurrentForwardPe ? 112 : 64, top: '79%', bottom: 58 }] : []),
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: showShareFlow ? [0, 1, 2] : [0, 1], start: 0, end: 100 },
@@ -547,13 +547,13 @@ const SOXXFearGreed = () => {
         },
         {
           type: 'value',
-          name: showValuationRatio ? '估值' : '',
-          ...valuationAxisRange,
+          name: showCurrentForwardPe ? '当前财年前瞻PE' : '',
+          ...forwardPeAxisRange,
           position: 'right',
           offset: 54,
-          axisLabel: { show: showValuationRatio, formatter: value => Number(value).toFixed(1) },
-          axisLine: { show: showValuationRatio, lineStyle: { color: '#389e0d' } },
-          axisTick: { show: showValuationRatio },
+          axisLabel: { show: showCurrentForwardPe, formatter: value => `${Number(value).toFixed(1)}×` },
+          axisLine: { show: showCurrentForwardPe, lineStyle: { color: '#389e0d' } },
+          axisTick: { show: showCurrentForwardPe },
           splitLine: { show: false },
         },
       ],
@@ -627,15 +627,15 @@ const SOXXFearGreed = () => {
           lineStyle: { width: 2, color: '#fa8c16' },
           itemStyle: { color: '#fa8c16' },
         },
-        ...(showValuationRatio ? [{
-          name: '估值系数',
+        ...(showCurrentForwardPe ? [{
+          name: '当前财年前瞻PE',
           type: 'line',
-          yAxisIndex: valuationYAxisIndex,
+          yAxisIndex: forwardPeYAxisIndex,
           smooth: true,
           showSymbol: false,
           connectNulls: false,
-          data: valuationRatios,
-          lineStyle: { width: 1.8, type: 'dashed', color: '#389e0d' },
+          data: currentForwardPes,
+          lineStyle: { width: 1.8, color: '#389e0d' },
           itemStyle: { color: '#389e0d' },
         }] : []),
         {
@@ -1290,13 +1290,13 @@ const SummaryCard = ({ option, summary, shareFlowSummary, active, onToggle }) =>
       </div>
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
-          <span style={{ color: valuationColor(valuation.valuation_position_label) }}>
-            {valuation.valuation_position_label || '-'}
+          <span style={{ color: valuationColor(valuation.forward_pe_current_fy_position_all_time_label) }}>
+            {valuation.forward_pe_current_fy_position_all_time_label || '-'}
           </span>
           <span>
-            近{valuation.valuation_history_days || 0}日{' '}
-            {isFiniteNumber(valuation.valuation_position_pct)
-              ? `${formatNumber(valuation.valuation_position_pct, 1)}%分位`
+            当前财年前瞻PE · 全历史{valuation.forward_pe_current_fy_history_all_time_days || 0}日{' '}
+            {isFiniteNumber(valuation.forward_pe_current_fy_position_all_time_pct)
+              ? `${formatNumber(valuation.forward_pe_current_fy_position_all_time_pct, 1)}%分位`
               : '样本不足'}
           </span>
           <span>

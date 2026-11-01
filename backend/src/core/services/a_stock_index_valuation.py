@@ -507,6 +507,10 @@ def load_a_stock_index_valuation_history(
             "date": snapshot_date.isoformat(),
             "valuation_ratio": _valuation_ratio((payload or {}).get("current_gap_pct")),
             "current_gap_pct": (payload or {}).get("current_gap_pct"),
+            # 自算贪恐历史图使用当前财年前瞻 PE；旧快照尚未回补该字段时保持为空。
+            "forward_pe_current_fy": _positive_number(
+                (payload or {}).get(FORWARD_PE_CURRENT_FY_FIELD)
+            ),
         }
         for snapshot_date, payload in rows
     ]
