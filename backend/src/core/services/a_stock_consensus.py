@@ -1347,6 +1347,9 @@ def _index_valuation_payload(symbol: str, aggregate: Mapping[str, Any]) -> Dict[
         "forward_next_fy_lo": following["lo"],
         "forward_next_fy_mid": following["median"],
         "forward_next_fy_hi": following["hi"],
+        # 当前/下一财年一致预期 PE；指数估值服务会按历史成分权重做加权调和聚合。
+        "forward_pe_current_fy": aggregate["consensus_pe"],
+        "forward_pe_next_fy": aggregate["next_consensus_pe"],
         "growth_pct": aggregate.get("growth_pct"),
         "report_count": aggregate.get("report_count"),
         "target_report_count": aggregate.get("target_report_count"),

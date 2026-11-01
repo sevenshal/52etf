@@ -13,6 +13,7 @@ from src.core.services.a_stock_index_valuation import (
     _percentile_rank,
     _valuation_ratio,
     _valuation_position_label,
+    calculate_weighted_index_forward_pe,
     calculate_weighted_index_market_multiples,
     calculate_weighted_index_valuation,
 )
@@ -165,6 +166,20 @@ def test_weighted_market_multiples_use_harmonic_mean_and_exclude_non_positive_va
     assert result["pb"] == pytest.approx(2.4615)
 
 
+def test_weighted_index_forward_pe_uses_harmonic_mean_and_excludes_non_positive_values():
+    result = calculate_weighted_index_forward_pe(
+        holdings=[_holding("AAA.SH", 0.5), _holding("BBB.SZ", 0.3), _holding("CCC.SH", 0.2)],
+        valuations={
+            "AAA.SH": SimpleNamespace(forward_pe_current_fy=10.0),
+            "BBB.SZ": SimpleNamespace(forward_pe_current_fy=20.0),
+            "CCC.SH": SimpleNamespace(forward_pe_current_fy=-5.0),
+        },
+        field="forward_pe_current_fy",
+    )
+
+    assert result == pytest.approx(12.3077)
+
+
 def test_index_valuation_uses_index_daily_history_not_fear_greed_history(monkeypatch):
     dates = [date(2018, 1, 2), date(2018, 1, 3)]
 
@@ -216,14 +231,36 @@ def test_index_valuation_uses_index_daily_history_not_fear_greed_history(monkeyp
 
 
 def test_market_multiple_positions_expose_all_requested_windows():
-    history = [{"pe_ttm": float(value), "pb": float(value * 2)} for value in range(1, 1201)]
-    result = _build_market_multiple_position_fields(history, {"pe_ttm": 1200.0, "pb": 2400.0})
+    history = [
+        {
+            "pe_ttm": float(value),
+            "forward_pe_current_fy": float(value * 1.5),
+            "forward_pe_next_fy": float(value * 1.25),
+            "pb": float(value * 2),
+        }
+        for value in range(1, 1201)
+    ]
+    result = _build_market_multiple_position_fields(
+        history,
+        {
+            "pe_ttm": 1200.0,
+            "forward_pe_current_fy": 1800.0,
+            "forward_pe_next_fy": 1500.0,
+            "pb": 2400.0,
+        },
+    )
 
     assert result["pe_ttm_history_252_days"] == 252
     assert result["pe_ttm_history_504_days"] == 504
     assert result["pe_ttm_history_1000_days"] == 1000
     assert result["pe_ttm_history_all_time_days"] == 1200
     assert result["pe_ttm_position_all_time_label"] == "极度高估"
+    assert result["forward_pe_current_fy_history_252_days"] == 252
+    assert result["forward_pe_current_fy_history_504_days"] == 504
+    assert result["forward_pe_current_fy_history_1000_days"] == 1000
+    assert result["forward_pe_current_fy_history_all_time_days"] == 1200
+    assert result["forward_pe_current_fy_position_all_time_label"] == "极度高估"
+    assert result["forward_pe_next_fy_position_all_time_label"] == "极度高估"
     assert result["pb_position_504_label"] == "极度高估"
 
 

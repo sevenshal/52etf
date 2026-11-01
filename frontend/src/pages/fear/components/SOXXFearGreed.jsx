@@ -698,7 +698,13 @@ const SOXXFearGreed = () => {
   const valuationAllTimePct = valuation?.valuation_position_all_time_pct;
   const valuationAllTimeDays = Number(valuation?.valuation_history_all_time_days) || 0;
   const renderMarketMultiplePositions = (field) => {
-    const metricLabel = field === 'pe_ttm' ? 'PE(TTM)' : 'PB';
+    const metricLabel = field === 'pe_ttm'
+      ? 'PE(TTM)'
+      : field === 'forward_pe_current_fy'
+        ? '当前财年前瞻PE'
+        : field === 'forward_pe_next_fy'
+          ? '下财年前瞻PE'
+          : 'PB';
     return [252, 504, 1000, 'all_time'].map(window => {
       const suffix = window === 'all_time' ? 'all_time' : window;
       const label = valuation?.[`${field}_position_${suffix}_label`];
@@ -906,6 +912,14 @@ const SOXXFearGreed = () => {
                   <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pe_ttm')}</Space>
                 </div>
                 <div className="soxx-fear-market-multiple-row">
+                  <strong>当前财年前瞻PE {formatNumber(valuation.forward_pe_current_fy, 2)}×</strong>
+                  <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('forward_pe_current_fy')}</Space>
+                </div>
+                <div className="soxx-fear-market-multiple-row">
+                  <strong>下财年前瞻PE {formatNumber(valuation.forward_pe_next_fy, 2)}×</strong>
+                  <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('forward_pe_next_fy')}</Space>
+                </div>
+                <div className="soxx-fear-market-multiple-row">
                   <strong>PB {formatNumber(valuation.pb, 2)}×</strong>
                   <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pb')}</Space>
                 </div>
@@ -918,7 +932,7 @@ const SOXXFearGreed = () => {
                 </div>
               </div>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                估值系数、PE(TTM)、PB 的点位均为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。PE/PB 只聚合正数成分倍数；覆盖不足或研报待更新的成分会计入“待更新”。
+                估值系数、PE(TTM)、当前财年/下财年前瞻PE、PB 的点位均为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。前瞻PE取当日可见的一致预期；各 PE/PB 只聚合正数成分倍数，覆盖不足或研报待更新的成分会计入“待更新”。
               </Text>
             </Card>
           )}

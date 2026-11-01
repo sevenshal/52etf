@@ -177,6 +177,10 @@ def calculate_weighted_index_valuation(
 
 
 MARKET_MULTIPLE_FIELDS = ("pe_ttm", "pb")
+FORWARD_PE_CURRENT_FY_FIELD = "forward_pe_current_fy"
+FORWARD_PE_NEXT_FY_FIELD = "forward_pe_next_fy"
+FORWARD_PE_FIELDS = (FORWARD_PE_CURRENT_FY_FIELD, FORWARD_PE_NEXT_FY_FIELD)
+VALUATION_MULTIPLE_FIELDS = (*MARKET_MULTIPLE_FIELDS, *FORWARD_PE_FIELDS)
 
 
 def calculate_weighted_index_market_multiples(
@@ -211,6 +215,32 @@ def calculate_weighted_index_market_multiples(
         )
         for field in MARKET_MULTIPLE_FIELDS
     }
+
+
+def calculate_weighted_index_forward_pe(
+    *,
+    holdings: Iterable[Any],
+    valuations: Dict[str, Any],
+    field: str,
+) -> Optional[float]:
+    """按历史成分权重聚合当前或下一财年一致预期 PE。
+
+    个股前瞻 PE 取当日可见研报对下一财年 EPS 的一致预期；和 TTM PE 一样，
+    用加权调和平均聚合，且排除亏损/缺失的非正 PE。
+    """
+    covered_weight = 0.0
+    inverse_weighted_sum = 0.0
+    for holding in holdings:
+        weight = _positive_number(getattr(holding, "weight", None))
+        if weight is None:
+            continue
+        valuation = valuations.get(str(getattr(holding, "holding_symbol", "")).upper())
+        forward_pe = _positive_number(getattr(valuation, field, None)) if valuation else None
+        if forward_pe is None:
+            continue
+        covered_weight += weight
+        inverse_weighted_sum += weight / forward_pe
+    return round(covered_weight / inverse_weighted_sum, 4) if inverse_weighted_sum > 0 else None
 
 
 def load_a_stock_market_multiple_history_map(
@@ -321,6 +351,12 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
                 holdings=day_holdings,
                 valuations=day_valuations,
             )
+            for forward_pe_field in FORWARD_PE_FIELDS:
+                daily_market_multiples[trade_day][forward_pe_field] = calculate_weighted_index_forward_pe(
+                    holdings=day_holdings,
+                    valuations=day_valuations,
+                    field=forward_pe_field,
+                )
             if trade_day == latest_date:
                 latest_result = day_result
             if day_result.get("status") != "available" or day_result.get("current_gap_pct") is None:
@@ -650,10 +686,10 @@ def _build_market_multiple_position_fields(
     history: Iterable[Dict[str, Optional[float]]],
     current: Dict[str, Optional[float]],
 ) -> Dict[str, Any]:
-    """给 ETF 聚合 PE_TTM / PB 附加多窗口历史分位字段。"""
+    """给 ETF 聚合 PE(TTM) / PB / 前瞻 PE 附加多窗口历史分位字段。"""
     result: Dict[str, Any] = {}
     history_rows = list(history)
-    for field in MARKET_MULTIPLE_FIELDS:
+    for field in VALUATION_MULTIPLE_FIELDS:
         all_values = [
             float(row[field])
             for row in history_rows
