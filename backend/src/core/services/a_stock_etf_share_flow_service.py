@@ -18,6 +18,9 @@ from ..analytics_database import AnalyticsSession
 
 ETF_SHARE_FLOW_BASKET = [
     {"symbol": "510300.SH", "name": "沪深300ETF"},
+    {"symbol": "510310.SH", "name": "易方达沪深300ETF"},
+    {"symbol": "510330.SH", "name": "华夏沪深300ETF"},
+    {"symbol": "159919.SZ", "name": "嘉实沪深300ETF"},
     {"symbol": "510050.SH", "name": "上证50ETF"},
     {"symbol": "510500.SH", "name": "中证500ETF"},
     {"symbol": "512100.SH", "name": "中证1000ETF"},

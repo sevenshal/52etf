@@ -17,7 +17,7 @@ def test_a_stock_etf_share_flow_sync_is_a_targeted_share_task():
 
     assert "saved=10" in message
     assert sync.call_args.args[0] == [
-        "510300.SH", "510050.SH", "510500.SH", "512100.SH", "159915.SZ", "588000.SH",
+        "510300.SH", "510310.SH", "510330.SH", "159919.SZ", "510050.SH", "510500.SH", "512100.SH", "159915.SZ", "588000.SH",
     ]
 
 

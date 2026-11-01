@@ -812,7 +812,7 @@ def _run_a_stock_etf_share_flow_sync(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ):
-    """同步宽基 ETF 份额；默认最近三个交易日，传开始日期可回补历史。"""
+    """同步核心宽基 ETF 份额；默认最近三个交易日，传开始日期可回补历史。"""
     from .a_stock_base_data_sync import sync_a_stock_etf_share_history
     from ..core.services.a_stock_etf_share_flow_service import ETF_SHARE_FLOW_BASKET
 
@@ -2160,7 +2160,7 @@ class ScheduledTaskManager:
             "a_stock_etf_share_flow_sync": TaskDefinition(
                 task_key="a_stock_etf_share_flow_sync",
                 name="宽基ETF份额定向同步",
-                description="仅同步6只核心宽基ETF的基金份额，用于净申赎强度研究；不触发全市场A股基础数据同步，也不计入自算贪恐总分。",
+                description="仅同步核心宽基ETF（含4只沪深300ETF）的基金份额，用于净申赎强度研究和国家队ETF持仓占比；不触发全市场A股基础数据同步，也不计入自算贪恐总分。",
                 default_time="18:38",
                 default_enabled=True,
                 sort_order=75,

@@ -474,6 +474,18 @@
   margin-top: 12px;
 }
 
+.national-team-holding__notice,
+.national-team-holding__stats,
+.national-team-holding__charts,
+.national-team-holding__funds,
+.national-team-holding__method {
+  margin-top: 12px;
+}
+
+.national-team-holding__method > div {
+  margin-top: 8px;
+}
+
 @media (max-width: 640px) {
   .market-page {
     padding: 10px;

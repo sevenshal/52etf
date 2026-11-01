@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import AStockFundFlow from './AStockFundFlow';
 import AStockMarginLeverage from './AStockMarginLeverage';
+import NationalTeamEtfHolding from './NationalTeamEtfHolding';
 import MarketOverview from './MarketOverview';
 import MarketAlerts from './MarketAlerts';
 import MarketIndustryRelation from './MarketIndustryRelation';
@@ -20,6 +21,7 @@ const MARKET_TAB_ITEMS = [
   { key: 'industry', label: '行业关联', path: '/market/industry' },
   { key: 'fund-flow', label: '资金流向', path: '/market/fund-flow' },
   { key: 'margin-leverage', label: '两融杠杆', path: '/market/margin-leverage' },
+  { key: 'national-team-etf-holding', label: '国家队ETF持仓', path: '/market/national-team-etf-holding' },
   { key: 'earnings-gap', label: '净利润断层', path: '/market/earnings-gap' },
   { key: 'xueqiu-holdings', label: '雪球持仓', path: '/market/xueqiu-holdings' },
   { key: 'eastmoney-holdings', label: '东方财富', path: '/market/eastmoney-holdings' },
@@ -111,6 +113,7 @@ const Market = ({ initialTab = 'overview' }) => {
       {activeTab === 'industry' && <MarketIndustryRelation />}
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
       {activeTab === 'margin-leverage' && <AStockMarginLeverage />}
+      {activeTab === 'national-team-etf-holding' && <NationalTeamEtfHolding />}
       {activeTab === 'earnings-gap' && <MarketEarningsGap />}
       {activeTab === 'xueqiu-holdings' && <XueqiuTopHoldingsResearch />}
       {activeTab === 'eastmoney-holdings' && <EastmoneyHoldingsResearch />}

@@ -33,6 +33,7 @@ from ...core.services.market_overview import (
 )
 from ...core.services.market_volume import MarketVolumeDataError, fetch_intraday_volume_compare
 from ...core.services.a_stock_margin_dashboard import MarginDashboardDataError, fetch_margin_dashboard
+from ...core.services.national_team_etf_holding import NationalTeamHoldingDataError, fetch_national_team_etf_holding
 from .account import ADMIN_ACCOUNT_ID, valid_admin_account, valid_market_viewer
 
 
@@ -48,6 +49,18 @@ async def get_margin_leverage_dashboard(
     try:
         return await run_in_threadpool(fetch_margin_dashboard, days)
     except MarginDashboardDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/national-team-etf-holding")
+async def get_national_team_etf_holding_dashboard(
+    days: int = Query(1250, ge=20, le=1800),
+    account_id: str = Depends(valid_market_viewer),
+):
+    """核心沪深300 ETF 资产规模占成分股流通市值比例（国家队持仓代理）。"""
+    try:
+        return await run_in_threadpool(fetch_national_team_etf_holding, days)
+    except NationalTeamHoldingDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
