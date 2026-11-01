@@ -295,7 +295,6 @@ ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
     # 守猪逮兔 A 股 ETF 列表中原先没有自算贪恐/估值的境内股票指数。
     # 这些 ETF 的估值同样按各自指数成分股的一致预期聚合，不能借用名称相近的指数。
     {"symbol": "000001.SH", "ticker": "上证综指", "label": "上证综指", "index_name": "上证综合指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "510210.SH"},
-    {"symbol": "000913.CSI", "ticker": "300医药", "label": "300医药", "index_name": "沪深300医药卫生指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512010.SH"},
     {"symbol": "399987.SZ", "ticker": "中证酒", "label": "中证酒", "index_name": "中证酒指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "512690.SH"},
     {"symbol": "931079.CSI", "ticker": "5G通信", "label": "5G通信", "index_name": "中证5G通信主题指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515050.SH"},
     {"symbol": "000906.SH", "ticker": "中证800", "label": "中证800", "index_name": "中证800指数", "option_underlyings": list(A_STOCK_OPTION_PROXY_UNDERLYINGS), "proxy_etf": "515800.SH"},
@@ -346,7 +345,7 @@ ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS = [
 # 本轮守猪逮兔 A 股 ETF 估值补齐时新增的 8 个指数。一次性定向补数任务只能处理
 # 这些指数，避免填写历史开始日期时误触发全市场基础数据回刷。
 A_STOCK_ETF_VALUATION_NEW_INDEX_SYMBOLS = (
-    "000001.SH", "000913.CSI", "399987.SZ", "931079.CSI",
+    "000001.SH", "399987.SZ", "931079.CSI",
     "000906.SH", "H30590.CSI", "930713.CSI", "980017.SZ",
 )
 
@@ -385,7 +384,6 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
     "510880.SH",
     "512890.SH",
     "510210.SH",
-    "512010.SH",
     "512690.SH",
     "515050.SH",
     "515800.SH",
@@ -431,7 +429,6 @@ A_STOCK_INDEX_FEAR_GREED_PROXY_ETFS = (
 )
 A_STOCK_ETF_DAILY_NAMES = {
     "510210.SH": "上证综指ETF",
-    "512010.SH": "医药ETF",
     "512690.SH": "酒ETF",
     "515050.SH": "5GETF",
     "515800.SH": "中证800ETF",
@@ -531,7 +528,6 @@ A_STOCK_ETF_VALUATION_SYMBOLS = {
     "510300.SH": "000300.SH",
     "510500.SH": "000905.SH",
     "510880.SH": "000015.SH",
-    "512010.SH": "000913.CSI",
     "512100.SH": "000852.SH",
     "512170.SH": "399989.SZ",
     "512480.SH": "H30184.CSI",

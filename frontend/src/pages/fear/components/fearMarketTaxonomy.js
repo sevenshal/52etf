@@ -119,7 +119,7 @@ export const CN_INDUSTRY_GROUPS = [
     taxonomyCode: '880400',
     options: [cnOption('000991.SH', '全指医药', '一级行业')],
     children: [
-      { title: '综合医药', options: [cnOption('000933.SH', '医药卫生', '二级行业'), cnOption('000913.CSI', '300医药', '主题指数')] },
+      { title: '综合医药', options: [cnOption('000933.SH', '医药卫生', '二级行业')] },
       { title: '化学制药', code: '880401', options: [cnOption('931152.CSI', '创新药', '三级行业')] },
       { title: '中药', code: '880405', options: [cnOption('930641.CSI', '中证中药', '二级行业')] },
       { title: '生物制品', code: '880411', options: [cnOption('930726.CSI', '生物医药', '二级行业')] },

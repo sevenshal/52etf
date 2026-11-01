@@ -19,13 +19,13 @@ from src.robot.a_stock_base_data_config import (
 def test_szdt_domestic_equity_etfs_have_exact_valuation_index_mappings():
     """守猪逮兔中的境内股票 ETF 只映射其实际跟踪指数，不映射债券、黄金或 QDII。"""
     expected = {
-        "510210.SH": "000001.SH", "512010.SH": "000913.CSI", "512690.SH": "399987.SZ",
+        "510210.SH": "000001.SH", "512690.SH": "399987.SZ",
         "515050.SH": "931079.CSI", "515800.SH": "000906.SH", "562500.SH": "H30590.CSI",
         "159819.SZ": "930713.CSI", "159995.SZ": "980017.SZ", "159865.SZ": "930707.CSI",
         "159992.SZ": "931152.CSI",
     }
     targets = {str(item["symbol"]).upper() for item in A_STOCK_INDEX_FEAR_GREED_TARGETS}
-    assert len(A_STOCK_ETF_VALUATION_SYMBOLS) == 28
+    assert len(A_STOCK_ETF_VALUATION_SYMBOLS) == 27
     for etf_code, index_code in expected.items():
         assert A_STOCK_ETF_VALUATION_SYMBOLS[etf_code] == index_code
         assert index_code in targets
@@ -339,7 +339,7 @@ def test_additional_industry_targets_are_complete_and_unique():
         for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS
     }
 
-    assert len(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS) == 44
+    assert len(ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS) == 43
     assert len(symbols) == len(set(symbols))
     assert additional_symbols <= set(symbols)
     for item in ADDITIONAL_A_STOCK_INDEX_FEAR_GREED_TARGETS:
