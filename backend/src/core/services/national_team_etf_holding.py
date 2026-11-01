@@ -80,11 +80,14 @@ def _load_history() -> List[Dict[str, Any]]:
             SELECT e.trade_date,
                 e.etf_count,
                 c.component_count,
+                idx.close AS hs300_close,
                 e.etf_market_value_yuan / ? AS etf_market_value_yi,
                 c.hs300_float_market_value_yuan / ? AS hs300_float_market_value_yi,
                 e.etf_market_value_yuan / NULLIF(c.hs300_float_market_value_yuan, 0) * 100 AS holding_ratio_pct
             FROM etf e
             INNER JOIN component_market c USING (trade_date)
+            LEFT JOIN a_stock_index_daily idx
+                ON idx.trade_date = e.trade_date AND idx.ts_code = '000300.SH'
             WHERE c.component_count >= 290
             ORDER BY e.trade_date
         """, [*symbols, YI, YI])

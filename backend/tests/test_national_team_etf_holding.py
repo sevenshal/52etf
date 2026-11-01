@@ -7,9 +7,9 @@ def test_holding_dashboard_uses_complete_four_etf_basket_and_calculates_percenti
 
     history = [
         {"trade_date": date(2026, 10, 20), "etf_count": 4, "component_count": 300,
-         "etf_market_value_yi": 1_000.0, "hs300_float_market_value_yi": 100_000.0, "holding_ratio_pct": 1.0},
+         "etf_market_value_yi": 1_000.0, "hs300_float_market_value_yi": 100_000.0, "holding_ratio_pct": 1.0, "hs300_close": 4_000.0},
         {"trade_date": date(2026, 10, 21), "etf_count": 4, "component_count": 300,
-         "etf_market_value_yi": 1_200.0, "hs300_float_market_value_yi": 100_000.0, "holding_ratio_pct": 1.2},
+         "etf_market_value_yi": 1_200.0, "hs300_float_market_value_yi": 100_000.0, "holding_ratio_pct": 1.2, "hs300_close": 4_100.0},
     ]
     funds = [{"ts_code": symbol, "market_value_yi": 300.0, "fd_share": 100.0, "close": 3.0}
              for symbol, _ in service.HS300_ETFS]
@@ -18,6 +18,7 @@ def test_holding_dashboard_uses_complete_four_etf_basket_and_calculates_percenti
 
     assert [item[0] for item in service.HS300_ETFS] == ["510300.SH", "510310.SH", "510330.SH", "159919.SZ"]
     assert payload["latest"]["holding_ratio_pct_percentile_5y"] == 100.0
+    assert payload["latest"]["hs300_close"] == 4_100.0
     assert payload["latest"]["funds"] == funds
     assert payload["methodology"]["name"] == "国家队ETF持仓占比"
 

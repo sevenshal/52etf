@@ -12,12 +12,22 @@ const errorMessage = error => error?.response?.data?.detail || error?.message ||
 
 const ratioOption = rows => ({
   animation: false,
-  tooltip: { trigger: 'axis', valueFormatter: fmtPct },
-  grid: { left: 58, right: 24, top: 24, bottom: 52 },
+  tooltip: {
+    trigger: 'axis',
+    formatter: items => `${items[0]?.axisValueLabel || ''}<br/>${items.map(item => `${item.marker}${item.seriesName}：${item.seriesName === '沪深300收盘价' ? Number(item.value).toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : fmtPct(item.value)}`).join('<br/>')}`,
+  },
+  legend: { top: 0 },
+  grid: { left: 58, right: 58, top: 34, bottom: 52 },
   xAxis: { type: 'category', data: rows.map(row => row.trade_date), boundaryGap: false, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value', name: '%', splitLine: { lineStyle: { color: '#eef1f6' } } },
+  yAxis: [
+    { type: 'value', name: '%', splitLine: { lineStyle: { color: '#eef1f6' } } },
+    { type: 'value', name: '点', splitLine: { show: false } },
+  ],
   dataZoom: [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 12 }],
-  series: [{ name: '核心ETF占流通市值', type: 'line', showSymbol: false, data: rows.map(row => row.holding_ratio_pct), areaStyle: { color: 'rgba(37, 99, 235, .14)' }, lineStyle: { width: 2.2 }, itemStyle: { color: '#2563eb' } }],
+  series: [
+    { name: '核心ETF占流通市值', type: 'line', yAxisIndex: 0, showSymbol: false, data: rows.map(row => row.holding_ratio_pct), areaStyle: { color: 'rgba(37, 99, 235, .14)' }, lineStyle: { width: 2.2 }, itemStyle: { color: '#2563eb' } },
+    { name: '沪深300收盘价', type: 'line', yAxisIndex: 1, showSymbol: false, data: rows.map(row => row.hs300_close), lineStyle: { width: 1.5 }, itemStyle: { color: '#d97706' } },
+  ],
 });
 
 const scaleOption = rows => ({
