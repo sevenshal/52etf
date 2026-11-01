@@ -1218,6 +1218,21 @@ const SummaryCard = ({ option, summary, shareFlowSummary, active, onToggle }) =>
   const valuation = summary?.valuation;
   // A股指数用成分一致预期估值，美股指数ETF用美股ETF估值分析（EVC 成分公允价值），港股暂无
   const showValuation = option.market !== 'HK' && valuation?.status === 'available';
+  // 当前财年前瞻 PE 的历史快照目前只为 A 股指数同步；美股 ETF 的历史估值来自
+  // 成分公允价值 / ETF 净值，不能把该点位错标为前瞻 PE。
+  const usesForwardPePosition = option.market === 'CN';
+  const valuationPositionLabel = usesForwardPePosition
+    ? valuation?.forward_pe_current_fy_position_all_time_label
+    : valuation?.valuation_position_all_time_label;
+  const valuationPositionPct = usesForwardPePosition
+    ? valuation?.forward_pe_current_fy_position_all_time_pct
+    : valuation?.valuation_position_all_time_pct;
+  const valuationHistoryDays = usesForwardPePosition
+    ? valuation?.forward_pe_current_fy_history_all_time_days
+    : valuation?.valuation_history_all_time_days;
+  const valuationPositionTitle = usesForwardPePosition
+    ? '当前财年前瞻PE'
+    : '成分公允价值估值系数';
   return (
     <button
       type="button"
@@ -1290,13 +1305,13 @@ const SummaryCard = ({ option, summary, shareFlowSummary, active, onToggle }) =>
       </div>
       {showValuation && (
         <div className="soxx-fear-summary-valuation">
-          <span style={{ color: valuationColor(valuation.forward_pe_current_fy_position_all_time_label) }}>
-            {valuation.forward_pe_current_fy_position_all_time_label || '-'}
+          <span style={{ color: valuationColor(valuationPositionLabel) }}>
+            {valuationPositionLabel || '-'}
           </span>
           <span>
-            当前财年前瞻PE · 全历史{valuation.forward_pe_current_fy_history_all_time_days || 0}日{' '}
-            {isFiniteNumber(valuation.forward_pe_current_fy_position_all_time_pct)
-              ? `${formatNumber(valuation.forward_pe_current_fy_position_all_time_pct, 1)}%分位`
+            {valuationPositionTitle} · 全历史{valuationHistoryDays || 0}日{' '}
+            {isFiniteNumber(valuationPositionPct)
+              ? `${formatNumber(valuationPositionPct, 1)}%分位`
               : '样本不足'}
           </span>
           <span>
