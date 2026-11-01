@@ -215,7 +215,28 @@ def test_index_valuation_uses_index_daily_history_not_fear_greed_history(monkeyp
             for index, day in enumerate(trade_dates)
         },
     )
-    monkeypatch.setattr(valuation_module, "load_a_stock_consensus_valuation_history_map", lambda *_args: {})
+    monkeypatch.setattr(
+        valuation_module,
+        "load_a_stock_consensus_valuation_history_map",
+        lambda _db, _symbols, trade_dates: {
+            day: {
+                "AAA.SH": {
+                    "date": day,
+                    "last_price": 100.0,
+                    "fair_value_lo": 90.0,
+                    "fair_value_mid": 100.0,
+                    "fair_value_hi": 110.0,
+                    "forward_next_fy_lo": 100.0,
+                    "forward_next_fy_mid": 110.0,
+                    "forward_next_fy_hi": 120.0,
+                    "forward_pe_current_fy": 10.0 + index,
+                    "forward_pe_next_fy": 9.0 + index,
+                    "target_report_count": 3,
+                }
+            }
+            for index, day in enumerate(trade_dates)
+        },
+    )
     monkeypatch.setattr(
         valuation_module,
         "Session",
@@ -228,6 +249,7 @@ def test_index_valuation_uses_index_daily_history_not_fear_greed_history(monkeyp
     assert result["index_date"] == "2018-01-03"
     assert result["pe_ttm"] == pytest.approx(11.0)
     assert result["pe_ttm_history_all_time_days"] == 2
+    assert [item["forward_pe_current_fy"] for item in result["_history"]] == [10.0, 11.0]
 
 
 def test_market_multiple_positions_expose_all_requested_windows():

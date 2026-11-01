@@ -331,6 +331,9 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuation_index_levels,
         )
         daily_results = []
+        # 历史曲线读取的是落库快照。估值偏离缺失时，PE/PB 仍可能可算，不能因而丢掉
+        # 当天的市场倍数，否则卡片点位虽能基于内存回放计算，详情曲线却没有数据可画。
+        daily_snapshot_results = []
         daily_market_multiples: Dict[date, Dict[str, Optional[float]]] = {}
         latest_result = None
         for trade_day, index_level in valuation_index_levels.items():
@@ -357,14 +360,17 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
                     valuations=day_valuations,
                     field=forward_pe_field,
                 )
-            if trade_day == latest_date:
-                latest_result = day_result
-            if day_result.get("status") != "available" or day_result.get("current_gap_pct") is None:
-                continue
+            day_result.update(daily_market_multiples[trade_day])
             day_result["index_date"] = trade_day.isoformat()
             holdings_day = holdings_as_of_history.get(trade_day)
             day_result["holdings_as_of"] = holdings_day.isoformat() if holdings_day else None
-            daily_results.append(day_result)
+            if trade_day == latest_date:
+                latest_result = day_result
+            if any(value is not None for value in daily_market_multiples[trade_day].values()):
+                daily_snapshot_results.append(dict(day_result))
+            if day_result.get("status") != "available" or day_result.get("current_gap_pct") is None:
+                continue
+            daily_results.append(dict(day_result))
         # 即使当前没有足够的机构一致预期，PE/PB 也仍可由基础数据独立计算和展示。
         result = latest_result or calculate_weighted_index_valuation(
             index_level=latest_level,
@@ -384,7 +390,7 @@ def calculate_a_stock_index_valuation(symbol: str) -> Dict[str, Any]:
             valuation_gap_median=round(sorted(gaps)[len(gaps) // 2], 2) if gaps else None,
             valuation_gap_max=round(max(gaps), 2) if gaps else None,
             method="base_data_historical_constituent_valuation",
-            _history=daily_results,
+            _history=daily_snapshot_results,
         )
         result["index_date"] = latest_date.isoformat()
         result["holdings_as_of"] = holdings_as_of.isoformat() if holdings_as_of else None
