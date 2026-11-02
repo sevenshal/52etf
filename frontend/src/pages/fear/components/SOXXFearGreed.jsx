@@ -685,18 +685,22 @@ const SOXXFearGreed = () => {
   const displayPrice = useRealtimeDetail ? (realtimePrice ?? latestPrice) : latestPrice;
   const topHoldings = (expandedDetail.latest_holdings || []).slice(0, 8);
   const valuation = expandedDetail.valuation || expandedSummary?.valuation;
-  const valuation252Label = valuation?.valuation_position_252_label || valuation?.valuation_position_label;
   const valuation252Pct = isFiniteNumber(valuation?.valuation_position_252_pct)
     ? valuation.valuation_position_252_pct
     : valuation?.valuation_position_pct;
   const valuation252Days = Number(valuation?.valuation_history_252_days)
     || Math.min(Number(valuation?.valuation_history_days) || 0, 252);
-  const valuation1000Label = valuation?.valuation_position_1000_label;
   const valuation1000Pct = valuation?.valuation_position_1000_pct;
   const valuation1000Days = Number(valuation?.valuation_history_1000_days) || 0;
-  const valuationAllTimeLabel = valuation?.valuation_position_all_time_label;
   const valuationAllTimePct = valuation?.valuation_position_all_time_pct;
   const valuationAllTimeDays = Number(valuation?.valuation_history_all_time_days) || 0;
+  const targetPriceUpsidePct = valuation?.current_gap_pct;
+  // 目标价口径不是 PE/PB 估值：覆盖权重不足或大量回退到上一财报期时，
+  // 只作为辅助参考，不给出“极度低估/高估”的强评级。
+  const targetPriceReferenceDegraded = (
+    Number(valuation?.effective_coverage_ratio ?? valuation?.coverage_ratio ?? 0) < 0.8
+    || Number(valuation?.stale_weight_ratio ?? 0) > 0.3
+  );
   const renderMarketMultiplePositions = (field) => {
     const metricLabel = field === 'pe_ttm'
       ? 'PE(TTM)'
@@ -886,27 +890,6 @@ const SOXXFearGreed = () => {
           {expandedETF?.market !== 'US' && expandedETF?.market !== 'HK' && valuation?.status === 'available' && (
             <Card size="small" className="soxx-fear-valuation-detail" title="指数成分估值">
               <div className="soxx-fear-valuation-compact">
-                <div className="soxx-fear-valuation-current">
-                  <span>当前估值系数（越大越贵）</span>
-                  <strong style={{ color: valuationColor(valuation.valuation_position_label) }}>
-                    {isFiniteNumber(valuation.current_gap_pct) ? (1 - valuation.current_gap_pct / 100).toFixed(2) : '-'}
-                  </strong>
-                  <Tag>目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}</Tag>
-                </div>
-                <Space wrap size={[4, 4]} className="soxx-fear-valuation-positions">
-                  <Tag color={valuationColor(valuation.valuation_position_label)} title={`有效${valuation.valuation_history_days || 0}日`}>
-                    504日 {valuation.valuation_position_label || '-'} · {isFiniteNumber(valuation.valuation_position_pct) ? `${formatNumber(valuation.valuation_position_pct, 1)}%` : '样本不足'}
-                  </Tag>
-                  <Tag color={valuationColor(valuation252Label)} title={`有效${valuation252Days}日`}>
-                    252日 {valuation252Label || '-'} · {isFiniteNumber(valuation252Pct) ? `${formatNumber(valuation252Pct, 1)}%` : '样本不足'}
-                  </Tag>
-                  <Tag color={valuationColor(valuation1000Label)} title={`有效${valuation1000Days}日`}>
-                    1000日 {valuation1000Label || '-'} · {isFiniteNumber(valuation1000Pct) ? `${formatNumber(valuation1000Pct, 1)}%` : '样本不足'}
-                  </Tag>
-                  <Tag color={valuationColor(valuationAllTimeLabel)} title={`可用历史${valuationAllTimeDays}日`}>
-                    全可用历史 {valuationAllTimeLabel || '-'} · {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%` : '样本不足'}
-                  </Tag>
-                </Space>
                 <div className="soxx-fear-market-multiple-row">
                   <strong>PE(TTM) {formatNumber(valuation.pe_ttm, 2)}×</strong>
                   <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pe_ttm')}</Space>
@@ -923,6 +906,19 @@ const SOXXFearGreed = () => {
                   <strong>PB {formatNumber(valuation.pb, 2)}×</strong>
                   <Space wrap size={[4, 4]}>{renderMarketMultiplePositions('pb')}</Space>
                 </div>
+                <div className="soxx-fear-target-price-row">
+                  <strong>目标价隐含上行空间 {isFiniteNumber(targetPriceUpsidePct) ? `${formatNumber(targetPriceUpsidePct, 1)}%` : '-'}</strong>
+                  <Tag color={targetPriceReferenceDegraded ? 'warning' : 'default'}>
+                    {targetPriceReferenceDegraded ? '参考性较低' : '辅助参考'}
+                  </Tag>
+                  <Tag>目标区间 {formatRange(valuation.fair_value_lo, valuation.fair_value_hi)}</Tag>
+                  <Space wrap size={[4, 4]} className="soxx-fear-target-price-positions">
+                    <Tag title={`有效${valuation252Days}日`}>252日 {isFiniteNumber(valuation252Pct) ? `${formatNumber(valuation252Pct, 1)}%分位` : '样本不足'}</Tag>
+                    <Tag title={`有效${valuation.valuation_history_days || 0}日`}>504日 {isFiniteNumber(valuation.valuation_position_pct) ? `${formatNumber(valuation.valuation_position_pct, 1)}%分位` : '样本不足'}</Tag>
+                    <Tag title={`有效${valuation1000Days}日`}>1000日 {isFiniteNumber(valuation1000Pct) ? `${formatNumber(valuation1000Pct, 1)}%分位` : '样本不足'}</Tag>
+                    <Tag title={`可用历史${valuationAllTimeDays}日`}>全历史 {isFiniteNumber(valuationAllTimePct) ? `${formatNumber(valuationAllTimePct, 1)}%分位` : '样本不足'}</Tag>
+                  </Space>
+                </div>
                 <div className="soxx-fear-valuation-meta">
                   <span>有效权重 {((valuation.effective_coverage_ratio ?? valuation.coverage_ratio ?? 0) * 100).toFixed(1)}%（{valuation.covered_count}/{valuation.constituent_count || '-'}）</span>
                   <span>估值日 {valuation.valuation_date_max || '-'} </span>
@@ -932,7 +928,7 @@ const SOXXFearGreed = () => {
                 </div>
               </div>
               <Text type="secondary" className="soxx-fear-valuation-note">
-                估值系数、PE(TTM)、当前财年/下财年前瞻PE、PB 的点位均为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。前瞻PE取当日可见的一致预期；各 PE/PB 只聚合正数成分倍数，覆盖不足或研报待更新的成分会计入“待更新”。
+                PE(TTM)、当前财年/下财年前瞻PE、PB 的点位均为历史百分位（≥80 极度高估、低于20 极度低估），少于120个有效交易日不评级。前瞻PE取当日可见的一致预期；各 PE/PB 只聚合正数成分倍数。目标价隐含上行空间来自成分股卖方目标价，相对指数短期波动和研报待更新更敏感，仅作辅助参考。
               </Text>
             </Card>
           )}
