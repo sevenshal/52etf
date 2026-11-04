@@ -1,4 +1,6 @@
-from src.core.services.a_stock_crowding import _rolling_percentiles
+import duckdb
+
+from src.core.services.a_stock_crowding import _rolling_percentiles, _scope_options
 
 
 def test_crowding_score_renormalizes_when_a_component_is_missing():
@@ -19,3 +21,15 @@ def test_crowding_score_renormalizes_when_a_component_is_missing():
     assert rows[1]["leverage_ratio_pct_percentile"] is None
     # 第二行的其余所有项目都是两天中的最高值；缺失杠杆项不能把总分拖低。
     assert rows[1]["crowding_score"] == 100.0
+
+
+def test_scope_options_does_not_require_a_nonexistent_index_name_column(monkeypatch):
+    connection = duckdb.connect(":memory:")
+    connection.execute("CREATE TABLE a_stock_sw_member(ts_code VARCHAR, l1_name VARCHAR)")
+    connection.execute("CREATE TABLE a_stock_index_weight(index_code VARCHAR)")
+    connection.execute("INSERT INTO a_stock_index_weight VALUES ('000300.SH')")
+    monkeypatch.setattr("src.core.services.a_stock_crowding.connect_analytics_db", lambda: connection)
+
+    result = _scope_options()
+
+    assert result["indexes"] == [{"value": "000300.SH", "label": "000300.SH"}]

@@ -109,7 +109,9 @@ def _scope_options() -> Dict[str, List[Dict[str, str]]]:
     try:
         return {
             "industries": duckdb_query_dicts(connection, "SELECT DISTINCT TRIM(l1_name) AS value, TRIM(l1_name) AS label FROM a_stock_sw_member WHERE TRIM(COALESCE(l1_name, '')) <> '' ORDER BY label"),
-            "indexes": duckdb_query_dicts(connection, "SELECT w.index_code AS value, COALESCE(NULLIF(MAX(i.name), ''), w.index_code) AS label FROM a_stock_index_weight w LEFT JOIN a_stock_index_daily i ON i.ts_code = w.index_code GROUP BY w.index_code ORDER BY label"),
+            # a_stock_index_daily 的既有表结构只有行情字段，没有指数名称；名称由前端
+            # 代码映射或用户选择时补充，不能让可选项查询依赖一个不存在的列。
+            "indexes": duckdb_query_dicts(connection, "SELECT DISTINCT index_code AS value, index_code AS label FROM a_stock_index_weight ORDER BY label"),
         }
     finally:
         connection.close()
