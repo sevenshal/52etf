@@ -9,14 +9,10 @@ router = APIRouter(prefix="/api/market/crowding", tags=["A Stock Crowding"])
 
 @router.get("")
 async def get_crowding_dashboard(
-    scope: str = Query("market", pattern="^(market|index|industry)$"),
-    entity: str = Query("", max_length=64),
     days: int = Query(250, ge=20, le=1250),
     account_id: str = Depends(valid_market_viewer),
 ):
     try:
-        return await run_in_threadpool(fetch_crowding_dashboard, scope, entity, days)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await run_in_threadpool(fetch_crowding_dashboard, days)
     except CrowdingDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -1,35 +1,46 @@
 import duckdb
+import pytest
 
-from src.core.services.a_stock_crowding import _rolling_percentiles, _scope_options
-
-
-def test_crowding_score_renormalizes_when_a_component_is_missing():
-    rows = [
-        {
-            "amount_to_float_mv_pct": 1.0, "turnover_rate_pct": 2.0, "leverage_ratio_pct": 0.5,
-            "main_flow_ratio_pct": -0.1, "up_ratio_pct": 40.0, "pb": 1.2, "amount_hhi": 30.0,
-        },
-        {
-            "amount_to_float_mv_pct": 2.0, "turnover_rate_pct": 3.0, "leverage_ratio_pct": None,
-            "main_flow_ratio_pct": 0.2, "up_ratio_pct": 60.0, "pb": 1.5, "amount_hhi": 40.0,
-        },
-    ]
-
-    _rolling_percentiles(rows)
-
-    assert rows[0]["crowding_score"] == 100.0
-    assert rows[1]["leverage_ratio_pct_percentile"] is None
-    # 第二行的其余所有项目都是两天中的最高值；缺失杠杆项不能把总分拖低。
-    assert rows[1]["crowding_score"] == 100.0
+from src.core.services.a_stock_crowding import classify_concentration, fetch_crowding_dashboard
 
 
-def test_scope_options_does_not_require_a_nonexistent_index_name_column(monkeypatch):
-    connection = duckdb.connect(":memory:")
+def test_extreme_threshold_is_strictly_greater_than_45_percent():
+    assert classify_concentration(45.0) == "常态"
+    assert classify_concentration(45.0001) == "极端拥挤"
+
+
+def test_dashboard_uses_top_five_percent_turnover_concentration(tmp_path, monkeypatch):
+    database_path = tmp_path / "analytics.duckdb"
+    connection = duckdb.connect(str(database_path))
+    connection.execute("CREATE TABLE a_stock_market_daily(trade_date DATE, ts_code VARCHAR, amount DOUBLE)")
+    connection.execute("CREATE TABLE a_stock_basic(ts_code VARCHAR, name VARCHAR)")
     connection.execute("CREATE TABLE a_stock_sw_member(ts_code VARCHAR, l1_name VARCHAR)")
-    connection.execute("CREATE TABLE a_stock_index_weight(index_code VARCHAR)")
-    connection.execute("INSERT INTO a_stock_index_weight VALUES ('000300.SH')")
-    monkeypatch.setattr("src.core.services.a_stock_crowding.connect_analytics_db", lambda: connection)
+    rows = [("2026-11-03", "000001.SZ", 100.0)] + [
+        ("2026-11-03", f"{index:06d}.SZ", 5.0) for index in range(2, 21)
+    ]
+    connection.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?)", rows)
+    connection.execute("INSERT INTO a_stock_basic VALUES ('000001.SZ', '头部股票')")
+    connection.execute("INSERT INTO a_stock_sw_member VALUES ('000001.SZ', '银行')")
+    connection.close()
+    monkeypatch.setattr(
+        "src.core.services.a_stock_crowding.connect_analytics_db",
+        lambda: duckdb.connect(str(database_path)),
+    )
 
-    result = _scope_options()
+    result = fetch_crowding_dashboard(days=20)
 
-    assert result["indexes"] == [{"value": "000300.SH", "label": "000300.SH"}]
+    # 20 只股票的前 5% 即 1 只；100 / (100 + 19 * 5) = 51.282...
+    assert result["latest"]["stock_count"] == 20
+    assert result["latest"]["top_stock_count"] == 1
+    assert result["latest"]["concentration_pct"] == pytest.approx(100 / 195 * 100)
+    assert result["latest"]["level"] == "极端拥挤"
+    assert result["constituents"] == [
+        {
+            "ts_code": "000001.SZ",
+            "name": "头部股票",
+            "rank": 1,
+            "amount_yi": pytest.approx(0.001),
+            "market_amount_share_pct": pytest.approx(100 / 195 * 100),
+            "cumulative_market_share_pct": pytest.approx(100 / 195 * 100),
+        }
+    ]
