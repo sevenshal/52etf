@@ -3,6 +3,7 @@ import { Tabs, Tag, Tooltip, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import request from '../utils/request';
 import AStockFundFlow from './AStockFundFlow';
+import AStockCrowding from './AStockCrowding';
 import AStockMarginLeverage from './AStockMarginLeverage';
 import NationalTeamEtfHolding from './NationalTeamEtfHolding';
 import MarketOverview from './MarketOverview';
@@ -20,6 +21,7 @@ const MARKET_TAB_ITEMS = [
   { key: 'alerts', label: '提示看板', path: '/market/alerts' },
   { key: 'industry', label: '行业关联', path: '/market/industry' },
   { key: 'fund-flow', label: '资金流向', path: '/market/fund-flow' },
+  { key: 'crowding', label: '拥挤度', path: '/market/crowding' },
   { key: 'margin-leverage', label: '两融杠杆', path: '/market/margin-leverage' },
   { key: 'national-team-etf-holding', label: '国家队ETF持仓', path: '/market/national-team-etf-holding' },
   { key: 'earnings-gap', label: '净利润断层', path: '/market/earnings-gap' },
@@ -112,6 +114,7 @@ const Market = ({ initialTab = 'overview' }) => {
       {activeTab === 'alerts' && <MarketAlerts />}
       {activeTab === 'industry' && <MarketIndustryRelation />}
       {activeTab === 'fund-flow' && <AStockFundFlow embedded />}
+      {activeTab === 'crowding' && <AStockCrowding />}
       {activeTab === 'margin-leverage' && <AStockMarginLeverage />}
       {activeTab === 'national-team-etf-holding' && <NationalTeamEtfHolding />}
       {activeTab === 'earnings-gap' && <MarketEarningsGap />}

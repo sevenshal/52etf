@@ -14,6 +14,7 @@ export const marketRouteDescriptors = [
   { path: '/market/alerts', Component: Market, props: { initialTab: 'alerts' } },
   { path: '/market/industry', Component: Market, props: { initialTab: 'industry' } },
   { path: '/market/fund-flow', Component: Market, props: { initialTab: 'fund-flow' } },
+  { path: '/market/crowding', Component: Market, props: { initialTab: 'crowding' } },
   { path: '/market/margin-leverage', Component: Market, props: { initialTab: 'margin-leverage' } },
   { path: '/market/national-team-etf-holding', Component: Market, props: { initialTab: 'national-team-etf-holding' } },
   { path: '/market/earnings-gap', Component: Market, props: { initialTab: 'earnings-gap' } },
