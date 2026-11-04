@@ -384,17 +384,28 @@ class AStockFearStrategyTrader:
         return bool(close_value < float(closes.mean()))
 
     @staticmethod
-    def _two_close_confirmation_ready(bars: Optional[pd.DataFrame], signal_date: date, pending_signal_date: date) -> bool:
-        """连续两日收盘均高于各自4日前收盘；信号日可作第二根确认K线。"""
+    def _two_day_no_new_low_confirmation_ready(
+        bars: Optional[pd.DataFrame], signal_date: date, pending_signal_date: date,
+    ) -> bool:
+        """连续两日最低价不跌破各自此前五个交易日最低价；信号日可作第二根确认K线。"""
         if bars is None or bars.empty:
             return False
         frame = bars.sort_values("trade_date").reset_index(drop=True)
         current = frame.index[frame["trade_date"] == signal_date]
         pending = frame.index[frame["trade_date"] == pending_signal_date]
-        if len(current) != 1 or len(pending) != 1 or int(current[0]) < int(pending[0]) or int(current[0]) < 5:
+        if len(current) != 1 or len(pending) != 1 or int(current[0]) < int(pending[0]) or int(current[0]) < 6:
             return False
-        return all(float(frame.iloc[index]["close"]) > float(frame.iloc[index - 4]["close"])
-                   for index in (int(current[0]) - 1, int(current[0])))
+        lows = pd.to_numeric(frame["low"], errors="coerce")
+
+        def _not_new_low(index: int) -> bool:
+            prior_lows = lows.iloc[index - 5:index]
+            return bool(
+                pd.notna(lows.iloc[index])
+                and prior_lows.notna().all()
+                and lows.iloc[index] >= prior_lows.min()
+            )
+
+        return all(_not_new_low(index) for index in (int(current[0]) - 1, int(current[0])))
 
     @staticmethod
     def _volume_ratio_at(bars: pd.DataFrame, signal_date: date) -> Optional[float]:
@@ -1338,7 +1349,7 @@ class AStockFearStrategyTrader:
                 confirmed_target = None
                 if pending_target and getattr(state, "pending_entry_signal_date", None):
                     pending_entry_signal_date = state.pending_entry_signal_date
-                    if (not _entry_confirmation_enabled(pending_target)) or self._two_close_confirmation_ready(
+                    if (not _entry_confirmation_enabled(pending_target)) or self._two_day_no_new_low_confirmation_ready(
                         entry_price_bars.get(pending_target), signal_date, pending_entry_signal_date
                     ):
                         confirmed_target = pending_target
@@ -1346,7 +1357,7 @@ class AStockFearStrategyTrader:
                         state.pending_entry_target = None
                         state.pending_entry_signal_date = None
                     else:
-                        entry_wait_message = f"买入/换仓信号已挂起（{state.pending_entry_signal_date}），等待连续两日收盘高于4日前收盘"
+                        entry_wait_message = f"买入/换仓信号已挂起（{state.pending_entry_signal_date}），等待连续两日不创此前5日新低"
                 else:
                     target = None
                     if shares <= 0:
@@ -1366,14 +1377,14 @@ class AStockFearStrategyTrader:
                     if target:
                         if not _entry_confirmation_enabled(target):
                             confirmed_target = target
-                        elif self._two_close_confirmation_ready(entry_price_bars.get(target), signal_date, signal_date):
+                        elif self._two_day_no_new_low_confirmation_ready(entry_price_bars.get(target), signal_date, signal_date):
                             confirmed_target = target
                             state.pending_entry_target = None
                             state.pending_entry_signal_date = None
                         else:
                             state.pending_entry_target = target
                             state.pending_entry_signal_date = signal_date
-                            entry_wait_message = "恐慌放量信号已挂起，等待连续两日收盘高于4日前收盘"
+                            entry_wait_message = "恐慌放量信号已挂起，等待连续两日不创此前5日新低"
                 # 只有确认的原目标可以进入既有买入/换仓状态机。
                 main_signal = confirmed_target == "main"
                 sub_signal = confirmed_target == "sub"

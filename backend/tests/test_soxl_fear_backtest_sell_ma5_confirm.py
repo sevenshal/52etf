@@ -95,10 +95,10 @@ def test_sell_ma5_off_sells_on_greed_day():
     assert _sell_dates(result) == ["2025-03-07"]
 
 
-def test_entry_two_close_confirmation_buys_after_second_confirmed_close():
-    """极恐放量后，须等两根收盘均高于各自 4 日前才进入既有买入状态机。"""
+def test_entry_two_day_no_new_low_confirmation_buys_after_second_confirmed_session():
+    """极恐放量后，须等连续两日不创此前五日新低才进入既有买入状态机。"""
     fear = [50.0, 20.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0]
-    # 第 3、4 个交易日虽反弹但不满足 4 日比较；第 6、7 个交易日连续满足，故第 7 日买入。
+    # 第 6、7 个交易日最低价均未跌破此前五日低点，故第 7 日买入。
     close = [10.0, 10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 14.0]
     result = _run_backtest(
         _frame(fear, close), _params(entry_two_close_confirm_main=True), 100000.0, detailed=True,
@@ -107,15 +107,28 @@ def test_entry_two_close_confirmation_buys_after_second_confirmed_close():
     assert buys == ["2025-03-11"]
 
 
-def test_entry_two_close_confirmation_allows_signal_day_as_second_close():
-    """恐慌放量日就是高二时，仍然只在下一交易日成交。"""
-    fear = [50.0, 50.0, 50.0, 50.0, 50.0, 20.0, 50.0, 50.0]
+def test_entry_two_day_no_new_low_confirmation_allows_signal_day_as_second_session():
+    """恐慌放量日可作第二个不创新低确认日，仍只在下一交易日成交。"""
+    fear = [50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 20.0, 50.0]
     close = [10.0, 10.0, 10.0, 10.0, 11.0, 12.0, 13.0, 14.0]
     result = _run_backtest(
         _frame(fear, close), _params(entry_two_close_confirm_main=True, execute_next_open=True), 100000.0, detailed=True,
     )
     buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
-    assert buys == ["2025-03-11"]
+    assert buys == ["2025-03-12"]
+
+
+def test_entry_two_day_no_new_low_confirmation_waits_until_new_low_is_cleared():
+    """候选挂起后，确认区间内出现近五日新低时不能买，直到连续两日不创新低。"""
+    fear = [50.0, 20.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0]
+    frame = _frame(fear, [10.0] * len(fear))
+    # 第 6 天低点 9 创此前五日新低；第 7、8 天都不再创新低，才允许第 8 天成交。
+    frame["low"] = [10.0, 10.0, 10.0, 10.0, 10.0, 9.0, 10.0, 10.0]
+    result = _run_backtest(
+        frame, _params(entry_two_close_confirm_main=True), 100000.0, detailed=True,
+    )
+    buys = [item["date"] for item in result["trades"] if item["action"] == "BUY"]
+    assert buys == ["2025-03-12"]
 
 
 def test_sell_ma5_all_waits_for_ma5_break():

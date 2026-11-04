@@ -88,7 +88,7 @@ class AStockFearStrategyConfigPayload(BaseModel):
     sub3_volume_ratio_threshold: float = 1.3
     # 卖出跌破MA5确认：off=贪婪即卖（默认，保持原行为）；all=都等；non_main=只有候补等
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
-    # 右侧两日收盘确认按标的独立配置；默认只给科创50候补开启。
+    # 右侧两日不创新低确认按标的独立配置；默认只给科创50候补开启。
     entry_two_close_confirm: bool = False  # 旧字段保留兼容，不再控制策略。
     entry_two_close_confirm_main: bool = False
     entry_two_close_confirm_sub: bool = True

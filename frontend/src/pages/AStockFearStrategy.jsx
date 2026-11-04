@@ -843,7 +843,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
             showIcon
             style={{ marginBottom: 16 }}
             message="策略说明"
-            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日数据判断。右侧两日确认可按标的独立开启（默认仅科创50）：恐慌放量先锁定候选，含信号日在内连续两日收盘均高于各自4日前收盘，才在下一交易日下单；未开启标的保持原逻辑，挂起换仓不会先卖原持仓。卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
+            description="信号与交易隔天：每个 A 股交易日在触发时间（默认 09:30 开盘）用前一交易日数据判断。右侧两日确认可按标的独立开启（默认仅科创50）：恐慌放量先锁定候选，含信号日在内连续两日最低价均不跌破此前五个交易日的最低价，才在下一交易日下单；未开启标的保持原逻辑，挂起换仓不会先卖原持仓。卖出：恐贪 ≥ 贪恐卖出阈值（移动止盈=0 即卖）或移动止盈回撤触发。"
           />
           <Table
             rowKey="id"
@@ -984,7 +984,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           <Form.Item name="volume_ratio_threshold" label="买入量比阈值(>=)">
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} />
                           </Form.Item>
-                          <Form.Item name="entry_two_close_confirm_main" label="红利右侧两日确认" valuePropName="checked">
+                          <Form.Item name="entry_two_close_confirm_main" label="红利右侧两日不创新低确认" valuePropName="checked">
                             <Switch />
                           </Form.Item>
                         </Col>
@@ -1090,7 +1090,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
-                          <Form.Item name="entry_two_close_confirm_sub" label="科创50右侧两日确认" valuePropName="checked">
+                          <Form.Item name="entry_two_close_confirm_sub" label="科创50右侧两日不创新低确认" valuePropName="checked">
                             <Switch />
                           </Form.Item>
                         </Col>
@@ -1140,7 +1140,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
-                          <Form.Item name="entry_two_close_confirm_sub2" label="纳指科技右侧两日确认" valuePropName="checked">
+                          <Form.Item name="entry_two_close_confirm_sub2" label="纳指科技右侧两日不创新低确认" valuePropName="checked">
                             <Switch />
                           </Form.Item>
                         </Col>
@@ -1185,7 +1185,7 @@ const AStockFearStrategy = ({ embedded = false }) => {
                           >
                             <InputNumber min={0.1} max={20} step={0.1} style={{ width: '100%' }} disabled={logZVolumeEnabled} />
                           </Form.Item>
-                          <Form.Item name="entry_two_close_confirm_sub3" label="云计算右侧两日确认" valuePropName="checked">
+                          <Form.Item name="entry_two_close_confirm_sub3" label="云计算右侧两日不创新低确认" valuePropName="checked">
                             <Switch />
                           </Form.Item>
                         </Col>

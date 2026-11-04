@@ -264,7 +264,7 @@ class SOXLFearStrategyParams(BaseModel):
     # any=MA5 跌破或移动止盈任一满足即可卖（SOXL 专用）。
     # 卖出信号一旦出现会一直挂着，直到跌破 MA5 成交；挂单期间不再发起换仓。
     sell_ma5_confirm: str = SELL_MA5_CONFIRM_OFF
-    # A股：恐慌放量后，含信号日在内两日 Close > Close[-4]，下一交易日才成交。
+    # A股：恐慌放量后，含信号日在内两日 Low 不跌破各自此前五日最低价，下一交易日才成交。
     # SOXL 保持关闭，避免改变其既有策略口径。
     entry_two_close_confirm: bool = False
     entry_two_close_confirm_main: bool = False
@@ -2096,13 +2096,13 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             if pending_entry_signal_index is not None:
                 ready = (
                     raw_signal_index >= pending_entry_signal_index
-                    and raw_signal_index >= 5
-                    and np.isfinite(close_prices[raw_signal_index])
-                    and np.isfinite(close_prices[raw_signal_index - 4])
-                    and np.isfinite(close_prices[raw_signal_index - 1])
-                    and np.isfinite(close_prices[raw_signal_index - 5])
-                    and close_prices[raw_signal_index] > close_prices[raw_signal_index - 4]
-                    and close_prices[raw_signal_index - 1] > close_prices[raw_signal_index - 5]
+                    and raw_signal_index >= 6
+                    and np.isfinite(low_prices[raw_signal_index])
+                    and np.isfinite(low_prices[raw_signal_index - 1])
+                    and np.isfinite(low_prices[raw_signal_index - 5:raw_signal_index]).all()
+                    and np.isfinite(low_prices[raw_signal_index - 6:raw_signal_index - 1]).all()
+                    and low_prices[raw_signal_index] >= np.min(low_prices[raw_signal_index - 5:raw_signal_index])
+                    and low_prices[raw_signal_index - 1] >= np.min(low_prices[raw_signal_index - 6:raw_signal_index - 1])
                 )
                 is_fear = bool(ready)
                 if ready:
@@ -2110,13 +2110,13 @@ def _run_backtest(base_df: pd.DataFrame, params: SOXLFearStrategyParams, initial
             elif is_fear:
                 # 信号日可正好是第二根确认K线；信号日收盘确认，下一交易日成交。
                 ready_on_signal_day = (
-                    raw_signal_index >= 5
-                    and np.isfinite(close_prices[raw_signal_index])
-                    and np.isfinite(close_prices[raw_signal_index - 4])
-                    and np.isfinite(close_prices[raw_signal_index - 1])
-                    and np.isfinite(close_prices[raw_signal_index - 5])
-                    and close_prices[raw_signal_index] > close_prices[raw_signal_index - 4]
-                    and close_prices[raw_signal_index - 1] > close_prices[raw_signal_index - 5]
+                    raw_signal_index >= 6
+                    and np.isfinite(low_prices[raw_signal_index])
+                    and np.isfinite(low_prices[raw_signal_index - 1])
+                    and np.isfinite(low_prices[raw_signal_index - 5:raw_signal_index]).all()
+                    and np.isfinite(low_prices[raw_signal_index - 6:raw_signal_index - 1]).all()
+                    and low_prices[raw_signal_index] >= np.min(low_prices[raw_signal_index - 5:raw_signal_index])
+                    and low_prices[raw_signal_index - 1] >= np.min(low_prices[raw_signal_index - 6:raw_signal_index - 1])
                 )
                 if not ready_on_signal_day:
                     # 锁定信号日，之后的买入由两根确认K线决定，不用新的恐贪信号重置计时。
@@ -2499,6 +2499,7 @@ def _run_seesaw_backtest(
         date_texts = [item.isoformat() if hasattr(item, "isoformat") else str(item) for item in dates]
         open_p = df["open"].to_numpy(dtype=float, copy=False)
         high_p = df["high"].to_numpy(dtype=float, copy=False)
+        low_p = df["low"].to_numpy(dtype=float, copy=False)
         close_p = df["close"].to_numpy(dtype=float, copy=False)
         fear = df["fear_greed"].to_numpy(dtype=float, copy=False)
         turn = _compute_turn_signal_arrays(df, params)
@@ -2551,7 +2552,7 @@ def _run_seesaw_backtest(
             by_date[day_text] = {
                 "open": float(open_p[index]),
                 "high": float(high_p[index]),
-                "low": float(df["low"].to_numpy(dtype=float, copy=False)[index]),
+                "low": float(low_p[index]),
                 "close": float(close_p[index]),
                 "exec": float(exec_p[index]),
                 "fear": float(d_fear[index]),
@@ -2566,7 +2567,7 @@ def _run_seesaw_backtest(
                 "below_ma5": bool(d_below_ma5[index]),
                 "valuation": float(d_valuation[index]),
             }
-        return {"dates": dates, "date_texts": date_texts, "by_date": by_date, "raw_close": close_p}
+        return {"dates": dates, "date_texts": date_texts, "by_date": by_date, "raw_close": close_p, "raw_low": low_p}
 
     main = _frame_arrays(base_df)
     sub = _frame_arrays(sub_base_df)
@@ -2906,31 +2907,31 @@ def _run_seesaw_backtest(
                 params.sub3_buy_threshold, params.sub3_volume_ratio_threshold, params.sub3_greed_threshold,
             )
 
-        # A股两日收盘确认：保留原信号选出的目标，含信号日在内连续两天
-        # Close[t] > Close[t-4] 才在下一交易日（本循环）执行买入/换仓。
+        # A股两日不创新低确认：保留原信号选出的目标，含信号日在内连续两天
+        # Low[t] 不跌破此前五个交易日最低价，才在下一交易日（本循环）执行买入/换仓。
         def _entry_confirmation_enabled(which: str) -> bool:
             return bool(getattr(params, f"entry_two_close_confirm_{which}", False))
 
         if any(_entry_confirmation_enabled(which) for which in ("main", "sub", "sub2", "sub3")):
             raw_signal_index = index - 1 if use_next_open else index
 
-            def _two_close_ready(which: str, signal_index: int) -> bool:
-                closes = _holder(which)["raw_close"]
+            def _two_day_no_new_low_ready(which: str, signal_index: int) -> bool:
+                lows = _holder(which)["raw_low"]
                 # 信号日也可作为第二根确认K线；信号在收盘后成立，仍在下一交易日成交。
-                if raw_signal_index < signal_index or raw_signal_index < 5:
+                if raw_signal_index < signal_index or raw_signal_index < 6:
                     return False
                 return bool(
-                    np.isfinite(closes[raw_signal_index])
-                    and np.isfinite(closes[raw_signal_index - 4])
-                    and np.isfinite(closes[raw_signal_index - 1])
-                    and np.isfinite(closes[raw_signal_index - 5])
-                    and closes[raw_signal_index] > closes[raw_signal_index - 4]
-                    and closes[raw_signal_index - 1] > closes[raw_signal_index - 5]
+                    np.isfinite(lows[raw_signal_index])
+                    and np.isfinite(lows[raw_signal_index - 1])
+                    and np.isfinite(lows[raw_signal_index - 5:raw_signal_index]).all()
+                    and np.isfinite(lows[raw_signal_index - 6:raw_signal_index - 1]).all()
+                    and lows[raw_signal_index] >= np.min(lows[raw_signal_index - 5:raw_signal_index])
+                    and lows[raw_signal_index - 1] >= np.min(lows[raw_signal_index - 6:raw_signal_index - 1])
                 )
 
             chosen_target = None
             if pending_entry_target is not None:
-                if (not _entry_confirmation_enabled(pending_entry_target)) or _two_close_ready(
+                if (not _entry_confirmation_enabled(pending_entry_target)) or _two_day_no_new_low_ready(
                     pending_entry_target, int(pending_entry_signal_index)
                 ):
                     chosen_target = pending_entry_target
@@ -2961,7 +2962,7 @@ def _run_seesaw_backtest(
                     else:
                         for item in sig.values():
                             item["signal"] = False
-                        if _two_close_ready(chosen_target, raw_signal_index):
+                        if _two_day_no_new_low_ready(chosen_target, raw_signal_index):
                             sig[chosen_target]["signal"] = True
                         else:
                             pending_entry_target = chosen_target

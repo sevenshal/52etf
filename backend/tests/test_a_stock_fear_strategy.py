@@ -74,6 +74,20 @@ class AStockFearStrategyTraderTest(TestCase):
         # 历史不足 20 日时返回 None
         self.assertIsNone(self.trader._volume_ratio_at(bars, dates[10]))
 
+    def test_two_day_no_new_low_confirmation_matches_backtest_rule(self):
+        dates = pd.bdate_range("2025-03-03", periods=8).date
+        bars = pd.DataFrame({
+            "trade_date": dates,
+            "open": [10.0] * 8,
+            "high": [10.0] * 8,
+            "low": [10.0, 10.0, 10.0, 10.0, 10.0, 9.0, 10.0, 10.0],
+            "close": [10.0] * 8,
+            "volume": [100.0] * 8,
+        })
+        # 第 6 天创近五日新低，故第 7 天仍不能确认；第 7、8 天不创新低后才确认。
+        self.assertFalse(self.trader._two_day_no_new_low_confirmation_ready(bars, dates[6], dates[1]))
+        self.assertTrue(self.trader._two_day_no_new_low_confirmation_ready(bars, dates[7], dates[1]))
+
     def test_config_payload_defaults_match_backtest_style_params(self):
         payload = AStockFearStrategyConfigPayload()
         self.assertEqual("510880.SH", payload.symbol)

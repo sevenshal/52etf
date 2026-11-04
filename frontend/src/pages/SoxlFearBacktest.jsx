@@ -1527,8 +1527,8 @@ const SoxlFearBacktest = () => {
             <Col span={24}><Divider orientation="left">主标的与主标的信号</Divider></Col>
             {!isSoxlMode && <>
               <Col xs={24} md={24}>
-                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="右侧两日收盘确认"
-                  description="开启的标的在恐慌放量后，含信号日在内连续两日收盘高于各自4日前收盘，才在下一交易日买入或换仓；未开启的标的保持原逻辑。默认仅科创50开启。" />
+                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="右侧两日不创新低确认"
+                  description="开启的标的在恐慌放量后，含信号日在内连续两日最低价不跌破各自此前五个交易日的最低价，才在下一交易日买入或换仓；未开启的标的保持原逻辑。默认仅科创50开启。" />
               </Col>
               <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_main" label="红利ETF" valuePropName="checked"><Switch /></Form.Item></Col>
               <Col xs={12} md={4}><Form.Item name="entry_two_close_confirm_sub" label="科创50" valuePropName="checked"><Switch /></Form.Item></Col>
@@ -1786,7 +1786,7 @@ const SoxlFearBacktest = () => {
                 message={isSoxlMode ? 'SOXL 卖出规则' : 'A股买入确认与卖出MA5确认'}
                 description={isSoxlMode
                   ? 'SOXL 可选择纯移动止盈、贪婪高估后等待 SOXX 跌破 MA5，或贪婪高估后启动移动止盈；成交口径按上方开关执行。'
-                  : '买入/换仓的右侧两日确认可按标的独立开启（默认仅科创50）：恐慌放量后锁定候选，含信号日在内连续两日收盘均高于该交易ETF各自4日前收盘，下一交易日才按成交价口径买入或换仓；未开启标的保持原逻辑，挂起换仓不先卖原标的。卖出MA5确认仍可选且不参与网格。'}
+                  : '买入/换仓的右侧两日不创新低确认可按标的独立开启（默认仅科创50）：恐慌放量后锁定候选，含信号日在内连续两日最低价均不跌破该交易ETF此前五个交易日的最低价，下一交易日才按成交价口径买入或换仓；未开启标的保持原逻辑，挂起换仓不先卖原标的。卖出MA5确认仍可选且不参与网格。'}
               />
             </Col>
             {isSoxlMode && (
