@@ -16,6 +16,8 @@ class CrowdingDataError(RuntimeError):
 
 TOP_RATIO = 0.05
 EXTREME_THRESHOLD_PCT = 45.0
+HISTORY_DAYS = 1250
+SHANGHAI_COMPOSITE_CODE = "000001.SH"
 
 
 def classify_concentration(value: Any) -> str:
@@ -40,12 +42,16 @@ def _load_history() -> List[Dict[str, Any]]:
                     SUM(CASE WHEN rank <= CEIL(stock_count * ?) THEN amount ELSE 0 END) AS top_amount
                 FROM ranked GROUP BY trade_date
             )
-            SELECT trade_date, stock_count, top_stock_count,
+            SELECT daily.trade_date, stock_count, top_stock_count,
                 total_amount / 100000.0 AS total_amount_yi,
                 top_amount / 100000.0 AS top_amount_yi,
-                top_amount / NULLIF(total_amount, 0) * 100.0 AS concentration_pct
-            FROM daily ORDER BY trade_date
-        """, [TOP_RATIO, TOP_RATIO])
+                top_amount / NULLIF(total_amount, 0) * 100.0 AS concentration_pct,
+                sh.close AS shanghai_close
+            FROM daily
+            LEFT JOIN a_stock_index_daily sh
+                ON sh.trade_date = daily.trade_date AND sh.ts_code = ?
+            ORDER BY daily.trade_date
+        """, [TOP_RATIO, TOP_RATIO, SHANGHAI_COMPOSITE_CODE])
     except Exception as exc:  # noqa: BLE001
         raise CrowdingDataError("成交额集中度所需的全市场日行情尚未同步") from exc
     finally:
@@ -111,13 +117,13 @@ def _extreme_streak(rows: List[Dict[str, Any]]) -> int:
     return streak
 
 
-def fetch_crowding_dashboard(days: int = 250) -> Dict[str, Any]:
+def fetch_crowding_dashboard() -> Dict[str, Any]:
     all_rows = _load_history()
     if not all_rows:
         raise CrowdingDataError("全市场日行情尚未同步，无法计算成交额集中度")
     latest = dict(all_rows[-1])
     latest["level"] = classify_concentration(latest.get("concentration_pct"))
-    history = all_rows[-max(20, min(int(days), len(all_rows))):]
+    history = all_rows[-HISTORY_DAYS:]
     return {
         "latest": latest,
         "history": history,
@@ -130,5 +136,7 @@ def fetch_crowding_dashboard(days: int = 250) -> Dict[str, Any]:
             "formula": "每日将全市场股票按成交额降序排序，取成交额最高的前5%股票；集中度 = 该篮子成交额之和 ÷ 全市场总成交额。",
             "threshold": "集中度严格高于45%定义为极端拥挤；等于45%仍按常态显示。",
             "unit": "Tushare daily.amount 的单位为千元，展示时换算为亿元；比值计算使用原始同单位成交额。",
+            "history_days": HISTORY_DAYS,
+            "shanghai_composite": "历史图叠加上证指数（000001.SH）收盘价，使用右轴，仅作同期市场走势参照。",
         },
     }

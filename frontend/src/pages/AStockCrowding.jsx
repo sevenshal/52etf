@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Card, Col, Empty, Radio, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import request from '../utils/request';
@@ -12,15 +12,22 @@ const errorMessage = error => error?.response?.data?.detail || error?.message ||
 
 const trendOption = rows => ({
   animation: false,
-  tooltip: { trigger: 'axis', valueFormatter: value => `${format(value)}%` },
-  grid: { left: 54, right: 24, top: 30, bottom: 54 },
+  tooltip: { trigger: 'axis' },
+  legend: { top: 0, data: ['成交额集中度', '上证指数'] },
+  grid: { left: 54, right: 62, top: 38, bottom: 54 },
   xAxis: { type: 'category', data: rows.map(row => row.trade_date), boundaryGap: false, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value', name: '集中度 (%)', min: 0, splitLine: { lineStyle: { color: '#eef1f6' } } },
+  yAxis: [
+    { type: 'value', name: '集中度 (%)', min: 0, axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#eef1f6' } } },
+    { type: 'value', name: '上证指数', splitLine: { show: false }, axisLabel: { formatter: value => format(value, 0) } },
+  ],
   dataZoom: [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 12 }],
   series: [{
     name: '成交额集中度', type: 'line', showSymbol: false, data: rows.map(row => row.concentration_pct),
     lineStyle: { width: 2.5 }, areaStyle: { opacity: 0.1 }, itemStyle: { color: '#7c3aed' },
     markLine: { symbol: 'none', label: { formatter: '极端拥挤 45%' }, lineStyle: { color: '#dc2626', type: 'dashed' }, data: [{ yAxis: 45 }] },
+  }, {
+    name: '上证指数', type: 'line', yAxisIndex: 1, showSymbol: false, data: rows.map(row => row.shanghai_close),
+    lineStyle: { width: 1.8 }, itemStyle: { color: '#16a34a' },
   }],
 });
 
@@ -34,14 +41,13 @@ const industryOption = rows => ({
 });
 
 const AStockCrowding = () => {
-  const [days, setDays] = useState(250);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await request.get('/api/market/crowding', { params: { days } });
+      const response = await request.get('/api/market/crowding');
       setData(response.data);
       setError('');
     } catch (err) {
@@ -49,7 +55,7 @@ const AStockCrowding = () => {
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }, []);
   useEffect(() => { load(); }, [load]);
 
   const latest = data?.latest;
@@ -75,9 +81,8 @@ const AStockCrowding = () => {
 
   return <div className="crowding-page crowding-concentration">
     <div className="market-toolbar"><Space wrap>
-      <Radio.Group value={days} onChange={event => setDays(event.target.value)} options={[{ label: '1年', value: 250 }, { label: '3年', value: 750 }, { label: '5年', value: 1250 }]} optionType="button" buttonStyle="solid" />
       <Tooltip title="从本地分析库重新读取"><ReloadOutlined onClick={load} spin={loading} style={{ cursor: 'pointer' }} /></Tooltip>
-      {latest && <Text type="secondary">全市场 · 数据截至 {latest.trade_date} · 覆盖 {format(latest.stock_count, 0)} 只成交股票</Text>}
+      {latest && <Text type="secondary">全市场 · 近五年 · 数据截至 {latest.trade_date} · 覆盖 {format(latest.stock_count, 0)} 只成交股票</Text>}
     </Space></div>
     {error && <Alert type="warning" showIcon message={error} className="market-alert" />}
     {!error && !latest && !loading && <Empty description="暂无可用的全市场成交额数据" />}
@@ -89,7 +94,7 @@ const AStockCrowding = () => {
         <Col xs={24} sm={12} lg={6}><Card><Statistic title="连续极端拥挤" value={data.extreme_streak_days} suffix="个交易日" valueStyle={{ color: data.extreme_streak_days ? '#dc2626' : undefined }} /><Text type="secondary">仅统计严格高于45%的连续天数</Text></Card></Col>
       </Row>
       <Row gutter={[12, 12]}>
-        <Col xs={24}><Card title="全市场成交额集中度历史" extra={<Text type="secondary">红线为极端拥挤阈值 45%</Text>}><ReactECharts option={concentrationChart} style={{ height: 350 }} notMerge lazyUpdate /></Card></Col>
+        <Col xs={24}><Card title="全市场成交额集中度历史" extra={<Text type="secondary">近五年 · 红线为极端拥挤阈值 45%</Text>}><ReactECharts option={concentrationChart} style={{ height: 350 }} notMerge lazyUpdate /></Card></Col>
         <Col xs={24} xl={15}><Card title="最新交易日前5%成交额股票"><Table rowKey="ts_code" size="small" columns={constituentColumns} dataSource={data.constituents} pagination={{ pageSize: 20, showSizeChanger: false }} scroll={{ x: 760 }} /></Card></Col>
         <Col xs={24} xl={9}><Card title="头部成交额的行业构成" extra={<Text type="secondary">仅为前5%篮子的拆解</Text>}><ReactECharts option={industryChart} style={{ height: 260 }} notMerge lazyUpdate /><Table rowKey="industry" size="small" columns={industryColumns} dataSource={industries} pagination={false} scroll={{ x: 480 }} /></Card></Col>
       </Row>

@@ -13,12 +13,14 @@ def test_dashboard_uses_top_five_percent_turnover_concentration(tmp_path, monkey
     database_path = tmp_path / "analytics.duckdb"
     connection = duckdb.connect(str(database_path))
     connection.execute("CREATE TABLE a_stock_market_daily(trade_date DATE, ts_code VARCHAR, amount DOUBLE)")
+    connection.execute("CREATE TABLE a_stock_index_daily(ts_code VARCHAR, trade_date DATE, close DOUBLE)")
     connection.execute("CREATE TABLE a_stock_basic(ts_code VARCHAR, name VARCHAR)")
     connection.execute("CREATE TABLE a_stock_sw_member(ts_code VARCHAR, l1_name VARCHAR)")
     rows = [("2026-11-03", "000001.SZ", 100.0)] + [
         ("2026-11-03", f"{index:06d}.SZ", 5.0) for index in range(2, 21)
     ]
     connection.executemany("INSERT INTO a_stock_market_daily VALUES (?, ?, ?)", rows)
+    connection.execute("INSERT INTO a_stock_index_daily VALUES ('000001.SH', '2026-11-03', 4000.0)")
     connection.execute("INSERT INTO a_stock_basic VALUES ('000001.SZ', '头部股票')")
     connection.execute("INSERT INTO a_stock_sw_member VALUES ('000001.SZ', '银行')")
     connection.close()
@@ -27,13 +29,14 @@ def test_dashboard_uses_top_five_percent_turnover_concentration(tmp_path, monkey
         lambda: duckdb.connect(str(database_path)),
     )
 
-    result = fetch_crowding_dashboard(days=20)
+    result = fetch_crowding_dashboard()
 
     # 20 只股票的前 5% 即 1 只；100 / (100 + 19 * 5) = 51.282...
     assert result["latest"]["stock_count"] == 20
     assert result["latest"]["top_stock_count"] == 1
     assert result["latest"]["concentration_pct"] == pytest.approx(100 / 195 * 100)
     assert result["latest"]["level"] == "极端拥挤"
+    assert result["history"][-1]["shanghai_close"] == 4000.0
     assert result["constituents"] == [
         {
             "ts_code": "000001.SZ",
