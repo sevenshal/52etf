@@ -127,6 +127,31 @@ def test_sync_csi_index_weights_rescales_months_and_reports_new_symbols():
     assert again["new_symbols"] == []
 
 
+def test_sync_csi_index_weights_retries_with_trade_date_when_required():
+    import pandas as pd
+
+    weights = pd.DataFrame(
+        {
+            "index_code": ["931250.CSI"],
+            "con_code": ["02269.HK"],
+            "trade_date": ["20221031"],
+            "weight": [100.0],
+        }
+    )
+    pro = mock.Mock()
+    pro.index_weight.side_effect = [Exception("必填参数, trade_date"), weights]
+    service = HKStockBaseDataSyncService(tushare_service=mock.Mock(pro=pro))
+
+    result = service.sync_csi_index_weights(date(2022, 10, 1), date(2022, 10, 31))
+
+    assert result["snapshots"] == 1
+    assert pro.index_weight.call_count == 2
+    assert pro.index_weight.call_args_list[1].kwargs == {
+        "index_code": "931250.CSI",
+        "trade_date": "20221031",
+    }
+
+
 def test_sync_symbols_history_falls_back_to_tushare_for_yahoo_failures():
     service = HKStockBaseDataSyncService(tushare_service=mock.Mock())
     with mock.patch.object(

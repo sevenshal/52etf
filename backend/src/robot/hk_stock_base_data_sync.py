@@ -667,11 +667,32 @@ class HKStockBaseDataSyncService:
                 continue
             frames = []
             for year in range(start_date.year, end_date.year + 1):
-                frame = self.tushare.pro.index_weight(
-                    index_code=provider_code,
-                    start_date=max(start_date, date(year, 1, 1)).strftime("%Y%m%d"),
-                    end_date=min(end_date, date(year, 12, 31)).strftime("%Y%m%d"),
-                )
+                chunk_start = max(start_date, date(year, 1, 1))
+                chunk_end = min(end_date, date(year, 12, 31))
+                try:
+                    frame = self.tushare.pro.index_weight(
+                        index_code=provider_code,
+                        start_date=chunk_start.strftime("%Y%m%d"),
+                        end_date=chunk_end.strftime("%Y%m%d"),
+                    )
+                except Exception as exc:
+                    # Some deployed Tushare gateways reject the documented
+                    # start/end-date form and require trade_date.  Retrying
+                    # with the latest requested date keeps the scheduled
+                    # incremental sync running while retaining compatibility
+                    # with gateways that still support range queries.
+                    if "trade_date" not in str(exc):
+                        raise
+                    logger.warning(
+                        "Tushare index_weight range query requires trade_date; "
+                        "retrying %s for %s",
+                        provider_code,
+                        chunk_end,
+                    )
+                    frame = self.tushare.pro.index_weight(
+                        index_code=provider_code,
+                        trade_date=chunk_end.strftime("%Y%m%d"),
+                    )
                 if frame is not None and not frame.empty:
                     frames.append(frame)
             if not frames:
