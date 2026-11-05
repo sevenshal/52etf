@@ -17,8 +17,8 @@ const trendOption = rows => ({
   grid: { left: 54, right: 62, top: 38, bottom: 54 },
   xAxis: { type: 'category', data: rows.map(row => row.trade_date), boundaryGap: false, axisLabel: { hideOverlap: true } },
   yAxis: [
-    { type: 'value', name: '集中度 (%)', min: 0, axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#eef1f6' } } },
-    { type: 'value', name: '上证指数', splitLine: { show: false }, axisLabel: { formatter: value => format(value, 0) } },
+    { type: 'value', name: '集中度 (%)', scale: true, axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#eef1f6' } } },
+    { type: 'value', name: '上证指数', scale: true, splitLine: { show: false }, axisLabel: { formatter: value => format(value, 0) } },
   ],
   dataZoom: [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 12 }],
   series: [{
