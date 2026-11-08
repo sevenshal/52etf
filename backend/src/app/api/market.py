@@ -54,7 +54,7 @@ async def get_margin_leverage_dashboard(
 
 @router.get("/national-team-etf-holding")
 async def get_national_team_etf_holding_dashboard(
-    days: int = Query(1250, ge=20, le=1800),
+    days: int = Query(1250, ge=20, le=2500),
     account_id: str = Depends(valid_market_viewer),
 ):
     """核心沪深300 ETF 资产规模占成分股流通市值比例（国家队持仓代理）。"""

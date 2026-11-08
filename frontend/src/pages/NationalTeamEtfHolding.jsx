@@ -79,7 +79,7 @@ const NationalTeamEtfHolding = () => {
     <div className="market-toolbar">
       <Space wrap>
         <Radio.Group value={days} onChange={event => setDays(event.target.value)} options={[
-          { label: '1年', value: 250 }, { label: '3年', value: 750 }, { label: '5年', value: 1250 },
+          { label: '1年', value: 250 }, { label: '3年', value: 750 }, { label: '5年', value: 1250 }, { label: '10年', value: 2500 },
         ]} optionType="button" buttonStyle="solid" />
         <Tooltip title="从本地分析库读取；随A股基础数据与宽基ETF份额同步更新"><ReloadOutlined onClick={load} spin={loading} style={{ cursor: 'pointer' }} /></Tooltip>
         {latest && <Text type="secondary">数据截至 {latest.trade_date} · 四只核心ETF齐备</Text>}
