@@ -7,6 +7,20 @@ from src.robot.portfolio_copy_trader import PortfolioCopyTrader
 
 
 class PortfolioCopyTraderTest(IsolatedAsyncioTestCase):
+    async def test_futu_positions_resolve_renamed_ticker(self):
+        PortfolioCopyTrader._instance = None
+        trader = PortfolioCopyTrader()
+        trader._run_in_executor = AsyncMock(return_value=[
+            {"stock_code": "US.BKH", "position_ratio": 100000000, "current_price": 123450000000},
+        ])
+
+        positions, prices = await trader._fetch_portfolio_source_positions(
+            SimpleNamespace(platform="futu", portfolio_id="p1", api_headers={})
+        )
+
+        self.assertEqual({"HZN": 0.1}, positions)
+        self.assertEqual({"HZN": 123.45}, prices)
+
     async def test_rebalance_logs_ack_timeout_as_submitted(self):
         PortfolioCopyTrader._instance = None
         trader = PortfolioCopyTrader()

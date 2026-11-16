@@ -35,7 +35,7 @@ from ..core.services.external_trading_market import (
     normalize_external_trading_market_type,
 )
 from ..core.services.external_trading_valuation import calculate_sub_account_net_asset
-from ..core.utils import normalize_us_equity_symbol
+from ..core.utils import normalize_us_equity_symbol, resolve_us_equity_symbol_alias
 
 logger = logging.getLogger(__name__)
 
@@ -361,7 +361,7 @@ class PortfolioCopyTrader:
         if platform == 'star_wealth':
             records = await self._run_in_executor(self.get_starwealth_positions_sync, config.portfolio_id, config.api_headers or {})
             for row in records:
-                symbol = str(row["symbol"]).upper()
+                symbol = resolve_us_equity_symbol_alias(row["symbol"])
                 ratio = row["ratio_pct"] / 100.0
                 positions_map[symbol] = positions_map.get(symbol, 0) + ratio
                 if row["price"] > 0:
@@ -369,7 +369,7 @@ class PortfolioCopyTrader:
         elif platform == 'yingli':
             records = await self._run_in_executor(self.get_yingli_positions_sync, config.portfolio_id, config.api_headers or {})
             for row in records:
-                symbol = str(row["symbol"]).upper()
+                symbol = resolve_us_equity_symbol_alias(row["symbol"])
                 ratio = row["ratio_pct"] / 100.0
                 positions_map[symbol] = positions_map.get(symbol, 0) + ratio
                 if row["price"] > 0:
@@ -377,7 +377,7 @@ class PortfolioCopyTrader:
         else:
             futu_records = await self._run_in_executor(self.get_futu_positions_sync, config.portfolio_id, config.api_headers or {})
             for row in futu_records:
-                symbol = row["stock_code"].replace('US.', '').upper()
+                symbol = resolve_us_equity_symbol_alias(row["stock_code"].replace('US.', ''))
                 ratio = row["position_ratio"] / 1000000000.0
                 if ratio > 1.0:
                     ratio /= 100.0

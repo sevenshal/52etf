@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 
+from ..utils import resolve_us_equity_symbol_alias
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ORDER_SUBMISSION_TIMEOUT = float(os.getenv("IB_ORDER_SUBMISSION_TIMEOUT", "8"))
@@ -95,7 +97,7 @@ class IBKRService:
         text = " ".join(text.split())
         if re.fullmatch(r"[A-Z0-9]+ [A-Z0-9]+", text):
             text = text.replace(" ", ".")
-        return text
+        return resolve_us_equity_symbol_alias(text)
 
     @classmethod
     def _build_stock_symbol_candidates(cls, symbol: str) -> List[str]:

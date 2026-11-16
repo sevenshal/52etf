@@ -9,7 +9,20 @@ from typing import Dict, Any, Optional, List
 
 US_EQUITY_MARKET_TOKENS = {"US", "UN", "UW", "UQ", "UA", "UP", "UR", "UV"}
 INVALID_EQUITY_SYMBOL_TOKENS = {"", "-", "N/A", "NA", "NONE", "NULL", "USD", "CASH", "US DOLLAR", "US"}
+# Source portfolios can retain a former ticker briefly after an issuer changes
+# its exchange symbol.  Keep these aliases at the common US-equity boundary so
+# positions, quotes and orders all refer to the currently tradable symbol.
+US_EQUITY_SYMBOL_ALIASES = {
+    "BKH": "HZN",  # Black Hills Corporation renamed Bright Horizon Energy on 2026-11-16.
+}
 EMAIL_ADDRESS_PATTERN = re.compile(r"^[^@\s,;，；]+@[^@\s,;，；]+\.[^@\s,;，；]+$")
+
+
+def resolve_us_equity_symbol_alias(symbol: Any) -> str:
+    """Return the currently tradable US ticker for a normalized bare symbol."""
+    normalized = str(symbol or "").strip().upper()
+    return US_EQUITY_SYMBOL_ALIASES.get(normalized, normalized)
+
 
 def normalize_us_equity_symbol(value: Any) -> Optional[str]:
     """Normalize issuer/Bloomberg-style US equity tickers to LongPort symbols."""
@@ -38,7 +51,9 @@ def normalize_us_equity_symbol(value: Any) -> Optional[str]:
 
     if text in INVALID_EQUITY_SYMBOL_TOKENS or not re.fullmatch(r"[A-Z0-9.]+", text):
         return None
-    return text if text.endswith(".US") else f"{text}.US"
+    ticker = text[:-3] if text.endswith(".US") else text
+    ticker = resolve_us_equity_symbol_alias(ticker)
+    return f"{ticker}.US"
 
 def read_json_file(file_path: str) -> Dict[str, Any]:
     """读取JSON文件"""

@@ -25,7 +25,7 @@ class _FakeIB:
         if contract.symbol == "BRK B":
             contract.conId = 12345
             return [contract]
-        if contract.symbol == "AAPL":
+        if contract.symbol in {"AAPL", "HZN"}:
             contract.conId = 1
             return [contract]
         return []
@@ -85,6 +85,15 @@ class IBKRServiceAsyncTest(IsolatedAsyncioTestCase):
         self.assertEqual(["BRK.B", "BRK B"], service.ib.qualified_symbols)
         self.assertEqual("BRK B", trade.contract.symbol)
         self.assertEqual(1, len(service.ib.place_order_calls))
+
+    async def test_place_market_order_resolves_renamed_ticker_before_qualifying(self):
+        service = IBKRService(port=4001)
+        service.ib = _FakeIB()
+        service.connect = AsyncMock()
+
+        await service.place_market_order("BKH.US", "BUY", 1)
+
+        self.assertEqual(["HZN"], service.ib.qualified_symbols)
 
     async def test_place_market_order_raises_when_contract_cannot_be_qualified(self):
         service = IBKRService(port=4001)
