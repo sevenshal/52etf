@@ -31,6 +31,7 @@ from ..core.database import (
     AStockFearStrategyConfig,
     AStockFearStrategyLog,
     AStockFearStrategyState,
+    AStockFearStrategyStateNotification,
     ETFFearGreedCloneHistory,
     get_db_ctx,
 )
@@ -691,6 +692,7 @@ class AStockFearStrategyTrader:
                 state.pending_sell_signal_date = getattr(state_values, "pending_sell_signal_date", None)
                 state.pending_entry_target = getattr(state_values, "pending_entry_target", None)
                 state.pending_entry_signal_date = getattr(state_values, "pending_entry_signal_date", None)
+                state.notification_states = getattr(state_values, "notification_states", None)
 
                 db.add(
                     AStockFearStrategyLog(
@@ -772,6 +774,98 @@ class AStockFearStrategyTrader:
             f"A股情绪量能策略调仓提醒: {action_label} {symbol} {masked_account_id}#{config_id}",
             body,
         )
+
+    def _claim_state_notification(self, *, config_id: int, event: Dict[str, Any]) -> Optional[int]:
+        """Create/reclaim one durable state notification; return its row id when it should be sent."""
+        def claim():
+            with get_db_ctx() as db:
+                row = (
+                    db.query(AStockFearStrategyStateNotification)
+                    .filter(
+                        AStockFearStrategyStateNotification.config_id == config_id,
+                        AStockFearStrategyStateNotification.event_type == event["event_type"],
+                        AStockFearStrategyStateNotification.event_key == event["event_key"],
+                    )
+                    .first()
+                )
+                if row is None:
+                    row = AStockFearStrategyStateNotification(
+                        config_id=config_id,
+                        event_type=event["event_type"],
+                        event_key=event["event_key"],
+                        symbol=event["symbol"],
+                        signal_date=event.get("signal_date"),
+                        payload=event,
+                    )
+                    db.add(row)
+                    db.flush()
+                if row.sent_at is not None:
+                    return None
+                return int(row.id)
+
+        return self._write_main_db_with_retry("claim A股 fear strategy state notification", claim)
+
+    def _mark_state_notification_sent(self, notification_id: int):
+        def mark_sent():
+            with get_db_ctx() as db:
+                row = db.get(AStockFearStrategyStateNotification, notification_id)
+                if row and row.sent_at is None:
+                    row.sent_at = datetime.now()
+
+        self._write_main_db_with_retry("mark A股 fear strategy state notification sent", mark_sent)
+
+    def _send_state_notifications(
+        self,
+        *,
+        config_id: int,
+        masked_account_id: str,
+        events: List[Dict[str, Any]],
+    ):
+        for event in events:
+            try:
+                notification_id = self._claim_state_notification(config_id=config_id, event=event)
+            except Exception as exc:
+                # 通知失败不能影响已完成的交易状态机或将本轮执行误报为失败。
+                logger.error("A股 fear strategy state notification claim failed: %s", exc, exc_info=True)
+                continue
+            if notification_id is None:
+                continue
+            body = "\n".join([
+                "A股情绪量能策略状态发生变化。",
+                "",
+                f"配置ID: {config_id}",
+                f"账号: {masked_account_id}",
+                f"标的: {event['symbol']}",
+                f"状态: {event['title']}",
+                f"信号日: {event.get('signal_date') or '-'}",
+                "",
+                event["detail"],
+                f"通知时间: {datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')} (Asia/Shanghai)",
+            ])
+            try:
+                sent = send_configured_email(
+                    "a_stock_fear_strategy_state_signal",
+                    f"A股情绪量能策略状态提醒: {event['title']} {event['symbol']} {masked_account_id}#{config_id}",
+                    body,
+                )
+                if sent:
+                    self._mark_state_notification_sent(notification_id)
+            except Exception as exc:
+                logger.error("A股 fear strategy state notification send failed: %s", exc, exc_info=True)
+
+    @staticmethod
+    def _state_notification_transitions(
+        previous_states: Optional[Dict[str, str]],
+        current_events: Dict[str, Dict[str, Any]],
+    ) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+        """Return persisted fingerprints and only newly-entered/changed states."""
+        previous = previous_states or {}
+        current = {state_id: str(event["fingerprint"]) for state_id, event in current_events.items()}
+        events = [
+            event for state_id, event in current_events.items()
+            if previous.get(state_id) != current[state_id]
+        ]
+        return current, events
 
     async def run_config_once(
         self,
@@ -867,6 +961,7 @@ class AStockFearStrategyTrader:
                     pending_sell_signal_date=getattr(state_row, "pending_sell_signal_date", None),
                     pending_entry_target=getattr(state_row, "pending_entry_target", None),
                     pending_entry_signal_date=getattr(state_row, "pending_entry_signal_date", None),
+                    notification_states=getattr(state_row, "notification_states", None) or {},
                 )
 
             # 已完成数据：恐贪 + ETF 日线（含量比）
@@ -1392,6 +1487,7 @@ class AStockFearStrategyTrader:
                 sub3_signal = confirmed_target == "sub3"
 
             # ---- 状态机：持有主/持有候补/空仓（use_swap=对称双轮动，否则主辅跷跷板） ----
+            shrink_sell_ok = True
             if log_action != "SKIP" and can_trade and shares > 0 and holding:
                 # 缩量卖出确认（仅贪即卖 trailing=0 路径生效）：sell_shrink_z>0 时需持仓标的前一交易日缩量
                 shrink_sell_ok = True
@@ -1847,6 +1943,83 @@ class AStockFearStrategyTrader:
                 if sub3_symbol:
                     valuation_parts.append(f"sub3={_format_valuation(sub3_valuation)}")
                 log_message += f" | valuation_position_{valuation_window}={','.join(valuation_parts)}"
+
+            # 非成交状态只在“进入/对象改变”时通知一次；每日重复检查不会发信。
+            state_event_candidates: Dict[str, Dict[str, Any]] = {}
+            leg_symbols = {"main": symbol, "sub": sub_symbol, "sub2": sub2_symbol, "sub3": sub3_symbol}
+            leg_labels = {"main": fear_label, "sub": sub_fear_label, "sub2": sub2_fear_label, "sub3": sub3_fear_label}
+            leg_scores = {"main": fear_score, "sub": sub_fear_score, "sub2": sub2_fear_score, "sub3": sub3_fear_score}
+            leg_volumes = {"main": volume_ratio, "sub": sub_volume_ratio, "sub2": sub2_volume_ratio, "sub3": sub3_volume_ratio}
+            gated_signals = {"main": main_signal, "sub": sub_signal, "sub2": sub2_signal, "sub3": sub3_signal}
+            gated_greedy = {"main": main_greedy, "sub": sub_greedy, "sub2": sub2_greedy, "sub3": sub3_greedy}
+            if log_action != "SKIP" and not trade_action:
+                pending_target = getattr(state, "pending_entry_target", None)
+                pending_date = getattr(state, "pending_entry_signal_date", None)
+                if pending_target and pending_date and leg_symbols.get(pending_target):
+                    pending_symbol = leg_symbols[pending_target]
+                    state_event_candidates["entry_wait"] = {
+                        "event_type": "entry_wait", "event_key": f"{pending_target}:{pending_date.isoformat()}",
+                        "fingerprint": f"{pending_target}:{pending_date.isoformat()}", "symbol": pending_symbol,
+                        "signal_date": pending_date, "title": "进入买入/换仓等待止跌",
+                        "detail": (
+                            f"{entry_wait_message or '恐慌放量信号已挂起'}。\n"
+                            f"目标恐贪来源: {leg_labels[pending_target]}\n"
+                            f"恐贪分数: {leg_scores[pending_target]:.2f}\n"
+                            f"量比: {leg_volumes[pending_target]:.4f}" if leg_volumes[pending_target] is not None else
+                            f"{entry_wait_message or '恐慌放量信号已挂起'}。\n目标恐贪来源: {leg_labels[pending_target]}\n恐贪分数: {leg_scores[pending_target]:.2f}\n量比: -"
+                        ),
+                    }
+                if sell_ma5_wait_message and holding and holding_symbol and state.pending_sell_signal_date:
+                    state_event_candidates["sell_ma5_wait"] = {
+                        "event_type": "sell_ma5_wait",
+                        "event_key": f"{holding}:{state.pending_sell_signal_date.isoformat()}",
+                        "fingerprint": f"{holding}:{state.pending_sell_signal_date.isoformat()}", "symbol": holding_symbol,
+                        "signal_date": state.pending_sell_signal_date, "title": "进入卖出等待跌破MA5",
+                        "detail": (
+                            f"{sell_ma5_wait_message}\n恐贪来源: {leg_labels[holding]}\n"
+                            f"恐贪分数: {leg_scores[holding]:.2f}\n估值点位: {_format_valuation(leg_valuations.get(holding))}"
+                        ),
+                    }
+                if valuation_gate_enabled:
+                    if shares <= 0:
+                        for leg in ("main", "sub", "sub2", "sub3"):
+                            if raw_signals[leg] and not gated_signals[leg] and leg_symbols.get(leg):
+                                state_event_candidates[f"buy_valuation:{leg}"] = {
+                                    "event_type": "buy_valuation_blocked", "event_key": f"{leg}:{signal_date.isoformat()}",
+                                    "fingerprint": leg, "symbol": leg_symbols[leg], "signal_date": signal_date,
+                                    "title": "买入信号被估值闸门拦截",
+                                    "detail": (
+                                        f"{leg_labels[leg]} 已满足恐慌放量买入条件，但估值点位 "
+                                        f"{_format_valuation(leg_valuations.get(leg))} > {valuation_buy_max:g}，继续空仓。\n"
+                                        f"恐贪分数: {leg_scores[leg]:.2f}\n量比: {leg_volumes[leg]:.4f}" if leg_volumes[leg] is not None else
+                                        f"{leg_labels[leg]} 已满足恐慌放量买入条件，但估值点位 {_format_valuation(leg_valuations.get(leg))} > {valuation_buy_max:g}，继续空仓。"
+                                    ),
+                                }
+                    elif holding and raw_greedy[holding] and not gated_greedy[holding] and holding_symbol:
+                        state_event_candidates["sell_valuation"] = {
+                            "event_type": "sell_valuation_blocked", "event_key": f"{holding}:{signal_date.isoformat()}",
+                            "fingerprint": holding, "symbol": holding_symbol, "signal_date": signal_date,
+                            "title": "卖出信号被估值闸门拦截",
+                            "detail": (
+                                f"{leg_labels[holding]} 已到贪婪卖出阈值，但估值点位 "
+                                f"{_format_valuation(leg_valuations.get(holding))} < {valuation_sell_min:g}，继续持有。\n"
+                                f"恐贪分数: {leg_scores[holding]:.2f}\n强制卖出贪恐阈值: {valuation_force_sell_greed:g}"
+                            ),
+                        }
+                if (
+                    holding and holding_symbol and raw_greedy[holding] and gated_greedy[holding]
+                    and float(getattr(config, "sell_shrink_z", -1.0) or -1.0) > 0
+                    and not shrink_sell_ok and not sell_ma5_wait_message
+                ):
+                    state_event_candidates["sell_shrink_wait"] = {
+                        "event_type": "sell_shrink_wait", "event_key": f"{holding}:{signal_date.isoformat()}",
+                        "fingerprint": holding, "symbol": holding_symbol, "signal_date": signal_date,
+                        "title": "进入卖出等待缩量确认",
+                        "detail": f"{leg_labels[holding]} 已到贪婪卖出阈值，但尚未满足缩量确认，继续持有。",
+                    }
+            state.notification_states, state_events = self._state_notification_transitions(
+                getattr(state, "notification_states", None), state_event_candidates,
+            )
             self._persist_run_result(
                 config_id=config_id,
                 account_id=config.account_id,
@@ -1863,6 +2036,9 @@ class AStockFearStrategyTrader:
                 volume_ratio=trade_vr,
                 position_ratio_before=position_ratio_before,
                 position_ratio_after=position_ratio_after,
+            )
+            self._send_state_notifications(
+                config_id=config_id, masked_account_id=masked_account_id, events=state_events,
             )
             logger.info("A股 fear strategy %s config=%s result=%s msg=%s", masked_account_id, config_id, trade_action or "CHECK", trade_message)
             if trade_action:

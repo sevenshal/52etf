@@ -1286,7 +1286,27 @@ class AStockFearStrategyState(Base):
     # 已选中的买入/换仓目标，等待两日不创新低确认；避免重启后丢失挂单。
     pending_entry_target = Column(String(16))
     pending_entry_signal_date = Column(Date)
+    # 当前已通知的非成交状态指纹；状态解除后删除，下一次进入才能再次通知。
+    notification_states = Column(JSON)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class AStockFearStrategyStateNotification(Base):
+    """A股情绪量能策略状态邮件的持久化去重记录。"""
+    __tablename__ = "a_stock_fear_strategy_state_notifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_id = Column(Integer, ForeignKey("a_stock_fear_strategy_configs.id"), index=True, nullable=False)
+    event_type = Column(String(48), nullable=False)
+    event_key = Column(String(256), nullable=False)
+    symbol = Column(String(32), nullable=False)
+    signal_date = Column(Date)
+    payload = Column(JSON)
+    sent_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("config_id", "event_type", "event_key", name="uniq_a_stock_fear_state_notification"),
+    )
 
 
 class AStockFearStrategyLog(Base):
@@ -2789,6 +2809,7 @@ def ensure_a_stock_fear_strategy_schema():
         for column_name, column_type in [
             ("pending_entry_target", "VARCHAR(16)"),
             ("pending_entry_signal_date", "DATE"),
+            ("notification_states", "JSON"),
         ]:
             if state_columns and column_name not in state_columns:
                 conn.execute(text(

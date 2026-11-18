@@ -83,3 +83,22 @@ def test_a_stock_fear_rebalance_notification_is_registered_and_includes_signal_d
     assert "信号日: 2026-10-22" in calls[0]["body"]
     assert "信号日收盘价: 1.2000" in calls[0]["body"]
     assert "调仓原因: 订单已同步" in calls[0]["body"]
+
+
+def test_a_stock_fear_state_notification_scenario_and_transition_deduplication():
+    assert "a_stock_fear_strategy_state_signal" in EMAIL_SCENARIO_BY_KEY
+
+    event = {
+        "event_type": "entry_wait", "event_key": "sub:2026-11-14", "fingerprint": "sub:2026-11-14",
+        "symbol": "588000.SH", "signal_date": date(2026, 11, 14),
+        "title": "进入买入/换仓等待止跌", "detail": "等待连续两日不创新低",
+    }
+    current, first = AStockFearStrategyTrader._state_notification_transitions({}, {"entry_wait": event})
+    assert first == [event]
+    same_current, repeated = AStockFearStrategyTrader._state_notification_transitions(current, {"entry_wait": event})
+    assert same_current == current
+    assert repeated == []
+    cleared, resumed = AStockFearStrategyTrader._state_notification_transitions(current, {})
+    assert cleared == {}
+    _, reentered = AStockFearStrategyTrader._state_notification_transitions(cleared, {"entry_wait": event})
+    assert reentered == [event]

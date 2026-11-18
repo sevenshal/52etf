@@ -76,6 +76,12 @@ EMAIL_SCENARIOS = [
         "description": "A股 ETF 情绪量能实盘策略实际产生买入、卖出或换仓订单后发送的提醒。",
     },
     {
+        "key": "a_stock_fear_strategy_state_signal",
+        "name": "A股 ETF 情绪量能策略状态提醒",
+        "category": "交易",
+        "description": "A股 ETF 情绪量能实盘策略进入等待止跌、等待卖出确认或估值闸门拦截状态时发送的单次提醒。",
+    },
+    {
         "key": "factor_live_trading_error",
         "name": "因子线上交易异常",
         "category": "交易",

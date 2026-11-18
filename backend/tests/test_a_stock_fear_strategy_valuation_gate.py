@@ -224,6 +224,6 @@ def test_schema_upgrade_adds_sub3_and_sell_ma5_columns(tmp_path):
         "entry_two_close_confirm", "entry_two_close_confirm_main", "entry_two_close_confirm_sub",
         "entry_two_close_confirm_sub2", "entry_two_close_confirm_sub3",
     } <= config_columns
-    assert {"pending_sell_signal_date", "pending_entry_target", "pending_entry_signal_date"} <= state_columns
+    assert {"pending_sell_signal_date", "pending_entry_target", "pending_entry_signal_date", "notification_states"} <= state_columns
     # 存量表补齐新列后：新右侧确认默认仅科创50开启；没有第三候补，卖出不等 MA5。
     assert tuple(row) == (None, 20.0, 1.3, 80.0, 80.0, 75.0, "off", 0, 0, 1, 0, 0)
